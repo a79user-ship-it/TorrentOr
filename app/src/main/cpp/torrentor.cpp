@@ -639,6 +639,51 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
     }
 }
 
+
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
+        JNIEnv* env,
+        jobject,
+        jstring path,
+        jstring savePath) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensureSession(toString(env, savePath));
+
+    std::string torrentPath = toString(env, path);
+
+    lt::error_code ec;
+    auto info =
+            std::make_shared<lt::torrent_info>(
+                    torrentPath,
+                    ec
+            );
+
+    if (ec) return;
+
+    std::string hash = getTorrentInfoHashSafe(*info);
+
+    if (hasHashAlready(hash)) {
+        return;
+    }
+
+    lt::add_torrent_params params;
+    params.ti = info;
+    params.save_path = g_savePath;
+    params.flags |= lt::torrent_flags::paused;
+
+    auto handle = g_session->add_torrent(params, ec);
+
+    if (!ec && handle.is_valid()) {
+        handle.pause();
+
+        g_handles.push_back(handle);
+        g_pausedHandles.push_back(true);
+    }
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentFiles(
@@ -744,6 +789,79 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
         g_handles.push_back(handle);
         g_pausedHandles.push_back(g_pausedAll);
+    }
+}
+
+
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
+        JNIEnv* env,
+        jobject,
+        jstring path,
+        jstring savePath,
+        jstring selectedIndexes) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ensureSession(toString(env, savePath));
+
+    std::string torrentPath = toString(env, path);
+    std::string selected = toString(env, selectedIndexes);
+
+    lt::error_code ec;
+    auto info =
+            std::make_shared<lt::torrent_info>(
+                    torrentPath,
+                    ec
+            );
+
+    if (ec) return;
+
+    std::string hash = getTorrentInfoHashSafe(*info);
+
+    if (hasHashAlready(hash)) {
+        return;
+    }
+
+    lt::add_torrent_params params;
+    params.ti = info;
+    params.save_path = g_savePath;
+    params.flags |= lt::torrent_flags::paused;
+
+    int fileCount = info->files().num_files();
+
+    std::vector<lt::download_priority_t> priorities(
+            fileCount,
+            lt::dont_download
+    );
+
+    std::stringstream ss(selected);
+    std::string token;
+
+    while (std::getline(ss, token, ',')) {
+        if (token.empty()) continue;
+
+        try {
+            int fileIndex = std::stoi(token);
+
+            if (fileIndex >= 0 && fileIndex < fileCount) {
+                priorities[fileIndex] = lt::default_priority;
+            }
+        } catch (...) {
+            // Ignore bad index
+        }
+    }
+
+    params.file_priorities = priorities;
+
+    auto handle = g_session->add_torrent(params, ec);
+
+    if (!ec && handle.is_valid()) {
+        handle.pause();
+
+        g_handles.push_back(handle);
+        g_pausedHandles.push_back(true);
     }
 }
 
@@ -1039,6 +1157,42 @@ Java_com_example_torrentor_TorrentNative_removeTorrent(
 }
 
 extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_removeAllTorrents(
+        JNIEnv*,
+        jobject,
+        jboolean deleteFiles) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (g_session) {
+        for (auto& handle : g_handles) {
+            if (!handle.is_valid()) {
+                continue;
+            }
+
+            try {
+                if (deleteFiles) {
+                    g_session->remove_torrent(
+                            handle,
+                            lt::session::delete_files
+                    );
+                } else {
+                    g_session->remove_torrent(handle);
+                }
+            } catch (...) {
+                // Ignore bad handle and continue clearing the rest.
+            }
+        }
+    }
+
+    g_handles.clear();
+    g_pausedHandles.clear();
+    g_pausedAll = false;
+}
+
+
+extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentFilesByIndex(
         JNIEnv* env,
@@ -1083,6 +1237,88 @@ Java_com_example_torrentor_TorrentNative_getTorrentFilesByIndex(
 
     return env->NewStringUTF(output.c_str());
 }
+
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentFileProgress(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    auto info = handle.torrent_file();
+
+    if (!info) {
+        return env->NewStringUTF("Metadata not ready");
+    }
+
+    std::vector<std::int64_t> progress;
+
+    try {
+        handle.file_progress(progress);
+    } catch (...) {
+        return env->NewStringUTF("Progress not ready");
+    }
+
+    std::string output;
+    auto const& files = info->files();
+
+    int fileCount = files.num_files();
+
+    for (int f = 0; f < fileCount; ++f) {
+        long long done = 0;
+
+        if (f < static_cast<int>(progress.size())) {
+            done = static_cast<long long>(progress[f]);
+        }
+
+        long long total = static_cast<long long>(files.file_size(f));
+
+        int percent = 0;
+
+        if (total > 0) {
+            percent = static_cast<int>(
+                    (static_cast<double>(done) /
+                     static_cast<double>(total)) * 100.0
+            );
+        }
+
+        if (percent < 0) percent = 0;
+        if (percent > 100) percent = 100;
+
+        output += std::to_string(f);
+        output += "|";
+        output += files.file_path(f);
+        output += "|";
+        output += std::to_string(done);
+        output += "|";
+        output += std::to_string(total);
+        output += "|";
+        output += std::to_string(percent);
+        output += "\n";
+    }
+
+    if (output.empty()) {
+        output = "No files";
+    }
+
+    return env->NewStringUTF(output.c_str());
+}
+
 
 extern "C"
 JNIEXPORT jstring JNICALL

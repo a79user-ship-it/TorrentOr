@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
 
@@ -47,6 +48,8 @@ class TorrentService : Service() {
         val filePath = intent?.getStringExtra("TORRENT_PATH")
         val selectedIndexes = intent?.getStringExtra("SELECTED_INDEXES")
         val action = intent?.getStringExtra("ACTION")
+        val actionHash = intent?.getStringExtra("TORRENT_HASH") ?: ""
+        val actionMagnet = intent?.getStringExtra("TORRENT_MAGNET") ?: ""
 
         when {
 
@@ -59,16 +62,58 @@ class TorrentService : Service() {
             }
 
             action == "CLEAR_SAVED_TORRENTS" -> {
-                clearSavedTorrents()
-                clearTorrentDates()
+                // Legacy action disabled for safety.
+                // Use CLEAN_DELETED_SAVED_TORRENTS instead.
+                updateNotification("Clear saved torrents disabled for safety")
+            }
+
+            action == "CLEAN_DELETED_SAVED_TORRENTS" -> {
+                cleanDeletedSavedTorrentsOnly()
+                updateNotification("Old deleted torrents cleaned")
             }
 
             action == "PAUSE_ALL" -> {
+                saveAllCurrentPausedHashes()
                 TorrentNative.pauseAll()
             }
 
             action == "RESUME_ALL" -> {
                 TorrentNative.resumeAll()
+                clearAllPausedHashes()
+            }
+
+            action == "PAUSE_TORRENT" -> {
+                val index = intent.getIntExtra("TORRENT_INDEX", -1)
+
+                if (index > 0) {
+                    val hash = getBestHashForIndex(index, actionHash, actionMagnet)
+
+                    TorrentNative.pauseTorrent(index)
+
+                    if (isGoodHash(hash)) {
+                        savePausedHash(hash)
+                        Log.d("TorrentOr", "PAUSE saved hash=$hash index=$index")
+                    } else {
+                        Log.d("TorrentOr", "PAUSE failed bad hash index=$index hash=$hash")
+                    }
+                }
+            }
+
+            action == "RESUME_TORRENT" -> {
+                val index = intent.getIntExtra("TORRENT_INDEX", -1)
+
+                if (index > 0) {
+                    val hash = getBestHashForIndex(index, actionHash, actionMagnet)
+
+                    TorrentNative.resumeTorrent(index)
+
+                    if (isGoodHash(hash)) {
+                        removePausedHash(hash)
+                        Log.d("TorrentOr", "RESUME removed paused hash=$hash index=$index")
+                    } else {
+                        Log.d("TorrentOr", "RESUME bad hash index=$index hash=$hash")
+                    }
+                }
             }
 
             action == "REMOVE_TORRENT" -> {
@@ -76,20 +121,22 @@ class TorrentService : Service() {
                 val deleteFiles = intent.getBooleanExtra("DELETE_FILES", false)
 
                 if (index > 0) {
-                    val hashBeforeRemove = try {
-                        TorrentNative.getTorrentHash(index)
-                    } catch (e: Throwable) {
-                        ""
-                    }
+                    val hashBeforeRemove = getBestHashForIndex(index, actionHash, actionMagnet)
 
                     TorrentNative.removeTorrent(index, deleteFiles)
 
                     if (isGoodHash(hashBeforeRemove)) {
+                        saveDeletedHash(hashBeforeRemove)
+                        removePausedHash(hashBeforeRemove)
                         removeSavedTorrentByHash(hashBeforeRemove)
                         removeTorrentDates(hashBeforeRemove)
+                        Log.d("TorrentOr", "DELETE saved hash=$hashBeforeRemove index=$index deleteFiles=$deleteFiles")
                     } else {
                         removeSavedTorrent(index)
+                        Log.d("TorrentOr", "DELETE bad hash index=$index hash=$hashBeforeRemove")
                     }
+
+                    cleanDeletedSavedTorrentsOnly()
                 }
             }
 
@@ -97,13 +144,17 @@ class TorrentService : Service() {
                 val normalizedMagnet = normalizeMagnet(magnet)
                 val hash = extractHashFromMagnet(normalizedMagnet)
 
+                if (isGoodHash(hash)) {
+                    removeDeletedHash(hash)
+                    removePausedHash(hash)
+                }
+
                 if (
                     hash.isNotBlank() &&
                     TorrentNative.hasTorrentHash(hash)
                 ) {
                     saveAddedDateIfMissing(hash)
                     saveMagnetEntry(normalizedMagnet)
-                    TorrentNative.resumeAll()
                 } else {
                     TorrentNative.addMagnet(
                         normalizedMagnet,
@@ -112,7 +163,6 @@ class TorrentService : Service() {
 
                     saveAddedDateIfMissing(hash)
                     saveMagnetEntry(normalizedMagnet)
-                    TorrentNative.resumeAll()
                 }
             }
 
@@ -130,10 +180,12 @@ class TorrentService : Service() {
                     return START_STICKY
                 }
 
+                removeDeletedHash(hash)
+                removePausedHash(hash)
+
                 if (TorrentNative.hasTorrentHash(hash)) {
                     saveAddedDateIfMissing(hash)
                     saveFileEntry(hash, filePath, selected)
-                    TorrentNative.resumeAll()
                 } else {
                     if (selected.isNotBlank()) {
                         TorrentNative.addTorrentFileSelected(
@@ -150,7 +202,6 @@ class TorrentService : Service() {
 
                     saveAddedDateIfMissing(hash)
                     saveFileEntry(hash, filePath, selected)
-                    TorrentNative.resumeAll()
                 }
             }
         }
@@ -181,18 +232,31 @@ class TorrentService : Service() {
                     val magnet = parts.getOrNull(1) ?: ""
                     val hash = extractHashFromMagnet(magnet)
 
+                    if (isDeletedHash(hash)) {
+                        continue
+                    }
+
                     if (magnet.isNotBlank()) {
                         if (
                             hash.isBlank() ||
                             !TorrentNative.hasTorrentHash(hash)
                         ) {
-                            TorrentNative.addMagnet(
-                                magnet,
-                                savePath
-                            )
+                            if (isPausedHash(hash)) {
+                                TorrentNative.addMagnetPaused(
+                                    magnet,
+                                    savePath
+                                )
+                            } else {
+                                TorrentNative.addMagnet(
+                                    magnet,
+                                    savePath
+                                )
+                            }
                         }
 
                         saveAddedDateIfMissing(hash)
+                        Log.d("TorrentOr", "RESTORE magnet hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
+                        applySavedPauseState(hash)
 
                         val cleaned = "MAGNET||$magnet"
                         if (!cleanedEntries.contains(cleaned)) {
@@ -209,23 +273,44 @@ class TorrentService : Service() {
                         val path = parsed.path
                         val selected = parsed.selected
 
+                        if (isDeletedHash(hash)) {
+                            continue
+                        }
+
                         if (File(path).exists()) {
                             if (!TorrentNative.hasTorrentHash(hash)) {
-                                if (selected.isNotBlank()) {
-                                    TorrentNative.addTorrentFileSelected(
-                                        path,
-                                        savePath,
-                                        selected
-                                    )
+                                if (isPausedHash(hash)) {
+                                    if (selected.isNotBlank()) {
+                                        TorrentNative.addTorrentFileSelectedPaused(
+                                            path,
+                                            savePath,
+                                            selected
+                                        )
+                                    } else {
+                                        TorrentNative.addTorrentFilePaused(
+                                            path,
+                                            savePath
+                                        )
+                                    }
                                 } else {
-                                    TorrentNative.addTorrentFile(
-                                        path,
-                                        savePath
-                                    )
+                                    if (selected.isNotBlank()) {
+                                        TorrentNative.addTorrentFileSelected(
+                                            path,
+                                            savePath,
+                                            selected
+                                        )
+                                    } else {
+                                        TorrentNative.addTorrentFile(
+                                            path,
+                                            savePath
+                                        )
+                                    }
                                 }
                             }
 
                             saveAddedDateIfMissing(hash)
+                            Log.d("TorrentOr", "RESTORE file hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
+                            applySavedPauseState(hash)
 
                             val cleaned = "FILE||$hash||$path||$selected"
                             if (!cleanedEntries.contains(cleaned)) {
@@ -238,7 +323,10 @@ class TorrentService : Service() {
         }
 
         saveAllEntries(cleanedEntries)
-        TorrentNative.resumeAll()
+
+        handler.postDelayed({
+            applyAllSavedPausedStatesOnce()
+        }, 10000L)
     }
 
     private data class FileEntry(
@@ -371,18 +459,21 @@ class TorrentService : Service() {
     }
 
     private fun entryMatchesHash(entry: String, hash: String): Boolean {
+        val target = normalizeHashForKey(hash)
+        if (target.isBlank()) return false
+
         val parts = entry.split("||", limit = 4)
 
         return when (parts.getOrNull(0)) {
             "MAGNET" -> {
                 val magnet = parts.getOrNull(1) ?: ""
-                extractHashFromMagnet(magnet) == hash
+                normalizeHashForKey(extractHashFromMagnet(magnet)) == target
             }
 
             "FILE" -> {
                 when {
                     parts.size >= 4 -> {
-                        parts.getOrNull(1) == hash
+                        normalizeHashForKey(parts.getOrNull(1) ?: "") == target
                     }
 
                     parts.size == 3 -> {
@@ -396,7 +487,7 @@ class TorrentService : Service() {
                                 ""
                             }
 
-                            oldHash == hash
+                            normalizeHashForKey(oldHash) == target
                         }
                     }
 
@@ -439,6 +530,335 @@ class TorrentService : Service() {
         }
 
         saveAllEntries(entries)
+    }
+
+    private fun getBestHashForIndex(
+        index: Int,
+        preferredHash: String = "",
+        preferredMagnet: String = ""
+    ): String {
+        if (isGoodHash(preferredHash)) {
+            return preferredHash
+        }
+
+        val magnetHash = extractHashFromMagnet(preferredMagnet)
+        if (isGoodHash(magnetHash)) {
+            return magnetHash
+        }
+
+        val nativeHash = try {
+            TorrentNative.getTorrentHash(index)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (isGoodHash(nativeHash)) {
+            return nativeHash
+        }
+
+        val nativeMagnetHash = try {
+            extractHashFromMagnet(TorrentNative.getTorrentMagnet(index))
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (isGoodHash(nativeMagnetHash)) {
+            return nativeMagnetHash
+        }
+
+        val savedHash = getHashFromSavedEntryAtIndex(index)
+        if (isGoodHash(savedHash)) {
+            return savedHash
+        }
+
+        return ""
+    }
+
+    private fun getHashFromSavedEntryAtIndex(index: Int): String {
+        val entries = getSavedEntries()
+        val i = index - 1
+
+        if (i < 0 || i >= entries.size) {
+            return ""
+        }
+
+        return getHashFromSavedEntry(entries[i])
+    }
+
+    private fun saveDeletedHash(hash: String) {
+        if (!isGoodHash(hash)) return
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        val prefs = getSharedPreferences("deleted_torrents", MODE_PRIVATE)
+
+        prefs.edit()
+            .putBoolean(key, true)
+            .apply()
+    }
+
+    private fun removeDeletedHash(hash: String) {
+        if (!isGoodHash(hash)) return
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        val prefs = getSharedPreferences("deleted_torrents", MODE_PRIVATE)
+
+        prefs.edit()
+            .remove(key)
+            .apply()
+    }
+
+    private fun isDeletedHash(hash: String): Boolean {
+        if (!isGoodHash(hash)) return false
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return false
+
+        val prefs = getSharedPreferences("deleted_torrents", MODE_PRIVATE)
+
+        return prefs.getBoolean(key, false)
+    }
+
+    private fun savePausedHash(hash: String) {
+        if (!isGoodHash(hash)) return
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        val prefs = getSharedPreferences("paused_torrents", MODE_PRIVATE)
+
+        prefs.edit()
+            .putBoolean(key, true)
+            .apply()
+    }
+
+    private fun removePausedHash(hash: String) {
+        if (!isGoodHash(hash)) return
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        val prefs = getSharedPreferences("paused_torrents", MODE_PRIVATE)
+
+        prefs.edit()
+            .remove(key)
+            .apply()
+    }
+
+    private fun isPausedHash(hash: String): Boolean {
+        if (!isGoodHash(hash)) return false
+
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return false
+
+        val prefs = getSharedPreferences("paused_torrents", MODE_PRIVATE)
+
+        return prefs.getBoolean(key, false)
+    }
+
+    private fun clearAllPausedHashes() {
+        val prefs = getSharedPreferences("paused_torrents", MODE_PRIVATE)
+
+        prefs.edit()
+            .clear()
+            .apply()
+    }
+
+    private fun saveAllCurrentPausedHashes() {
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (
+            status.isBlank() ||
+            status == "No torrents" ||
+            status == "No active torrents"
+        ) {
+            return
+        }
+
+        val lines = status.lines().filter { it.isNotBlank() }
+
+        for (i in lines.indices) {
+            val hash = getBestHashForIndex(i + 1)
+
+            if (isGoodHash(hash)) {
+                savePausedHash(hash)
+            }
+        }
+    }
+
+    private fun applySavedPauseState(hash: String) {
+        if (!isPausedHash(hash)) {
+            return
+        }
+
+        val index = findActiveTorrentIndexByHash(hash)
+
+        if (index > 0) {
+            try {
+                TorrentNative.pauseTorrent(index)
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    private fun findActiveTorrentIndexByHash(hash: String): Int {
+        if (!isGoodHash(hash)) return -1
+
+        val target = normalizeHashForKey(hash)
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (
+            status.isBlank() ||
+            status == "No torrents" ||
+            status == "No active torrents"
+        ) {
+            return -1
+        }
+
+        val lines = status.lines().filter { it.isNotBlank() }
+
+        for (i in lines.indices) {
+            val currentHash = getBestHashForIndex(i + 1)
+
+            if (
+                isGoodHash(currentHash) &&
+                normalizeHashForKey(currentHash) == target
+            ) {
+                return i + 1
+            }
+        }
+
+        return -1
+    }
+
+
+    private fun applyAllSavedPausedStatesOnce() {
+        val prefs = getSharedPreferences("paused_torrents", MODE_PRIVATE)
+
+        for ((hash, value) in prefs.all) {
+            if (value == true) {
+                Log.d("TorrentOr", "REAPPLY paused hash=$hash")
+                applySavedPauseState(hash)
+            }
+        }
+    }
+
+    private fun cleanDeletedSavedTorrentsOnly() {
+        val entries = getSavedEntries()
+
+        if (entries.isEmpty()) {
+            return
+        }
+
+        val activeHashes = getActiveTorrentHashes()
+        val cleanedEntries = mutableListOf<String>()
+
+        for (entry in entries) {
+            val hash = getHashFromSavedEntry(entry)
+            val normalizedHash = normalizeHashForKey(hash)
+
+            if (normalizedHash.isBlank()) {
+                Log.d("TorrentOr", "CLEAN drop malformed entry=$entry")
+                continue
+            }
+
+            if (isDeletedHash(hash)) {
+                continue
+            }
+
+            if (activeHashes.isEmpty()) {
+                cleanedEntries.add(entry)
+                continue
+            }
+
+            if (
+                normalizedHash.isNotBlank() &&
+                activeHashes.contains(normalizedHash)
+            ) {
+                cleanedEntries.add(entry)
+            }
+        }
+
+        saveAllEntries(cleanedEntries.distinct())
+    }
+
+    private fun getActiveTorrentHashes(): Set<String> {
+        val activeHashes = mutableSetOf<String>()
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (
+            status.isBlank() ||
+            status == "No torrents" ||
+            status == "No active torrents"
+        ) {
+            return activeHashes
+        }
+
+        val lines = status.lines().filter { it.isNotBlank() }
+
+        for (i in lines.indices) {
+            val hash = getBestHashForIndex(i + 1)
+
+            if (isGoodHash(hash)) {
+                activeHashes.add(normalizeHashForKey(hash))
+            }
+        }
+
+        return activeHashes
+    }
+
+    private fun getHashFromSavedEntry(entry: String): String {
+        val parts = entry.split("||", limit = 4)
+
+        return when (parts.getOrNull(0)) {
+            "MAGNET" -> {
+                val magnet = parts.getOrNull(1) ?: ""
+                extractHashFromMagnet(magnet)
+            }
+
+            "FILE" -> {
+                when {
+                    parts.size >= 4 -> {
+                        parts.getOrNull(1) ?: ""
+                    }
+
+                    parts.size == 3 -> {
+                        val path = parts.getOrNull(1) ?: ""
+
+                        if (path.isBlank() || !File(path).exists()) {
+                            ""
+                        } else {
+                            try {
+                                TorrentNative.getTorrentFileHash(path)
+                            } catch (_: Throwable) {
+                                ""
+                            }
+                        }
+                    }
+
+                    else -> ""
+                }
+            }
+
+            else -> ""
+        }
     }
 
     private fun clearSavedTorrents() {

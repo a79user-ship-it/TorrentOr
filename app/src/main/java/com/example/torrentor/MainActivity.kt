@@ -9,7 +9,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.provider.DocumentsContract
+import android.text.Editable
+import android.text.TextWatcher
 import android.os.Looper
+import android.os.StatFs
 import android.webkit.MimeTypeMap
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
@@ -33,13 +36,21 @@ class MainActivity : AppCompatActivity() {
     private val selectedTorrents = mutableSetOf<Int>()
     private var skipMagnetSelection = false
     private var activeFilter = "All"
+    private var searchQuery = ""
 
     private var currentDetailsTab = ""
     private var currentDetailsTorrentIndex = -1
     private var currentDetailsContentText: TextView? = null
+    private var currentDetailsFileListLayout: LinearLayout? = null
 
     private var networkFeaturesRefreshRunnable: Runnable? = null
     private var isNetworkFeaturesScreenActive = false
+
+    private var storageRefreshRunnable: Runnable? = null
+    private var isStorageScreenActive = false
+
+    private var globalStatsRefreshRunnable: Runnable? = null
+    private var isGlobalStatsScreenActive = false
 
     private fun bgColor(): Int {
         val theme = getSharedPreferences("prefs", MODE_PRIVATE)
@@ -130,6 +141,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Start TorrentService every time the app opens.
+        // This reloads saved torrents if Android killed the native session/service.
+        val serviceIntent = Intent(this, TorrentService::class.java)
+        startTorrentService(serviceIntent)
+
         showMainScreen()
         startUiUpdates()
         handleIncomingIntent(intent)
@@ -155,6 +171,13 @@ class MainActivity : AppCompatActivity() {
         setIntent(Intent(this, MainActivity::class.java))
 
         if (uriText.startsWith("magnet:")) {
+            val hash = extractHashFromMagnetInput(uriText)
+
+            if (isTorrentAlreadyAddedByHash(hash)) {
+                showAlreadyAddedMessage()
+                return
+            }
+
             showMagnetMetadataScreen(uriText)
             return
         }
@@ -170,12 +193,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    private fun sendTorrentAction(
+        action: String,
+        torrentIndex: Int,
+        deleteFiles: Boolean = false
+    ) {
+        val intent = Intent(this, TorrentService::class.java)
+        intent.putExtra("ACTION", action)
+        intent.putExtra("TORRENT_INDEX", torrentIndex)
+        intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+        intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+
+        if (action == "REMOVE_TORRENT") {
+            intent.putExtra("DELETE_FILES", deleteFiles)
+        }
+
+        startTorrentService(intent)
+    }
+
     private fun showMainScreen() {
         stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
 
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
         currentDetailsContentText = null
+        currentDetailsFileListLayout = null
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -256,6 +301,116 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val pauseSelected = Button(this).apply {
+            text = "Pause Selected"
+            isEnabled = selectMode
+
+            setOnClickListener {
+                if (selectedTorrents.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                for (index in selectedTorrents.sorted()) {
+                    sendTorrentAction("PAUSE_TORRENT", index)
+                }
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Paused ${selectedTorrents.size} torrent(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                selectedTorrents.clear()
+                selectMode = false
+                showMainScreen()
+            }
+        }
+
+        val resumeSelected = Button(this).apply {
+            text = "Resume Selected"
+            isEnabled = selectMode
+
+            setOnClickListener {
+                if (selectedTorrents.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                for (index in selectedTorrents.sorted()) {
+                    sendTorrentAction("RESUME_TORRENT", index)
+                }
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Resumed ${selectedTorrents.size} torrent(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                selectedTorrents.clear()
+                selectMode = false
+                showMainScreen()
+            }
+        }
+
+        val removeSelected = Button(this).apply {
+            text = "Remove Selected"
+            isEnabled = selectMode
+
+            setOnClickListener {
+                if (selectedTorrents.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                val count = selectedTorrents.size
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Remove Selected Torrents?")
+                    .setMessage("Choose how you want to remove $count selected torrent(s).")
+                    .setNegativeButton("Cancel", null)
+                    .setNeutralButton("Remove Only") { _, _ ->
+                        for (index in selectedTorrents.sortedDescending()) {
+                            sendTorrentAction(
+                                action = "REMOVE_TORRENT",
+                                torrentIndex = index,
+                                deleteFiles = false
+                            )
+                        }
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Removed $count torrent(s)",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        selectedTorrents.clear()
+                        selectMode = false
+                        showMainScreen()
+                    }
+                    .setPositiveButton("Remove + Files") { _, _ ->
+                        for (index in selectedTorrents.sortedDescending()) {
+                            sendTorrentAction(
+                                action = "REMOVE_TORRENT",
+                                torrentIndex = index,
+                                deleteFiles = true
+                            )
+                        }
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Removed $count torrent(s) and files",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        selectedTorrents.clear()
+                        selectMode = false
+                        showMainScreen()
+                    }
+                    .show()
+            }
+        }
+
         val magnetInput = EditText(this).apply {
             hint = "Paste magnet link or hash"
             setHintTextColor(Color.LTGRAY)
@@ -276,6 +431,13 @@ class MainActivity : AppCompatActivity() {
                     magnet = "magnet:?xt=urn:btih:$magnet"
                 }
 
+                val hash = extractHashFromMagnetInput(magnet)
+
+                if (isTorrentAlreadyAddedByHash(hash)) {
+                    showAlreadyAddedMessage()
+                    return@setOnClickListener
+                }
+
                 magnetInput.setText("")
                 showMagnetMetadataScreen(magnet)
             }
@@ -284,6 +446,48 @@ class MainActivity : AppCompatActivity() {
         val selectFile = Button(this).apply {
             text = "Select Torrent File"
             setOnClickListener { pickTorrent.launch("*/*") }
+        }
+
+        val searchBox = EditText(this).apply {
+            hint = "Search torrents..."
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+            setText(searchQuery)
+            setSelection(text.length)
+
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    count: Int,
+                    after: Int
+                ) {
+                    // Not needed
+                }
+
+                override fun onTextChanged(
+                    s: CharSequence?,
+                    start: Int,
+                    before: Int,
+                    count: Int
+                ) {
+                    searchQuery = s?.toString() ?: ""
+                    updateTorrentList()
+                }
+
+                override fun afterTextChanged(s: Editable?) {
+                    // Not needed
+                }
+            })
+        }
+
+        val clearSearch = Button(this).apply {
+            text = "Clear Search"
+            setOnClickListener {
+                searchQuery = ""
+                searchBox.setText("")
+                updateTorrentList()
+            }
         }
 
         val pauseAll = Button(this).apply {
@@ -305,13 +509,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         val clearSaved = Button(this).apply {
-            text = "Clear Saved Torrents"
+            text = "Clean Deleted Torrents"
             setOnClickListener {
                 val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("ACTION", "CLEAR_SAVED_TORRENTS")
+                intent.putExtra("ACTION", "CLEAN_DELETED_SAVED_TORRENTS")
                 startTorrentService(intent)
 
-                Toast.makeText(this@MainActivity, "Saved torrents cleared", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Old deleted torrents cleaned",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
 
@@ -333,6 +541,13 @@ class MainActivity : AppCompatActivity() {
             text = "Network Features"
             setOnClickListener {
                 showNetworkFeaturesScreen()
+            }
+        }
+
+        val storageSpaceButton = Button(this).apply {
+            text = "Storage Space"
+            setOnClickListener {
+                showStorageSpaceScreen()
             }
         }
 
@@ -379,15 +594,21 @@ class MainActivity : AppCompatActivity() {
         root.addView(selectModeButton)
         root.addView(forceRecheckSelected)
         root.addView(forceReannounceSelected)
+        root.addView(pauseSelected)
+        root.addView(resumeSelected)
+        root.addView(removeSelected)
         root.addView(magnetInput)
         root.addView(addMagnet)
         root.addView(selectFile)
+        root.addView(searchBox)
+        root.addView(clearSearch)
         root.addView(pauseAll)
         root.addView(resumeAll)
         root.addView(clearSaved)
         root.addView(globalStatistics)
         root.addView(portForwardingStatus)
         root.addView(networkFeatures)
+        root.addView(storageSpaceButton)
         root.addView(filterTitle)
         root.addView(horizontalScrollFor(filterRowOne))
         root.addView(horizontalScrollFor(filterRowTwo))
@@ -405,6 +626,10 @@ class MainActivity : AppCompatActivity() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
         currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
 
         TorrentNative.startSession(savePath)
 
@@ -569,7 +794,14 @@ class MainActivity : AppCompatActivity() {
         TorrentNative.startSession(savePath)
 
         val networkStatus = try {
-            TorrentNative.getNetworkFeaturesStatus()
+            buildString {
+                append("Network Features\n\n")
+                append(TorrentNative.getDhtStatus())
+                append("\n\n")
+                append(TorrentNative.getPexStatus())
+                append("\n\n")
+                append(TorrentNative.getLsdStatus())
+            }
         } catch (e: Throwable) {
             buildString {
                 append("Network Features\n\n")
@@ -698,6 +930,7 @@ class MainActivity : AppCompatActivity() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
         currentDetailsContentText = null
+        currentDetailsFileListLayout = null
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -755,6 +988,10 @@ class MainActivity : AppCompatActivity() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
         currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -776,6 +1013,8 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 16, 0, 16)
         }
 
+        startGlobalStatsAutoRefresh(statsText)
+
         val refreshButton = Button(this).apply {
             text = "Refresh"
             setOnClickListener {
@@ -785,7 +1024,10 @@ class MainActivity : AppCompatActivity() {
 
         val backButton = Button(this).apply {
             text = "Back"
-            setOnClickListener { showMainScreen() }
+            setOnClickListener {
+                stopGlobalStatsAutoRefresh()
+                showMainScreen()
+            }
         }
 
         root.addView(title)
@@ -798,6 +1040,41 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(outerScroll)
+    }
+
+    private fun startGlobalStatsAutoRefresh(statsText: TextView) {
+        stopGlobalStatsAutoRefresh()
+
+        isGlobalStatsScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isGlobalStatsScreenActive) {
+                    return
+                }
+
+                try {
+                    statsText.text = buildQBittorrentGlobalStatisticsText()
+                } catch (_: Throwable) {
+                    // Keep the screen alive even if statistics are temporarily unavailable.
+                }
+
+                handler.postDelayed(this, interval)
+            }
+        }
+
+        globalStatsRefreshRunnable = runnable
+        handler.postDelayed(runnable, interval)
+    }
+
+    private fun stopGlobalStatsAutoRefresh() {
+        isGlobalStatsScreenActive = false
+
+        globalStatsRefreshRunnable?.let { runnable ->
+            handler.removeCallbacks(runnable)
+        }
+
+        globalStatsRefreshRunnable = null
     }
 
     private fun buildQBittorrentGlobalStatisticsText(): String {
@@ -830,7 +1107,57 @@ class MainActivity : AppCompatActivity() {
         return String.format("%.2f GiB", gib)
     }
 
+
+    private fun extractHashFromMagnetInput(value: String): String {
+        val text = value.trim()
+
+        val btihIndex = text.indexOf("btih:", ignoreCase = true)
+        if (btihIndex >= 0) {
+            val start = btihIndex + "btih:".length
+            val end = text.indexOf("&", start)
+
+            return if (end >= 0) {
+                text.substring(start, end).trim().lowercase()
+            } else {
+                text.substring(start).trim().lowercase()
+            }
+        }
+
+        return text
+            .removePrefix("magnet:?xt=urn:")
+            .removePrefix("btih:")
+            .trim()
+            .lowercase()
+    }
+
+    private fun isTorrentAlreadyAddedByHash(hash: String): Boolean {
+        if (hash.isBlank()) {
+            return false
+        }
+
+        return try {
+            TorrentNative.hasTorrentHash(hash)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun showAlreadyAddedMessage() {
+        Toast.makeText(
+            this,
+            "Torrent already added",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     private fun showMagnetMetadataScreen(magnet: String) {
+        val hash = extractHashFromMagnetInput(magnet)
+
+        if (isTorrentAlreadyAddedByHash(hash)) {
+            showAlreadyAddedMessage()
+            return
+        }
+
         skipMagnetSelection = false
 
         val torrentIndex = try {
@@ -1055,6 +1382,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showTorrentFileSelection(filePath: String) {
+        try {
+            val hash = TorrentNative.getTorrentFileHash(filePath)
+
+            if (
+                hash.isNotBlank() &&
+                isTorrentAlreadyAddedByHash(hash)
+            ) {
+                showAlreadyAddedMessage()
+                return
+            }
+        } catch (_: Throwable) {
+            // Continue normally if hash check is temporarily unavailable.
+        }
+
         val fileData = try {
             TorrentNative.getTorrentFiles(filePath)
         } catch (e: Throwable) {
@@ -1209,6 +1550,8 @@ class MainActivity : AppCompatActivity() {
         val fileListLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
+
+        currentDetailsFileListLayout = fileListLayout
 
         fun clearContent() {
             fileListLayout.removeAllViews()
@@ -1375,7 +1718,13 @@ class MainActivity : AppCompatActivity() {
         val pauseButton = Button(this).apply {
             text = "Pause"
             setOnClickListener {
-                TorrentNative.pauseTorrent(torrentIndex)
+                val intent = Intent(this@MainActivity, TorrentService::class.java)
+                intent.putExtra("ACTION", "PAUSE_TORRENT")
+                intent.putExtra("TORRENT_INDEX", torrentIndex)
+                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+                startTorrentService(intent)
+
                 Toast.makeText(this@MainActivity, "Torrent paused", Toast.LENGTH_SHORT).show()
                 showGeneralTab()
             }
@@ -1384,7 +1733,13 @@ class MainActivity : AppCompatActivity() {
         val resumeButton = Button(this).apply {
             text = "Resume"
             setOnClickListener {
-                TorrentNative.resumeTorrent(torrentIndex)
+                val intent = Intent(this@MainActivity, TorrentService::class.java)
+                intent.putExtra("ACTION", "RESUME_TORRENT")
+                intent.putExtra("TORRENT_INDEX", torrentIndex)
+                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+                startTorrentService(intent)
+
                 Toast.makeText(this@MainActivity, "Torrent resumed", Toast.LENGTH_SHORT).show()
                 showGeneralTab()
             }
@@ -1527,7 +1882,16 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-            // Files are static — no auto-refresh needed
+            "Files" -> {
+                val fileListLayout = currentDetailsFileListLayout
+                if (fileListLayout != null) {
+                    showFilesForOpening(
+                        torrentIndex,
+                        fileListLayout,
+                        contentText
+                    )
+                }
+            }
         }
     }
 
@@ -1784,6 +2148,109 @@ class MainActivity : AppCompatActivity() {
         }?.removePrefix("ETA:")?.trim() ?: "--"
     }
 
+
+    private fun getSavedFileSelectionForTorrent(torrentIndex: Int): Set<Int>? {
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (hash.isBlank() || hash == "Hash not ready" || hash == "Invalid torrent") {
+            return null
+        }
+
+        val key = normalizeHashForDateKey(hash)
+        if (key.isBlank()) {
+            return null
+        }
+
+        val prefs = getSharedPreferences("file_priorities", MODE_PRIVATE)
+        val value = prefs.getString("selected_$key", null) ?: return null
+
+        return value
+            .split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .toSet()
+    }
+
+    private fun saveFileSelectionForTorrent(
+        torrentIndex: Int,
+        selectedIndexes: Set<Int>
+    ) {
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (hash.isBlank() || hash == "Hash not ready" || hash == "Invalid torrent") {
+            return
+        }
+
+        val key = normalizeHashForDateKey(hash)
+        if (key.isBlank()) {
+            return
+        }
+
+        val value = selectedIndexes.sorted().joinToString(",")
+
+        getSharedPreferences("file_priorities", MODE_PRIVATE)
+            .edit()
+            .putString("selected_$key", value)
+            .apply()
+    }
+
+
+    private data class TorrentFileProgress(
+        val name: String,
+        val downloadedBytes: Long,
+        val totalBytes: Long,
+        val percent: Int
+    )
+
+    private fun getTorrentFileProgressMap(torrentIndex: Int): Map<Int, TorrentFileProgress> {
+        val progressData = try {
+            TorrentNative.getTorrentFileProgress(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (
+            progressData.isBlank() ||
+            progressData == "Metadata not ready" ||
+            progressData == "Invalid torrent" ||
+            progressData == "Progress not ready" ||
+            progressData == "No files"
+        ) {
+            return emptyMap()
+        }
+
+        val map = mutableMapOf<Int, TorrentFileProgress>()
+
+        for (line in progressData.lines()) {
+            if (line.isBlank()) continue
+
+            val parts = line.split("|", limit = 5)
+            if (parts.size < 5) continue
+
+            val index = parts[0].toIntOrNull() ?: continue
+            val name = parts[1]
+            val downloaded = parts[2].toLongOrNull() ?: 0L
+            val total = parts[3].toLongOrNull() ?: 0L
+            val percent = (parts[4].toIntOrNull() ?: 0).coerceIn(0, 100)
+
+            map[index] = TorrentFileProgress(
+                name = name,
+                downloadedBytes = downloaded,
+                totalBytes = total,
+                percent = percent
+            )
+        }
+
+        return map
+    }
+
     private fun showFilesForOpening(
         torrentIndex: Int,
         fileListLayout: LinearLayout,
@@ -1807,20 +2274,133 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        contentText.text = "Files\n\nTap a file to open it.\nLong press for Open / Share / Delete / Rename."
+        val progressMap = getTorrentFileProgressMap(torrentIndex)
 
+        contentText.text =
+            "Files\n\n" +
+                    "Tick the files you want TorrentOr to download.\n" +
+                    "Untick files you want to skip.\n" +
+                    "Then press Apply File Selection.\n\n" +
+                    "Each file shows its own download progress.\n" +
+                    "Tap Open beside a file to open it.\n" +
+                    "Long press Open for Share / Delete / Rename."
+
+        val selected = mutableSetOf<Int>()
+        val allIndexes = mutableSetOf<Int>()
+        val checkBoxes = mutableListOf<CheckBox>()
+        val savedSelection = getSavedFileSelectionForTorrent(torrentIndex)
         val lines = fileData.split("\n").filter { it.isNotBlank() }
+
+        val selectButtonsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val selectAllButton = Button(this).apply {
+            text = "Select All"
+            setOnClickListener {
+                selected.clear()
+                selected.addAll(allIndexes)
+
+                for (checkBox in checkBoxes) {
+                    checkBox.isChecked = true
+                }
+            }
+        }
+
+        val selectNoneButton = Button(this).apply {
+            text = "Select None"
+            setOnClickListener {
+                selected.clear()
+
+                for (checkBox in checkBoxes) {
+                    checkBox.isChecked = false
+                }
+            }
+        }
+
+        val applySelectionButton = Button(this).apply {
+            text = "Apply File Selection"
+            setOnClickListener {
+                applyFilePrioritySelection(
+                    torrentIndex,
+                    selected,
+                    fileListLayout,
+                    contentText
+                )
+            }
+        }
+
+        selectButtonsRow.addView(selectAllButton)
+        selectButtonsRow.addView(selectNoneButton)
+
+        fileListLayout.addView(selectButtonsRow)
+        fileListLayout.addView(applySelectionButton)
 
         for (line in lines) {
             val parts = line.split("|", limit = 3)
             if (parts.size < 3) continue
 
+            val index = parts[0].toIntOrNull() ?: continue
             val name = parts[1]
             val sizeBytes = parts[2].toLongOrNull() ?: 0L
             val file = File(savePath, name)
 
-            val fileButton = Button(this).apply {
+            allIndexes.add(index)
+
+            val shouldBeChecked = savedSelection?.contains(index) ?: true
+
+            if (shouldBeChecked) {
+                selected.add(index)
+            }
+
+            val progress = progressMap[index]
+            val percent = progress?.percent ?: 0
+            val downloadedText = if (progress != null) {
+                "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}"
+            } else {
+                "Progress not ready"
+            }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 8, 0, 12)
+            }
+
+            val checkBox = CheckBox(this).apply {
                 text = "$name (${formatSize(sizeBytes)})"
+                setTextColor(Color.WHITE)
+                isChecked = shouldBeChecked
+
+                setOnCheckedChangeListener { _, isCheckedNow ->
+                    if (isCheckedNow) {
+                        selected.add(index)
+                    } else {
+                        selected.remove(index)
+                    }
+                }
+            }
+
+            checkBoxes.add(checkBox)
+
+            val progressText = TextView(this).apply {
+                text = "Progress: $percent%  •  $downloadedText"
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                setPadding(0, 0, 0, 4)
+            }
+
+            val progressBar = ProgressBar(
+                this,
+                null,
+                android.R.attr.progressBarStyleHorizontal
+            ).apply {
+                max = 100
+                this.progress = percent
+                progressDrawable.setTint(Color.BLACK)
+            }
+
+            val openButton = Button(this).apply {
+                text = "Open"
 
                 setOnClickListener {
                     openDownloadedFile(file)
@@ -1837,7 +2417,85 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            fileListLayout.addView(fileButton)
+            row.addView(checkBox)
+            row.addView(progressText)
+            row.addView(progressBar)
+            row.addView(openButton)
+            fileListLayout.addView(row)
+        }
+
+        val applyBottomButton = Button(this).apply {
+            text = "Apply File Selection"
+            setOnClickListener {
+                applyFilePrioritySelection(
+                    torrentIndex,
+                    selected,
+                    fileListLayout,
+                    contentText
+                )
+            }
+        }
+
+        fileListLayout.addView(applyBottomButton)
+    }
+
+    private fun applyFilePrioritySelection(
+        torrentIndex: Int,
+        selected: Set<Int>,
+        fileListLayout: LinearLayout,
+        contentText: TextView
+    ) {
+        if (selected.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("No files selected")
+                .setMessage("This will pause downloading all files in this torrent. Continue?")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply") { _, _ ->
+                    applyFilePrioritySelectionNow(
+                        torrentIndex,
+                        selected,
+                        fileListLayout,
+                        contentText
+                    )
+                }
+                .show()
+
+            return
+        }
+
+        applyFilePrioritySelectionNow(
+            torrentIndex,
+            selected,
+            fileListLayout,
+            contentText
+        )
+    }
+
+    private fun applyFilePrioritySelectionNow(
+        torrentIndex: Int,
+        selected: Set<Int>,
+        fileListLayout: LinearLayout,
+        contentText: TextView
+    ) {
+        val indexes = selected.sorted().joinToString(",")
+
+        try {
+            TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+            saveFileSelectionForTorrent(torrentIndex, selected)
+
+            Toast.makeText(
+                this,
+                "File selection applied",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            showFilesForOpening(torrentIndex, fileListLayout, contentText)
+        } catch (e: Throwable) {
+            Toast.makeText(
+                this,
+                "Could not apply file selection",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -2274,7 +2932,7 @@ class MainActivity : AppCompatActivity() {
             val pause = Button(this).apply {
                 text = "Pause"
                 setOnClickListener {
-                    TorrentNative.pauseTorrent(torrentIndex)
+                    sendTorrentAction("PAUSE_TORRENT", torrentIndex)
                     updateTorrentList()
                 }
             }
@@ -2282,7 +2940,7 @@ class MainActivity : AppCompatActivity() {
             val resume = Button(this).apply {
                 text = "Resume"
                 setOnClickListener {
-                    TorrentNative.resumeTorrent(torrentIndex)
+                    sendTorrentAction("RESUME_TORRENT", torrentIndex)
                     updateTorrentList()
                 }
             }
@@ -2308,6 +2966,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun torrentMatchesFilter(line: String): Boolean {
         val lower = line.lowercase()
+        val query = searchQuery.trim().lowercase()
+
+        if (query.isNotBlank() && !lower.contains(query)) {
+            return false
+        }
+
         val percent = extractPercent(line)
 
         return when (activeFilter) {
@@ -2316,6 +2980,23 @@ class MainActivity : AppCompatActivity() {
             "Paused" -> lower.contains("paused")
             "Completed" -> percent >= 100 || lower.contains("seeding")
             else -> true
+        }
+    }
+
+
+    private fun getSafeTorrentHashForAction(torrentIndex: Int): String {
+        return try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    private fun getSafeTorrentMagnetForAction(torrentIndex: Int): String {
+        return try {
+            TorrentNative.getTorrentMagnet(torrentIndex)
+        } catch (_: Throwable) {
+            ""
         }
     }
 
@@ -2328,6 +3009,8 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this, TorrentService::class.java)
                 intent.putExtra("ACTION", "REMOVE_TORRENT")
                 intent.putExtra("TORRENT_INDEX", torrentIndex)
+                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
                 intent.putExtra("DELETE_FILES", false)
                 startTorrentService(intent)
 
@@ -2338,6 +3021,8 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this, TorrentService::class.java)
                 intent.putExtra("ACTION", "REMOVE_TORRENT")
                 intent.putExtra("TORRENT_INDEX", torrentIndex)
+                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
                 intent.putExtra("DELETE_FILES", true)
                 startTorrentService(intent)
 
@@ -2390,6 +3075,123 @@ class MainActivity : AppCompatActivity() {
         intent.putExtra("MAGNET", magnet)
         startTorrentService(intent)
     }
+
+    private fun showStorageSpaceScreen() {
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+
+        stopNetworkFeaturesAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Storage Space"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val info = TextView(this).apply {
+            text = buildStorageSpaceText()
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 16)
+        }
+
+        startStorageAutoRefresh(info)
+
+        val refresh = Button(this).apply {
+            text = "Refresh"
+            setOnClickListener {
+                info.text = buildStorageSpaceText()
+            }
+        }
+
+        val back = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                stopStorageAutoRefresh()
+                showMainScreen()
+            }
+        }
+
+        root.addView(title)
+        root.addView(info)
+        root.addView(refresh)
+        root.addView(back)
+
+        val scroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        setContentView(scroll)
+    }
+
+    private fun buildStorageSpaceText(): String {
+        return try {
+            val stat = StatFs(savePath)
+
+            val total = stat.totalBytes
+            val free = stat.availableBytes
+            val used = total - free
+            val usedPercent = if (total > 0L) {
+                (used.toDouble() / total.toDouble()) * 100.0
+            } else {
+                0.0
+            }
+
+            "Save Path:\n$savePath\n\n" +
+                    "Free Space: ${formatSize(free)}\n" +
+                    "Used Space: ${formatSize(used)}\n" +
+                    "Total Space: ${formatSize(total)}\n" +
+                    "Used: ${String.format("%.1f", usedPercent)}%\n\n" +
+                    "Auto-refresh: Every 3 seconds"
+        } catch (e: Throwable) {
+            "Could not read storage space\n\n$savePath"
+        }
+    }
+
+    private fun startStorageAutoRefresh(info: TextView) {
+        stopStorageAutoRefresh()
+
+        isStorageScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isStorageScreenActive) {
+                    return
+                }
+
+                try {
+                    info.text = buildStorageSpaceText()
+                } catch (_: Throwable) {
+                    // Keep screen alive even if storage temporarily cannot be read.
+                }
+
+                handler.postDelayed(this, interval)
+            }
+        }
+
+        storageRefreshRunnable = runnable
+        handler.postDelayed(runnable, interval)
+    }
+
+    private fun stopStorageAutoRefresh() {
+        isStorageScreenActive = false
+
+        storageRefreshRunnable?.let { runnable ->
+            handler.removeCallbacks(runnable)
+        }
+
+        storageRefreshRunnable = null
+    }
+
 
     private fun startTorrentService(intent: Intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
