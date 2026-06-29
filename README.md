@@ -1,5 +1,7 @@
 # TorrentOr
-
+<p align="center">
+  <img src="assets/banner.png" alt="TorrentOr Banner" width="100%">
+</p>
 <p align="center">
   <img src="assets/banner.png" alt="TorrentOr Banner" width="100%">
 </p>
