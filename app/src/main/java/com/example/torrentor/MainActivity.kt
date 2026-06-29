@@ -28,6 +28,10 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var listLayout: LinearLayout
+    private lateinit var speedGraphText: TextView
+    private val downloadSpeedHistory = mutableListOf<Int>()
+    private val uploadSpeedHistory = mutableListOf<Int>()
+    private val maxSpeedHistoryPoints = 30
     private val handler = Handler(Looper.getMainLooper())
     private val interval = 3000L
     private val savePath = "/storage/emulated/0/Download"
@@ -490,6 +494,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        speedGraphText = TextView(this).apply {
+            text = buildSpeedTextGraph()
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(16, 16, 16, 16)
+            setBackgroundColor(Color.rgb(20, 20, 20))
+        }
+
         val pauseAll = Button(this).apply {
             text = "Pause All"
             setOnClickListener {
@@ -602,6 +615,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(selectFile)
         root.addView(searchBox)
         root.addView(clearSearch)
+        root.addView(speedGraphText)
         root.addView(pauseAll)
         root.addView(resumeAll)
         root.addView(clearSaved)
@@ -2843,6 +2857,71 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    private fun addSpeedSample(downloadKb: Int, uploadKb: Int) {
+        downloadSpeedHistory.add(downloadKb.coerceAtLeast(0))
+        uploadSpeedHistory.add(uploadKb.coerceAtLeast(0))
+
+        while (downloadSpeedHistory.size > maxSpeedHistoryPoints) {
+            downloadSpeedHistory.removeAt(0)
+        }
+
+        while (uploadSpeedHistory.size > maxSpeedHistoryPoints) {
+            uploadSpeedHistory.removeAt(0)
+        }
+
+        if (::speedGraphText.isInitialized) {
+            speedGraphText.text = buildSpeedTextGraph()
+        }
+    }
+
+    private fun buildSpeedTextGraph(): String {
+        val latestDown = downloadSpeedHistory.lastOrNull() ?: 0
+        val latestUp = uploadSpeedHistory.lastOrNull() ?: 0
+
+        return "Speed Graph\n" +
+                "↓ $latestDown KB/s  ↑ $latestUp KB/s\n\n" +
+                "Download:\n" +
+                buildSparkline(downloadSpeedHistory) +
+                "\n\nUpload:\n" +
+                buildSparkline(uploadSpeedHistory)
+    }
+
+    private fun buildSparkline(values: List<Int>): String {
+        if (values.isEmpty()) {
+            return "No speed data yet"
+        }
+
+        val blocks = listOf("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
+        val maxValue = values.maxOrNull() ?: 0
+
+        if (maxValue <= 0) {
+            return values.joinToString("") { "▁" }
+        }
+
+        return values.joinToString("") { value ->
+            val index = ((value.toDouble() / maxValue.toDouble()) * (blocks.size - 1))
+                .toInt()
+                .coerceIn(0, blocks.size - 1)
+
+            blocks[index]
+        }
+    }
+
+    private fun extractTotalSpeedsFromStatus(status: String): Pair<Int, Int> {
+        var totalDown = 0
+        var totalUp = 0
+
+        val downRegex = Regex("""↓\s*(\d+)\s*KB/s""")
+        val upRegex = Regex("""↑\s*(\d+)\s*KB/s""")
+
+        for (line in status.lines()) {
+            totalDown += downRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+            totalUp += upRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        }
+
+        return Pair(totalDown, totalUp)
+    }
+
     private fun updateTorrentList() {
         if (!::listLayout.isInitialized) return
 
@@ -2852,6 +2931,13 @@ class MainActivity : AppCompatActivity() {
             TorrentNative.getDetailedStatus()
         } catch (e: Exception) {
             "Engine not ready"
+        }
+
+        if (status == "No torrents" || status == "Engine not ready") {
+            addSpeedSample(0, 0)
+        } else {
+            val speeds = extractTotalSpeedsFromStatus(status)
+            addSpeedSample(speeds.first, speeds.second)
         }
 
         if (status == "No torrents" || status == "Engine not ready") {
