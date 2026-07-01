@@ -169,3 +169,16 @@ Made with ❤️ using Kotlin, Android NDK and native libtorrent.
 
 </p>
 
+## Known Issues
+
+TorrentOr is still under active development. The following issues are currently known:
+
+### Paused Torrents Resume Automatically
+
+In some cases, torrents that have been manually paused may automatically resume after restarting the app. This behavior is unintended and is being investigated.
+
+### Previously Deleted Torrents Reappear
+
+Torrents that have been deleted may reappear after installing the app on another device or after a fresh installation. This is a known issue related to torrent state persistence and will be fixed in a future update.
+
+These issues are known and are being actively worked on. Thank you for your patience and support.
