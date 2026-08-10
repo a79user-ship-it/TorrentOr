@@ -1,19 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   TorrentOr data extraction rules (Android 12+).
+
+   Same policy as backup_rules.xml: torrent persistence is excluded from both
+   cloud backup and device-to-device transfer so deleted torrents can never
+   reappear on a new phone.
+   See https://developer.android.com/guide/topics/data/autobackup#xml-changes
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="torrent_store.xml" />
+        <exclude domain="sharedpref" path="deleted_torrents.xml" />
+        <exclude domain="sharedpref" path="paused_torrents.xml" />
+        <exclude domain="sharedpref" path="file_priorities.xml" />
+        <exclude domain="sharedpref" path="torrent_dates.xml" />
+        <exclude domain="sharedpref" path="global_stats.xml" />
+        <exclude domain="sharedpref" path="rss_feeds.xml" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="torrent_store.xml" />
+        <exclude domain="sharedpref" path="deleted_torrents.xml" />
+        <exclude domain="sharedpref" path="paused_torrents.xml" />
+        <exclude domain="sharedpref" path="file_priorities.xml" />
+        <exclude domain="sharedpref" path="torrent_dates.xml" />
+        <exclude domain="sharedpref" path="global_stats.xml" />
+        <exclude domain="sharedpref" path="rss_feeds.xml" />
     </device-transfer>
-    -->
 </data-extraction-rules>

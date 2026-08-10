@@ -46,6 +46,7 @@ It provides a fast, lightweight, and polished torrent experience on Android with
 * Comments section
 * Pause / Resume torrents
 * Delete torrents with or without downloaded files
+* RSS feed support (add feeds, fetch items, add magnets / torrents to downloads)
 * Multiple color themes
 * AMOLED theme
 * Android Foreground Service

@@ -539,6 +539,7 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
+            handle.auto_manage(false);
             handle.pause();
         }
 
@@ -580,6 +581,7 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
 
     params.save_path = g_savePath;
     params.flags |= lt::torrent_flags::paused;
+    params.flags &= ~lt::torrent_flags::auto_managed;
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -587,6 +589,7 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
         return -1;
     }
 
+    handle.auto_manage(false);
     handle.pause();
 
     g_handles.push_back(handle);
@@ -631,6 +634,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
+            handle.auto_manage(false);
             handle.pause();
         }
 
@@ -673,10 +677,12 @@ Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
     params.ti = info;
     params.save_path = g_savePath;
     params.flags |= lt::torrent_flags::paused;
+    params.flags &= ~lt::torrent_flags::auto_managed;
 
     auto handle = g_session->add_torrent(params, ec);
 
     if (!ec && handle.is_valid()) {
+        handle.auto_manage(false);
         handle.pause();
 
         g_handles.push_back(handle);
@@ -784,6 +790,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
+            handle.auto_manage(false);
             handle.pause();
         }
 
@@ -828,6 +835,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
     params.ti = info;
     params.save_path = g_savePath;
     params.flags |= lt::torrent_flags::paused;
+    params.flags &= ~lt::torrent_flags::auto_managed;
 
     int fileCount = info->files().num_files();
 
@@ -858,6 +866,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
     auto handle = g_session->add_torrent(params, ec);
 
     if (!ec && handle.is_valid()) {
+        handle.auto_manage(false);
         handle.pause();
 
         g_handles.push_back(handle);
@@ -1049,6 +1058,7 @@ Java_com_example_torrentor_TorrentNative_pauseAll(
         }
 
         if (g_handles[i].is_valid()) {
+            g_handles[i].auto_manage(false);
             g_handles[i].pause();
         }
     }
@@ -1069,6 +1079,7 @@ Java_com_example_torrentor_TorrentNative_resumeAll(
         }
 
         if (g_handles[i].is_valid()) {
+            g_handles[i].auto_manage(true);
             g_handles[i].resume();
         }
     }
@@ -1091,6 +1102,7 @@ Java_com_example_torrentor_TorrentNative_pauseTorrent(
         }
 
         if (g_handles[i].is_valid()) {
+            g_handles[i].auto_manage(false);
             g_handles[i].pause();
         }
     }
@@ -1113,6 +1125,7 @@ Java_com_example_torrentor_TorrentNative_resumeTorrent(
         }
 
         if (g_handles[i].is_valid()) {
+            g_handles[i].auto_manage(true);
             g_handles[i].resume();
         }
     }
