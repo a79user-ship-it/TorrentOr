@@ -181,4 +181,6 @@ In some cases, torrents that have been manually paused may automatically resume 
 
 Torrents that have been deleted may reappear after installing the app on another device or after a fresh installation. This is a known issue related to torrent state persistence and will be fixed in a future update.
 
+The file selection function doesn't work properly it resets after selecting the required files or when selecting none
+
 These issues are known and are being actively worked on. Thank you for your patience and support.
