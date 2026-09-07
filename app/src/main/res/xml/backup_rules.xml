@@ -1,13 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
+   TorrentOr backup rules.
+
+   Torrent persistence (the saved magnet/file list, deleted markers, paused
+   markers, file priorities and dates) is EXCLUDED from cloud backup on
+   purpose: when the app is installed on a new device, Android restores the
+   old backup and previously deleted torrents would come back. A fresh
+   install must start with an empty torrent list.
    See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="sharedpref" path="torrent_store.xml" />
+    <exclude domain="sharedpref" path="deleted_torrents.xml" />
+    <exclude domain="sharedpref" path="paused_torrents.xml" />
+    <exclude domain="sharedpref" path="file_priorities.xml" />
+    <exclude domain="sharedpref" path="torrent_dates.xml" />
+    <exclude domain="sharedpref" path="global_stats.xml" />
+    <exclude domain="sharedpref" path="rss_feeds.xml" />
 </full-backup-content>

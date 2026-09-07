@@ -16,6 +16,8 @@
 
     <application
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@drawable/torrentor_logo"
         android:roundIcon="@drawable/torrentor_logo"
         android:label="@string/app_name"
