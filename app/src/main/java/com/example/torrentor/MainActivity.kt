@@ -38,6 +38,18 @@ class MainActivity : AppCompatActivity() {
     private val maxSpeedHistoryPoints = 30
     private val handler = Handler(Looper.getMainLooper())
     private val interval = 3000L
+
+    // The torrent cards refresh every second. The detail tabs stay at 3 s.
+    private val listInterval = 1000L
+    private var uiTick = 0
+
+    // The list is rebuilt on every refresh. That must not happen while a
+    // finger is on the screen, or a tap or a scroll gets lost.
+    private var fingerDown = false
+    private var fingerDownSince = 0L
+
+    // No refreshing while the app is not on screen.
+    private var uiVisible = true
     private val savePath = "/storage/emulated/0/Download"
 
     private var selectMode = false
@@ -179,6 +191,33 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        uiVisible = true
+        updateTorrentList()
+    }
+
+    override fun onStop() {
+        uiVisible = false
+        super.onStop()
+    }
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        when (ev.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                fingerDown = true
+                fingerDownSince = System.currentTimeMillis()
+            }
+
+            android.view.MotionEvent.ACTION_UP,
+            android.view.MotionEvent.ACTION_CANCEL -> {
+                fingerDown = false
+            }
+        }
+
+        return super.dispatchTouchEvent(ev)
     }
 
     override fun onDestroy() {
@@ -4395,12 +4434,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun isFingerDown(): Boolean {
+        // (a missing "finger up" event must not stop refreshing for good)
+        return fingerDown && System.currentTimeMillis() - fingerDownSince < 5000L
+    }
+
     private fun startUiUpdates() {
         handler.post(object : Runnable {
             override fun run() {
-                updateTorrentList()
-                updateActiveDetailsTab()
-                handler.postDelayed(this, interval)
+                if (uiVisible) {
+                    // torrent cards: every second, but not while touching
+                    if (!isFingerDown()) {
+                        updateTorrentList()
+                    }
+
+                    // detail tabs are heavier: every third round (3 s)
+                    uiTick++
+
+                    if (uiTick % 3 == 0) {
+                        updateActiveDetailsTab()
+                    }
+                }
+
+                handler.postDelayed(this, listInterval)
             }
         })
     }
