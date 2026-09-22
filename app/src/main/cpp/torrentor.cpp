@@ -3,11 +3,13 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <deque>
 #include <sstream>
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <android/log.h>
 
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_status.hpp>
@@ -46,6 +48,58 @@ static int g_natpmpExternalPort = 0;
 static bool g_dhtEnabled = true;
 static bool g_pexEnabled = true;
 static bool g_lsdEnabled = true;
+
+// ---- Execution Log ----
+// libtorrent alerts are turned into short lines ("<level>|<text>", level is
+// N = normal, I = info, W = warning, C = critical). The app collects them with
+// EngineExtras.drainEngineLog() and shows them in its Execution Log screen.
+static std::deque<std::string> g_engineLog;
+static const size_t kMaxEngineLog = 500;
+
+static void pushEngineLog(char level, const std::string& message) {
+    std::string line;
+    line += level;
+    line += '|';
+
+    // keep every entry on a single line
+    for (char ch : message) {
+        line += (ch == '\n' || ch == '\r') ? ' ' : ch;
+    }
+
+    // do not repeat the exact same line twice in a row
+    if (!g_engineLog.empty() && g_engineLog.back() == line) {
+        return;
+    }
+
+    g_engineLog.push_back(line);
+
+    while (g_engineLog.size() > kMaxEngineLog) {
+        g_engineLog.pop_front();
+    }
+}
+
+// ---- Protocol encryption (like qBittorrent's "Encryption mode") ----
+// 0 = allow encryption (default), 1 = require encryption, 2 = disable encryption
+static int g_encryptionMode = 0;
+
+static void fillEncryptionSettings(lt::settings_pack& pack, int mode) {
+    int policy = static_cast<int>(lt::settings_pack::pe_enabled);
+    int level = static_cast<int>(lt::settings_pack::pe_both);
+
+    if (mode == 1) {
+        // only encrypted connections, in and out
+        policy = static_cast<int>(lt::settings_pack::pe_forced);
+        level = static_cast<int>(lt::settings_pack::pe_rc4);
+    } else if (mode == 2) {
+        // no encryption at all
+        policy = static_cast<int>(lt::settings_pack::pe_disabled);
+        level = static_cast<int>(lt::settings_pack::pe_both);
+    }
+
+    pack.set_int(lt::settings_pack::out_enc_policy, policy);
+    pack.set_int(lt::settings_pack::in_enc_policy, policy);
+    pack.set_int(lt::settings_pack::allowed_enc_level, level);
+}
 
 static std::string toString(JNIEnv* env, jstring value) {
     if (!value) return "";
@@ -224,6 +278,21 @@ static void ensureSession(const std::string& savePath) {
                 "TorrentOr/1.0"
         );
 
+        // TorrentOr lets the user decide what runs and what is paused, so turn
+        // libtorrent's own queue limits off. With the defaults (3 active
+        // downloads) libtorrent silently pauses the other torrents and can
+        // pause one again shortly after the user resumed it.
+        pack.set_int(lt::settings_pack::active_downloads, -1);
+        pack.set_int(lt::settings_pack::active_seeds, -1);
+        pack.set_int(lt::settings_pack::active_limit, -1);
+
+        // Which libtorrent alerts we receive for the Execution Log:
+        // error (1) + port mapping (4) + storage (8) + tracker (16) + status (64).
+        pack.set_int(lt::settings_pack::alert_mask, 1 + 4 + 8 + 16 + 64);
+
+        // Protocol encryption mode chosen in the app.
+        fillEncryptionSettings(pack, g_encryptionMode);
+
         // Automatic port forwarding.
         // This asks supported routers to open the listening port using UPnP / NAT-PMP.
         // It will not work on networks that block port forwarding, CGNAT, mobile data,
@@ -398,6 +467,55 @@ static std::string detectPortForwardingMethod(const std::string& message) {
     return "Unknown";
 }
 
+// Turns libtorrent alerts into Execution Log lines (shown in the app) and also
+// writes the same text to logcat (tag TorrentOrLT).
+static void logTorrentAlert(lt::alert* alert) {
+    if (!alert) {
+        return;
+    }
+
+    char level = 0;
+
+    if (lt::alert_cast<lt::torrent_error_alert>(alert) ||
+        lt::alert_cast<lt::file_error_alert>(alert) ||
+        lt::alert_cast<lt::listen_failed_alert>(alert) ||
+        lt::alert_cast<lt::metadata_failed_alert>(alert) ||
+        lt::alert_cast<lt::torrent_delete_failed_alert>(alert)) {
+        level = 'C';
+    } else if (lt::alert_cast<lt::tracker_error_alert>(alert) ||
+               lt::alert_cast<lt::tracker_warning_alert>(alert) ||
+               lt::alert_cast<lt::scrape_failed_alert>(alert) ||
+               lt::alert_cast<lt::portmap_error_alert>(alert)) {
+        level = 'W';
+    } else if (auto* added = lt::alert_cast<lt::add_torrent_alert>(alert)) {
+        level = added->error ? 'C' : 'I';
+    } else if (lt::alert_cast<lt::torrent_finished_alert>(alert) ||
+               lt::alert_cast<lt::torrent_paused_alert>(alert) ||
+               lt::alert_cast<lt::torrent_resumed_alert>(alert) ||
+               lt::alert_cast<lt::torrent_removed_alert>(alert) ||
+               lt::alert_cast<lt::state_changed_alert>(alert) ||
+               lt::alert_cast<lt::metadata_received_alert>(alert) ||
+               lt::alert_cast<lt::listen_succeeded_alert>(alert) ||
+               lt::alert_cast<lt::portmap_alert>(alert)) {
+        level = 'I';
+    }
+
+    if (level == 0) {
+        return;
+    }
+
+    std::string message = alert->message();
+
+    __android_log_print(
+            ANDROID_LOG_INFO,
+            "TorrentOrLT",
+            "%s",
+            message.c_str()
+    );
+
+    pushEngineLog(level, message);
+}
+
 static void updatePortForwardingAlerts() {
     if (!g_session) {
         return;
@@ -415,6 +533,8 @@ static void updatePortForwardingAlerts() {
         if (!alert) {
             continue;
         }
+
+        logTorrentAlert(alert);
 
         if (auto* success = lt::alert_cast<lt::portmap_alert>(alert)) {
             std::string message = success->message();
@@ -539,7 +659,7 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
-            handle.auto_manage(false);
+            handle.unset_flags(lt::torrent_flags::auto_managed);
             handle.pause();
         }
 
@@ -580,8 +700,13 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
     if (ec) return -1;
 
     params.save_path = g_savePath;
+
+    // Keep auto_managed here on purpose. A magnet has to be running to fetch
+    // its metadata, and libtorrent's queue starts it for that. If auto_managed
+    // is cleared the torrent stays paused forever and the file list never
+    // appears. Torrents the user pauses are handled by pauseTorrent(), which
+    // clears auto_managed, and the service pauses restored ones the same way.
     params.flags |= lt::torrent_flags::paused;
-    params.flags &= ~lt::torrent_flags::auto_managed;
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -589,7 +714,6 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
         return -1;
     }
 
-    handle.auto_manage(false);
     handle.pause();
 
     g_handles.push_back(handle);
@@ -634,7 +758,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
-            handle.auto_manage(false);
+            handle.unset_flags(lt::torrent_flags::auto_managed);
             handle.pause();
         }
 
@@ -682,7 +806,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
     auto handle = g_session->add_torrent(params, ec);
 
     if (!ec && handle.is_valid()) {
-        handle.auto_manage(false);
+        handle.unset_flags(lt::torrent_flags::auto_managed);
         handle.pause();
 
         g_handles.push_back(handle);
@@ -790,7 +914,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
     if (!ec && handle.is_valid()) {
         if (g_pausedAll) {
-            handle.auto_manage(false);
+            handle.unset_flags(lt::torrent_flags::auto_managed);
             handle.pause();
         }
 
@@ -866,7 +990,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
     auto handle = g_session->add_torrent(params, ec);
 
     if (!ec && handle.is_valid()) {
-        handle.auto_manage(false);
+        handle.unset_flags(lt::torrent_flags::auto_managed);
         handle.pause();
 
         g_handles.push_back(handle);
@@ -943,6 +1067,8 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
+    updatePortForwardingAlerts();
+
     if (g_handles.empty()) {
         return env->NewStringUTF("No torrents");
     }
@@ -998,8 +1124,22 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
 
         std::string state;
 
-        if (st.flags & lt::torrent_flags::paused) {
-            state = "Paused";
+        if (st.errc) {
+            // libtorrent pauses a torrent that hit an error (for example a
+            // file it may not write). Show why instead of a bare "Paused".
+            std::string errText = st.errc.message();
+
+            for (char& ch : errText) {
+                if (ch == '\n' || ch == '\r') ch = ' ';
+            }
+
+            state = "Paused (error: " + errText + ")";
+        } else if (st.flags & lt::torrent_flags::paused) {
+            if (st.flags & lt::torrent_flags::auto_managed) {
+                state = "Paused (queued)";
+            } else {
+                state = "Paused";
+            }
         } else if (st.is_seeding) {
             state = "Seeding";
         } else {
@@ -1058,7 +1198,7 @@ Java_com_example_torrentor_TorrentNative_pauseAll(
         }
 
         if (g_handles[i].is_valid()) {
-            g_handles[i].auto_manage(false);
+            g_handles[i].unset_flags(lt::torrent_flags::auto_managed);
             g_handles[i].pause();
         }
     }
@@ -1079,7 +1219,9 @@ Java_com_example_torrentor_TorrentNative_resumeAll(
         }
 
         if (g_handles[i].is_valid()) {
-            g_handles[i].auto_manage(true);
+            g_handles[i].clear_error();
+            // not auto managed: only the user pauses / resumes this torrent
+            g_handles[i].unset_flags(lt::torrent_flags::auto_managed);
             g_handles[i].resume();
         }
     }
@@ -1094,6 +1236,8 @@ Java_com_example_torrentor_TorrentNative_pauseTorrent(
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
+    __android_log_print(ANDROID_LOG_INFO, "TorrentOrLT", "pauseTorrent called index=%d", static_cast<int>(index));
+
     int i = index - 1;
 
     if (i >= 0 && i < static_cast<int>(g_handles.size())) {
@@ -1102,7 +1246,7 @@ Java_com_example_torrentor_TorrentNative_pauseTorrent(
         }
 
         if (g_handles[i].is_valid()) {
-            g_handles[i].auto_manage(false);
+            g_handles[i].unset_flags(lt::torrent_flags::auto_managed);
             g_handles[i].pause();
         }
     }
@@ -1117,6 +1261,8 @@ Java_com_example_torrentor_TorrentNative_resumeTorrent(
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
+    __android_log_print(ANDROID_LOG_INFO, "TorrentOrLT", "resumeTorrent called index=%d", static_cast<int>(index));
+
     int i = index - 1;
 
     if (i >= 0 && i < static_cast<int>(g_handles.size())) {
@@ -1125,7 +1271,9 @@ Java_com_example_torrentor_TorrentNative_resumeTorrent(
         }
 
         if (g_handles[i].is_valid()) {
-            g_handles[i].auto_manage(true);
+            g_handles[i].clear_error();
+            // not auto managed: only the user pauses / resumes this torrent
+            g_handles[i].unset_flags(lt::torrent_flags::auto_managed);
             g_handles[i].resume();
         }
     }
@@ -3187,3 +3335,69 @@ Java_com_example_torrentor_TorrentNative_getTorrentWebSeedCount(
 }
 
 
+// ---- Execution Log + encryption, used by the EngineExtras Kotlin object ----
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_EngineExtras_drainEngineLog(
+        JNIEnv* env,
+        jobject) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    // pulls new libtorrent alerts into the log buffer
+    updatePortForwardingAlerts();
+
+    std::string out;
+
+    for (const std::string& line : g_engineLog) {
+        out += line;
+        out += '\n';
+    }
+
+    g_engineLog.clear();
+
+    return env->NewStringUTF(out.c_str());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_EngineExtras_setEncryptionMode(
+        JNIEnv*,
+        jobject,
+        jint mode) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int m = static_cast<int>(mode);
+
+    if (m < 0 || m > 2) {
+        m = 0;
+    }
+
+    g_encryptionMode = m;
+
+    if (g_session) {
+        lt::settings_pack pack;
+        fillEncryptionSettings(pack, g_encryptionMode);
+        g_session->apply_settings(pack);
+    }
+
+    if (m == 1) {
+        pushEngineLog('I', "Encryption mode: require encryption");
+    } else if (m == 2) {
+        pushEngineLog('I', "Encryption mode: encryption disabled");
+    } else {
+        pushEngineLog('I', "Encryption mode: allow encryption");
+    }
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_example_torrentor_EngineExtras_getEncryptionMode(
+        JNIEnv*,
+        jobject) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<jint>(g_encryptionMode);
+}

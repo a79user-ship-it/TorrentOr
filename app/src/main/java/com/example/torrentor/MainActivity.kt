@@ -51,6 +51,12 @@ class MainActivity : AppCompatActivity() {
     private var currentDetailsContentText: TextView? = null
     private var currentDetailsFileListLayout: LinearLayout? = null
 
+    // Files tab state. The tick boxes the user has changed but not applied yet
+    // live here so the 3-second refresh can never wipe them.
+    private var filesBuiltForIndex = -1
+    private var filesPendingSelection: MutableSet<Int>? = null
+    private val filesProgressViews = mutableMapOf<Int, Pair<TextView, ProgressBar>>()
+
     private var networkFeaturesRefreshRunnable: Runnable? = null
     private var isNetworkFeaturesScreenActive = false
 
@@ -60,13 +66,12 @@ class MainActivity : AppCompatActivity() {
     private var globalStatsRefreshRunnable: Runnable? = null
     private var isGlobalStatsScreenActive = false
 
-    // Pending (not yet applied) file selection per torrent index.
-    // Kept in memory so the 3-second UI refresh cannot reset unchecked
-    // files while the user is still editing the selection.
-    private val pendingFileSelections = mutableMapOf<Int, MutableSet<Int>>()
+    // RSS screen and Execution Log screen refresh loops.
+    private var rssUiRefreshRunnable: Runnable? = null
+    private var isRssScreenActive = false
 
-    // Cache of the last fetched RSS items per feed URL.
-    private val rssItemsCache = mutableMapOf<String, List<RssItem>>()
+    private var logUiRefreshRunnable: Runnable? = null
+    private var isLogScreenActive = false
 
     private fun bgColor(): Int {
         val theme = getSharedPreferences("prefs", MODE_PRIVATE)
@@ -157,6 +162,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        AppLog.init(applicationContext)
+        AppLog.info("TorrentOr opened")
+
         // Start TorrentService every time the app opens.
         // This reloads saved torrents if Android killed the native session/service.
         val serviceIntent = Intent(this, TorrentService::class.java)
@@ -165,11 +173,80 @@ class MainActivity : AppCompatActivity() {
         showMainScreen()
         startUiUpdates()
         handleIncomingIntent(intent)
+        ensureStorageAccess()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
+    }
+
+    override fun onDestroy() {
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+        super.onDestroy()
+    }
+
+    private var askedStorageAccess = false
+
+    // The native engine writes downloads straight into the Download folder.
+    // Without storage access every torrent stops with a "permission denied"
+    // error and shows as Paused. Android 11+ needs "All files access",
+    // older versions need the normal storage permission.
+    private fun ensureStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (android.os.Environment.isExternalStorageManager()) return
+
+            if (askedStorageAccess) return
+
+            askedStorageAccess = true
+            AppLog.warning("Storage access (all files) is not granted, downloads may fail")
+
+            AlertDialog.Builder(this)
+                .setTitle("Allow storage access")
+                .setMessage(
+                    "TorrentOr saves downloads to your Download folder. " +
+                            "On the next screen, turn on \"Allow access to manage all files\" " +
+                            "for TorrentOr, then come back to the app."
+                )
+                .setCancelable(false)
+                .setPositiveButton("Open settings") { _, _ ->
+                    try {
+                        startActivity(
+                            Intent(
+                                android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    } catch (e: Throwable) {
+                        try {
+                            startActivity(
+                                Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                            )
+                        } catch (e2: Throwable) {
+                        }
+                    }
+                }
+                .setNegativeButton("Later", null)
+                .show()
+        } else {
+            val readGranted =
+                checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+            val writeGranted =
+                checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                        android.content.pm.PackageManager.PERMISSION_GRANTED
+
+            if (!readGranted || !writeGranted) {
+                requestPermissions(
+                    arrayOf(
+                        android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                        android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    ),
+                    1001
+                )
+            }
+        }
     }
 
     // FIX: Consume the intent immediately with setIntent() before processing it.
@@ -223,7 +300,6 @@ class MainActivity : AppCompatActivity() {
 
         if (action == "REMOVE_TORRENT") {
             intent.putExtra("DELETE_FILES", deleteFiles)
-            pendingFileSelections.remove(torrentIndex)
         }
 
         startTorrentService(intent)
@@ -233,6 +309,8 @@ class MainActivity : AppCompatActivity() {
         stopNetworkFeaturesAutoRefresh()
         stopStorageAutoRefresh()
         stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
 
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -584,6 +662,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val executionLogButton = Button(this).apply {
+            text = "Execution Log"
+            setOnClickListener {
+                showExecutionLogScreen()
+            }
+        }
+
         val filterTitle = TextView(this).apply {
             text = "Filter: $activeFilter"
             textSize = 16f
@@ -644,6 +729,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(networkFeatures)
         root.addView(storageSpaceButton)
         root.addView(rssButton)
+        root.addView(executionLogButton)
         root.addView(filterTitle)
         root.addView(horizontalScrollFor(filterRowOne))
         root.addView(horizontalScrollFor(filterRowTwo))
@@ -657,16 +743,15 @@ class MainActivity : AppCompatActivity() {
         updateTorrentList()
     }
 
-    private data class RssItem(
-        val title: String,
-        val link: String,
-        val sizeText: String
-    )
+    // ------------------------------------------------------------------ RSS
 
+    // The list of feeds. A tap on a feed opens that feed in its own screen.
     private fun showRssScreen() {
         stopNetworkFeaturesAutoRefresh()
         stopStorageAutoRefresh()
         stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
 
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -687,14 +772,84 @@ class MainActivity : AppCompatActivity() {
         }
 
         val statusText = TextView(this).apply {
-            text = "Add a feed URL to start. Tap Refresh to fetch new items."
+            text = "Add a feed URL to start."
             textSize = 14f
             setTextColor(Color.WHITE)
             setPadding(0, 8, 0, 8)
         }
 
+        val autoRefreshText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 4, 0, 12)
+        }
+
         val feedsLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+        }
+
+        // Changes when any feed was refreshed, so the list is redrawn then.
+        var shownSignature = ""
+
+        // (the list and the refresh functions need each other)
+        var redrawList: () -> Unit = {}
+
+        fun currentSignature(): String {
+            return RssManager.lastRefreshMillis(this).toString() + "|" +
+                    loadRssFeeds().joinToString("|") {
+                        RssManager.lastFeedRefreshMillis(this, it).toString()
+                    }
+        }
+
+        fun updateAutoRefreshText() {
+            val minutes = RssManager.loadIntervalMinutes(this)
+            val last = RssManager.lastRefreshMillis(this)
+            val format = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+
+            val lastText = if (last == 0L) "never" else format.format(Date(last))
+
+            val nextText = when {
+                minutes <= 0 -> "off"
+                last == 0L -> "soon"
+                else -> format.format(Date(last + minutes * 60_000L))
+            }
+
+            autoRefreshText.text =
+                "Auto refresh: ${RssManager.intervalLabel(minutes)}\n" +
+                        "Last refresh: $lastText\n" +
+                        "Next refresh: $nextText"
+        }
+
+        // Refreshes one feed (the Refresh button of a feed card).
+        fun startFeedRefresh(feed: String) {
+            if (RssManager.isRefreshing()) {
+                statusText.text = "A refresh is already running..."
+                return
+            }
+
+            statusText.text = "Refreshing ${RssManager.feedTitle(this, feed)}..."
+
+            Thread {
+                val result = try {
+                    RssManager.refreshFeed(applicationContext, feed, true)
+                } catch (_: Throwable) {
+                    null
+                }
+
+                runOnUiThread {
+                    statusText.text = when {
+                        result == null -> "Refresh could not run right now."
+                        result.feedsFailed > 0 ->
+                            "Could not refresh this feed. See the Execution Log."
+                        result.newItems > 0 ->
+                            "Refreshed: ${result.newItems} new item(s)."
+                        else -> "Refreshed, no new items."
+                    }
+
+                    redrawList()
+                    updateAutoRefreshText()
+                }
+            }.start()
         }
 
         fun refreshUi() {
@@ -704,80 +859,132 @@ class MainActivity : AppCompatActivity() {
 
             if (feeds.isEmpty()) {
                 statusText.text = "No feeds yet. Tap Add Feed to add one."
-            } else {
-                statusText.text = "${feeds.size} feed(s). Tap Refresh to update items."
+            } else if (!RssManager.isRefreshing()) {
+                statusText.text = "${feeds.size} feed(s). Tap a feed to open it."
             }
 
+            val timeFormat = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
+
             for (feed in feeds) {
-                val feedCard = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(8, 8, 8, 8)
-                    setBackgroundColor(cardColor())
+                val items = RssManager.loadItems(this, feed)
+                val autoOn = RssManager.isAutoDownload(this, feed)
+                val last = RssManager.lastFeedRefreshMillis(this, feed)
+
+                val updatedText = if (last == 0L) {
+                    "not refreshed yet"
+                } else {
+                    "updated ${timeFormat.format(Date(last))}"
                 }
 
-                val feedHeader = LinearLayout(this).apply {
+                val feedCard = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(16, 16, 16, 16)
+                    setBackgroundColor(cardColor())
+
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = 16
+                    }
+
+                    // a tap anywhere on the card opens the feed
+                    setOnClickListener {
+                        showRssFeedScreen(feed)
+                    }
+                }
+
+                val nameText = TextView(this).apply {
+                    text = RssManager.feedTitle(this@MainActivity, feed)
+                    textSize = 17f
+                    setTextColor(Color.WHITE)
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                }
+
+                val urlText = TextView(this).apply {
+                    text = feed
+                    textSize = 12f
+                    setTextColor(Color.LTGRAY)
+                    setPadding(0, 2, 0, 4)
+                }
+
+                val infoText = TextView(this).apply {
+                    text = "${items.size} item(s)  •  " +
+                            "Auto-download: ${if (autoOn) "On" else "Off"}  •  $updatedText"
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    setPadding(0, 0, 0, 8)
+                }
+
+                val buttonRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                 }
 
-                val feedLabel = TextView(this).apply {
-                    text = feed
-                    textSize = 14f
-                    setTextColor(Color.WHITE)
-                    setPadding(0, 0, 8, 0)
-                }
-
-                val removeFeedButton = Button(this).apply {
-                    text = "Remove Feed"
+                val openButton = Button(this).apply {
+                    text = "Open"
                     setOnClickListener {
-                        removeRssFeed(feed)
-                        rssItemsCache.remove(feed)
-                        refreshUi()
+                        showRssFeedScreen(feed)
                     }
                 }
 
-                feedHeader.addView(feedLabel)
-                feedHeader.addView(removeFeedButton)
-                feedCard.addView(feedHeader)
-
-                val items = rssItemsCache[feed]
-
-                if (items.isNullOrEmpty()) {
-                    val emptyText = TextView(this).apply {
-                        text = "No items yet. Tap Refresh."
-                        textSize = 13f
-                        setTextColor(Color.LTGRAY)
-                        setPadding(0, 4, 0, 4)
-                    }
-                    feedCard.addView(emptyText)
-                } else {
-                    for (item in items) {
-                        val itemRow = LinearLayout(this).apply {
-                            orientation = LinearLayout.HORIZONTAL
-                            setPadding(0, 4, 0, 4)
-                        }
-
-                        val itemLabel = TextView(this).apply {
-                            text = "${item.title}\n${item.sizeText}"
-                            textSize = 13f
-                            setTextColor(Color.WHITE)
-                            setPadding(0, 0, 8, 0)
-                        }
-
-                        val addButton = Button(this).apply {
-                            text = "Add"
-                            setOnClickListener {
-                                addRssItemToDownloads(item)
-                            }
-                        }
-
-                        itemRow.addView(itemLabel)
-                        itemRow.addView(addButton)
-                        feedCard.addView(itemRow)
+                val refreshFeedButton = Button(this).apply {
+                    text = "Refresh"
+                    setOnClickListener {
+                        startFeedRefresh(feed)
                     }
                 }
+
+                buttonRow.addView(openButton)
+                buttonRow.addView(refreshFeedButton)
+
+                feedCard.addView(nameText)
+                feedCard.addView(urlText)
+                feedCard.addView(infoText)
+                feedCard.addView(buttonRow)
 
                 feedsLayout.addView(feedCard)
             }
+
+            shownSignature = currentSignature()
+        }
+
+        redrawList = { refreshUi() }
+
+        // Refreshes all feeds on a background thread, then redraws the list.
+        fun startRefresh(manual: Boolean) {
+            if (loadRssFeeds().isEmpty()) {
+                statusText.text = "No feeds yet. Tap Add Feed to add one."
+                return
+            }
+
+            if (RssManager.isRefreshing()) {
+                statusText.text = "A refresh is already running..."
+                return
+            }
+
+            statusText.text = "Refreshing feeds..."
+
+            Thread {
+                val result = try {
+                    RssManager.refreshAll(applicationContext, manual)
+                } catch (_: Throwable) {
+                    null
+                }
+
+                runOnUiThread {
+                    statusText.text = when {
+                        result == null -> "Refresh could not run right now."
+                        result.feedsFailed > 0 ->
+                            "Refresh finished: ${result.feedsOk} ok, ${result.feedsFailed} failed. See Execution Log."
+                        result.newItems > 0 ->
+                            "Refresh complete: ${result.newItems} new item(s)."
+                        else -> "Refresh complete."
+                    }
+
+                    refreshUi()
+                    updateAutoRefreshText()
+                }
+            }.start()
         }
 
         val addFeedButton = Button(this).apply {
@@ -785,30 +992,68 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 showAddFeedDialog {
                     refreshUi()
+                    startRefresh(true)
                 }
             }
         }
 
         val refreshButton = Button(this).apply {
-            text = "Refresh"
+            text = "Refresh all"
             setOnClickListener {
-                refreshAllFeeds(statusText) {
-                    refreshUi()
-                }
+                startRefresh(true)
+            }
+        }
+
+        val intervalButton = Button(this).apply {
+            text = "Auto refresh: " +
+                    RssManager.intervalLabel(RssManager.loadIntervalMinutes(this@MainActivity))
+
+            setOnClickListener {
+                val options = RssManager.INTERVAL_OPTIONS
+                val labels = options.map { RssManager.intervalLabel(it) }.toTypedArray()
+
+                val currentIndex = options
+                    .indexOf(RssManager.loadIntervalMinutes(this@MainActivity))
+                    .let { if (it < 0) 0 else it }
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Refresh feeds")
+                    .setSingleChoiceItems(labels, currentIndex) { dialog, which ->
+                        val minutes = options[which]
+
+                        RssManager.saveIntervalMinutes(this@MainActivity, minutes)
+                        AppLog.info(
+                            "RSS: auto refresh set to ${RssManager.intervalLabel(minutes)}"
+                        )
+
+                        text = "Auto refresh: ${RssManager.intervalLabel(minutes)}"
+                        updateAutoRefreshText()
+                        dialog.dismiss()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
             }
         }
 
         val backButton = Button(this).apply {
             text = "Back"
             setOnClickListener {
+                stopRssUiRefresh()
                 showMainScreen()
             }
         }
 
         root.addView(title)
         root.addView(statusText)
-        root.addView(addFeedButton)
-        root.addView(refreshButton)
+        root.addView(autoRefreshText)
+        root.addView(horizontalScrollFor(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(addFeedButton)
+                addView(refreshButton)
+                addView(intervalButton)
+            }
+        ))
         root.addView(feedsLayout)
         root.addView(backButton)
 
@@ -817,10 +1062,483 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(outerScroll)
+
         refreshUi()
-        refreshAllFeeds(statusText) {
-            refreshUi()
+        updateAutoRefreshText()
+
+        // Redraw when a background refresh has fetched something new.
+        isRssScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isRssScreenActive) {
+                    return
+                }
+
+                try {
+                    if (currentSignature() != shownSignature) {
+                        refreshUi()
+                    }
+
+                    updateAutoRefreshText()
+                } catch (_: Throwable) {
+                    // keep the screen alive
+                }
+
+                handler.postDelayed(this, 5000L)
+            }
         }
+
+        rssUiRefreshRunnable = runnable
+        handler.postDelayed(runnable, 5000L)
+
+        // Opening the screen refreshes feeds that have not been fetched lately.
+        val last = RssManager.lastRefreshMillis(this)
+
+        if (
+            loadRssFeeds().isNotEmpty() &&
+            (last == 0L || System.currentTimeMillis() - last > 2 * 60_000L)
+        ) {
+            startRefresh(false)
+        }
+    }
+
+    // One feed in its own screen: all its items, each with an Add button,
+    // and the buttons for this feed (Refresh, Add all, Auto-download, Remove).
+    private fun showRssFeedScreen(feed: String) {
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val outerScroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        val title = TextView(this).apply {
+            textSize = 22f
+            setTextColor(Color.WHITE)
+        }
+
+        val urlText = TextView(this).apply {
+            text = feed
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 2, 0, 4)
+        }
+
+        val hintText = TextView(this).apply {
+            text = "Tip: press and hold an item to open it on the torrent website."
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 0, 0, 8)
+        }
+
+        val statusText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 4, 0, 8)
+        }
+
+        val itemsLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // Every Add button gets the same width (88 dp), so they line up.
+        val addButtonWidth = (88 * resources.displayMetrics.density).toInt()
+
+        var busy = false
+        var shownStamp = -1L
+
+        // (the buttons and the list need each other)
+        var redraw: () -> Unit = {}
+
+        fun itemLabel(item: RssManager.RssItem, added: Boolean): String {
+            val meta = mutableListOf<String>()
+
+            if (item.sizeText.isNotBlank()) {
+                meta.add(item.sizeText)
+            }
+
+            if (added) {
+                meta.add("✔ Added")
+            }
+
+            return if (meta.isEmpty()) {
+                item.title
+            } else {
+                item.title + "\n" + meta.joinToString("  •  ")
+            }
+        }
+
+        fun idleStatus(count: Int): String {
+            val last = RssManager.lastFeedRefreshMillis(this, feed)
+
+            val updated = if (last == 0L) {
+                "not refreshed yet"
+            } else {
+                "updated " + SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
+                    .format(Date(last))
+            }
+
+            val auto = if (RssManager.isAutoDownload(this, feed)) "On" else "Off"
+
+            return "$count item(s)  •  Auto-download: $auto  •  $updated"
+        }
+
+        val refreshButton = Button(this).apply {
+            text = "Refresh"
+        }
+
+        val addAllButton = Button(this).apply {
+            text = "Add all"
+        }
+
+        val autoDownloadButton = Button(this).apply {
+            text = "Auto-download: Off"
+        }
+
+        val removeFeedButton = Button(this).apply {
+            text = "Remove Feed"
+        }
+
+        fun startRefresh(manual: Boolean) {
+            if (RssManager.isRefreshing()) {
+                statusText.text = "A refresh is already running..."
+                return
+            }
+
+            busy = true
+            statusText.text = "Refreshing..."
+
+            Thread {
+                val result = try {
+                    RssManager.refreshFeed(applicationContext, feed, manual)
+                } catch (_: Throwable) {
+                    null
+                }
+
+                runOnUiThread {
+                    busy = false
+                    redraw()
+
+                    statusText.text = when {
+                        result == null -> "Refresh could not run right now."
+                        result.feedsFailed > 0 ->
+                            "Could not refresh this feed. See the Execution Log."
+                        result.newItems > 0 ->
+                            "Refreshed: ${result.newItems} new item(s)."
+                        else -> "Refreshed, no new items."
+                    }
+                }
+            }.start()
+        }
+
+        fun refreshUi() {
+            val keepScroll = outerScroll.scrollY
+
+            itemsLayout.removeAllViews()
+
+            val items = RssManager.loadItems(this, feed)
+            val added = RssManager.addedKeys(this, feed)
+            val autoOn = RssManager.isAutoDownload(this, feed)
+
+            title.text = RssManager.feedTitle(this, feed)
+
+            if (!busy) {
+                statusText.text = idleStatus(items.size)
+            }
+
+            addAllButton.text = "Add all (${items.size})"
+            addAllButton.isEnabled = items.isNotEmpty()
+            autoDownloadButton.text = if (autoOn) "Auto-download: On" else "Auto-download: Off"
+
+            if (items.isEmpty()) {
+                val emptyText = TextView(this).apply {
+                    text = "No items yet. Tap Refresh."
+                    textSize = 14f
+                    setTextColor(Color.LTGRAY)
+                    setPadding(0, 12, 0, 12)
+                }
+
+                itemsLayout.addView(emptyText)
+            }
+
+            // Every item of the feed gets its own Add button.
+            for (item in items) {
+                val isAdded = RssManager.isAdded(added, item)
+
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(12, 10, 12, 10)
+                    setBackgroundColor(cardColor())
+
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = 8
+                    }
+                }
+
+                // The title takes the space that is left and wraps.
+                val label = TextView(this).apply {
+                    text = itemLabel(item, isAdded)
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    setPadding(0, 0, 8, 0)
+
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+                }
+
+                val addButton = Button(this).apply {
+                    text = if (isAdded) "Added" else "Add"
+
+                    layoutParams = LinearLayout.LayoutParams(
+                        addButtonWidth,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+
+                    setOnClickListener {
+                        isEnabled = false
+                        text = "..."
+
+                        addRssItemToDownloads(feed, item) { error ->
+                            isEnabled = true
+
+                            if (error == null) {
+                                text = "Added"
+                                label.text = itemLabel(item, true)
+                            } else {
+                                text = "Retry"
+                            }
+                        }
+                    }
+                }
+
+                // press and hold: open the item on the torrent website
+                row.setOnLongClickListener {
+                    showRssItemMenu(item)
+                    true
+                }
+
+                label.setOnLongClickListener {
+                    showRssItemMenu(item)
+                    true
+                }
+
+                row.addView(label)
+                row.addView(addButton)
+                itemsLayout.addView(row)
+            }
+
+            shownStamp = RssManager.lastFeedRefreshMillis(this, feed)
+
+            // keep the place in the list when it is redrawn
+            outerScroll.post {
+                outerScroll.scrollTo(0, keepScroll)
+            }
+        }
+
+        redraw = { refreshUi() }
+
+        refreshButton.setOnClickListener {
+            startRefresh(true)
+        }
+
+        addAllButton.setOnClickListener {
+            confirmAddAllFromFeed(
+                feed,
+                RssManager.loadItems(this, feed),
+                statusText
+            ) {
+                refreshUi()
+            }
+        }
+
+        autoDownloadButton.setOnClickListener {
+            toggleAutoDownload(feed, RssManager.isAutoDownload(this, feed)) {
+                refreshUi()
+            }
+        }
+
+        removeFeedButton.setOnClickListener {
+            // Ask first, a removed feed and its saved items are gone.
+            AlertDialog.Builder(this)
+                .setTitle("Remove RSS feed?")
+                .setMessage("This feed and its saved items will be removed:\n\n$feed")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Remove") { _, _ ->
+                    removeRssFeed(feed)
+                    RssManager.removeFeedData(this, feed)
+                    AppLog.info("RSS: feed removed: $feed")
+                    Toast.makeText(this, "Feed removed", Toast.LENGTH_SHORT).show()
+
+                    stopRssUiRefresh()
+                    showRssScreen()
+                }
+                .show()
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back to feeds"
+            setOnClickListener {
+                stopRssUiRefresh()
+                showRssScreen()
+            }
+        }
+
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(refreshButton)
+            addView(addAllButton)
+            addView(autoDownloadButton)
+            addView(removeFeedButton)
+        }
+
+        root.addView(title)
+        root.addView(urlText)
+        root.addView(hintText)
+        root.addView(statusText)
+        root.addView(horizontalScrollFor(actionRow))
+        root.addView(itemsLayout)
+        root.addView(backButton)
+
+        setContentView(outerScroll)
+
+        refreshUi()
+
+        // Redraw when a background refresh has fetched something new.
+        isRssScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isRssScreenActive) {
+                    return
+                }
+
+                try {
+                    val stamp = RssManager.lastFeedRefreshMillis(this@MainActivity, feed)
+
+                    if (stamp != shownStamp && !busy) {
+                        refreshUi()
+                    }
+                } catch (_: Throwable) {
+                    // keep the screen alive
+                }
+
+                handler.postDelayed(this, 5000L)
+            }
+        }
+
+        rssUiRefreshRunnable = runnable
+        handler.postDelayed(runnable, 5000L)
+
+        // Opening the feed refreshes it when it is empty or was not read lately.
+        val last = RssManager.lastFeedRefreshMillis(this, feed)
+
+        if (
+            RssManager.loadItems(this, feed).isEmpty() ||
+            System.currentTimeMillis() - last > 2 * 60_000L
+        ) {
+            startRefresh(false)
+        }
+    }
+
+    // Press and hold on a feed item: open its page on the torrent website,
+    // or copy its link.
+    private fun showRssItemMenu(item: RssManager.RssItem) {
+        val webPage = RssManager.itemWebPage(item)
+
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+
+        if (webPage.isNotBlank()) {
+            labels.add("Open on the torrent website")
+            actions.add { openWebPage(webPage) }
+        }
+
+        val copyText = item.link.ifBlank { webPage }
+
+        if (copyText.isNotBlank()) {
+            labels.add(
+                if (copyText.startsWith("magnet:", ignoreCase = true)) {
+                    "Copy magnet link"
+                } else {
+                    "Copy link"
+                }
+            )
+
+            actions.add {
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+
+                clipboard.setPrimaryClip(ClipData.newPlainText("TorrentOr link", copyText))
+                Toast.makeText(this, "Link copied", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        if (labels.isEmpty()) {
+            Toast.makeText(this, "This item has no web page or link", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(item.title)
+            .setItems(labels.toTypedArray()) { _, which ->
+                actions[which]()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Opens a web address in the browser. Only http and https are allowed,
+    // because the address comes from a feed and is not to be trusted.
+    private fun openWebPage(url: String) {
+        val uri = try {
+            Uri.parse(url)
+        } catch (_: Throwable) {
+            null
+        }
+
+        val scheme = uri?.scheme?.lowercase()
+
+        if (uri == null || (scheme != "http" && scheme != "https")) {
+            Toast.makeText(this, "This is not a web address", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (_: Throwable) {
+            Toast.makeText(this, "No app can open this link", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopRssUiRefresh() {
+        isRssScreenActive = false
+
+        rssUiRefreshRunnable?.let { runnable ->
+            handler.removeCallbacks(runnable)
+        }
+
+        rssUiRefreshRunnable = null
     }
 
     private fun showAddFeedDialog(onAdded: () -> Unit) {
@@ -832,7 +1550,7 @@ class MainActivity : AppCompatActivity() {
 
         AlertDialog.Builder(this)
             .setTitle("Add RSS Feed")
-            .setMessage("Enter the feed URL. Items with magnet links or .torrent links can be added to your downloads.")
+            .setMessage("Enter the feed URL. Every item of the feed gets an Add button.")
             .setView(input)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Add") { _, _ ->
@@ -844,6 +1562,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 addRssFeed(url)
+                AppLog.info("RSS: feed added: $url")
                 Toast.makeText(this, "Feed added", Toast.LENGTH_SHORT).show()
                 onAdded()
             }
@@ -851,21 +1570,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadRssFeeds(): List<String> {
-        val prefs = getSharedPreferences("rss_feeds", MODE_PRIVATE)
-        val savedText = prefs.getString("feeds", "") ?: ""
-
-        return savedText
-            .split("\n")
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .distinct()
+        return RssManager.loadFeeds(this)
     }
 
     private fun saveRssFeeds(feeds: List<String>) {
-        getSharedPreferences("rss_feeds", MODE_PRIVATE)
-            .edit()
-            .putString("feeds", feeds.distinct().joinToString("\n"))
-            .apply()
+        RssManager.saveFeeds(this, feeds)
     }
 
     private fun addRssFeed(url: String) {
@@ -882,194 +1591,383 @@ class MainActivity : AppCompatActivity() {
         saveRssFeeds(loadRssFeeds().filterNot { it == url })
     }
 
-    private fun refreshAllFeeds(statusText: TextView, onDone: () -> Unit) {
-        val feeds = loadRssFeeds()
-
-        if (feeds.isEmpty()) {
-            statusText.text = "No feeds yet. Tap Add Feed to add one."
-            return
-        }
-
-        statusText.text = "Refreshing feeds..."
-
+    // Adds one item. RssManager does the work (magnet link or .torrent file)
+    // on a background thread and writes the result to the Execution Log.
+    private fun addRssItemToDownloads(
+        feed: String,
+        item: RssManager.RssItem,
+        onResult: (String?) -> Unit = {}
+    ) {
         Thread {
-            var error = ""
-
-            for (feed in feeds) {
-                try {
-                    val items = fetchRssItems(feed)
-
-                    if (items.isNotEmpty()) {
-                        runOnUiThread {
-                            rssItemsCache[feed] = items
-                        }
-                    }
-                } catch (e: Throwable) {
-                    error = e.message ?: "Unknown error"
-                }
-            }
+            val error = RssManager.addItem(applicationContext, feed, item)
 
             runOnUiThread {
-                statusText.text = if (error.isBlank()) {
-                    "Refresh complete"
+                if (error == null) {
+                    Toast.makeText(this, "Added to downloads", Toast.LENGTH_SHORT).show()
                 } else {
-                    "Refresh finished with errors: $error"
+                    Toast.makeText(this, "Could not add: $error", Toast.LENGTH_LONG).show()
                 }
 
-                onDone()
+                onResult(error)
             }
         }.start()
     }
 
-    private fun fetchRssItems(feedUrl: String): List<RssItem> {
-        val connection = URL(feedUrl).openConnection() as HttpURLConnection
-        connection.connectTimeout = 10000
-        connection.readTimeout = 15000
-        connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "TorrentOr/1.0")
+    // "Add all": every item currently listed for the feed, after a question.
+    private fun confirmAddAllFromFeed(
+        feed: String,
+        items: List<RssManager.RssItem>,
+        statusText: TextView,
+        onFinished: () -> Unit = {}
+    ) {
+        AlertDialog.Builder(this)
+            .setTitle("Add all items?")
+            .setMessage(
+                "Add all ${items.size} item(s) of this feed to your downloads?\n\n" +
+                        "Items that are already in your list are skipped.\n\n$feed"
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Add all") { _, _ ->
+                statusText.text = "Adding ${items.size} item(s)..."
+                AppLog.info("RSS: adding all ${items.size} item(s) of $feed")
 
-        try {
-            connection.inputStream.use { input ->
-                val parser = XmlPullParserFactory.newInstance().newPullParser()
-                parser.setInput(input, null)
-                return parseRssXml(parser)
-            }
-        } finally {
-            connection.disconnect()
-        }
-    }
+                Thread {
+                    var added = 0
+                    var failed = 0
 
-    private fun parseRssXml(parser: XmlPullParser): List<RssItem> {
-        val items = mutableListOf<RssItem>()
+                    for ((position, item) in items.withIndex()) {
+                        val error = RssManager.addItem(applicationContext, feed, item)
 
-        var inItem = false
-        var title = ""
-        var link = ""
-        var enclosureUrl = ""
-        var enclosureLength = ""
-
-        var eventType = parser.eventType
-
-        while (eventType != XmlPullParser.END_DOCUMENT) {
-            when (eventType) {
-                XmlPullParser.START_TAG -> {
-                    val name = parser.name ?: ""
-
-                    if (name == "item") {
-                        inItem = true
-                        title = ""
-                        link = ""
-                        enclosureUrl = ""
-                        enclosureLength = ""
-                    } else if (inItem && name == "title") {
-                        title = parser.nextText()
-                    } else if (inItem && name == "link") {
-                        link = parser.nextText()
-                    } else if (inItem && name == "enclosure") {
-                        val url = parser.getAttributeValue(null, "url") ?: ""
-                        val length = parser.getAttributeValue(null, "length") ?: ""
-                        val type = parser.getAttributeValue(null, "type") ?: ""
-
-                        if (url.isNotBlank() && (
-                                type.contains("bittorrent", ignoreCase = true) ||
-                                url.endsWith(".torrent", ignoreCase = true) ||
-                                length.isNotBlank()
-                                )
-                        ) {
-                            enclosureUrl = url
-                            enclosureLength = length
-                        }
-                    }
-                }
-
-                XmlPullParser.END_TAG -> {
-                    val name = parser.name ?: ""
-
-                    if (name == "item") {
-                        val resolvedLink = resolveRssItemLink(link, enclosureUrl)
-
-                        if (resolvedLink.isNotBlank()) {
-                            items.add(
-                                RssItem(
-                                    title = title.ifBlank { "Untitled" },
-                                    link = resolvedLink,
-                                    sizeText = formatRssSize(enclosureLength)
-                                )
-                            )
+                        if (error == null) {
+                            added++
+                        } else {
+                            failed++
                         }
 
-                        inItem = false
-                    }
-                }
-            }
-
-            eventType = parser.next()
-        }
-
-        return items
-    }
-
-    private fun resolveRssItemLink(link: String, enclosureUrl: String): String {
-        if (enclosureUrl.isNotBlank()) return enclosureUrl
-        if (link.startsWith("magnet:", ignoreCase = true)) return link
-        if (link.endsWith(".torrent", ignoreCase = true)) return link
-        return ""
-    }
-
-    private fun formatRssSize(length: String): String {
-        val bytes = length.trim().toLongOrNull() ?: return ""
-        return "Size: ${formatSize(bytes)}"
-    }
-
-    private fun addRssItemToDownloads(item: RssItem) {
-        val link = item.link
-
-        if (link.startsWith("magnet:", ignoreCase = true)) {
-            val intent = Intent(this, TorrentService::class.java)
-            intent.putExtra("MAGNET", link)
-            startTorrentService(intent)
-            Toast.makeText(this, "Magnet added to downloads", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (link.endsWith(".torrent", ignoreCase = true)) {
-            Thread {
-                try {
-                    val connection = URL(link).openConnection() as HttpURLConnection
-                    connection.connectTimeout = 10000
-                    connection.readTimeout = 30000
-                    connection.instanceFollowRedirects = true
-                    connection.setRequestProperty("User-Agent", "TorrentOr/1.0")
-
-                    val file = File(cacheDir, "rss_${System.currentTimeMillis()}.torrent")
-
-                    try {
-                        connection.inputStream.use { input ->
-                            file.outputStream().use { output ->
-                                input.copyTo(output)
+                        if (position % 5 == 4) {
+                            runOnUiThread {
+                                statusText.text =
+                                    "Adding items... ${position + 1}/${items.size}"
                             }
                         }
-                    } finally {
-                        connection.disconnect()
                     }
 
-                    runOnUiThread {
-                        val intent = Intent(this@MainActivity, TorrentService::class.java)
-                        intent.putExtra("TORRENT_PATH", file.absolutePath)
-                        startTorrentService(intent)
-                        Toast.makeText(this@MainActivity, "Torrent added to downloads", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Throwable) {
-                    runOnUiThread {
-                        Toast.makeText(this@MainActivity, "Could not download torrent file", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }.start()
+                    AppLog.info("RSS: add all finished, $added added, $failed failed")
 
+                    runOnUiThread {
+                        statusText.text = if (failed == 0) {
+                            "Added $added item(s)."
+                        } else {
+                            "Added $added item(s), $failed failed. See the Execution Log."
+                        }
+
+                        onFinished()
+                    }
+                }.start()
+            }
+            .show()
+    }
+
+    // Auto-download on/off for one feed. Turning it on asks first, because
+    // from then on the app adds torrents by itself.
+    private fun toggleAutoDownload(feed: String, currentlyOn: Boolean, onDone: () -> Unit) {
+        if (currentlyOn) {
+            RssManager.setAutoDownload(this, feed, false)
+            AppLog.info("RSS: auto-download turned off for $feed")
+            Toast.makeText(this, "Auto-download turned off", Toast.LENGTH_SHORT).show()
+            onDone()
             return
         }
 
-        Toast.makeText(this, "No magnet or torrent link in this item", Toast.LENGTH_SHORT).show()
+        val refreshNote = if (RssManager.loadIntervalMinutes(this) <= 0) {
+            "\n\nAuto refresh is Off, so new items are only found when you tap Refresh now."
+        } else {
+            ""
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Auto-download new items?")
+            .setMessage(
+                "Every new item that appears in this feed from now on is added to your " +
+                        "downloads automatically.\n\n" +
+                        "Items already in the feed are not added (use Add all for those)." +
+                        refreshNote +
+                        "\n\n$feed"
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Turn on") { _, _ ->
+                RssManager.setAutoDownload(this, feed, true)
+                AppLog.info("RSS: auto-download turned on for $feed")
+                Toast.makeText(this, "Auto-download turned on", Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+            .show()
+    }
+
+    // Execution Log, in the style of qBittorrent: timestamp, level (INFO /
+    // WARNING / ERROR), colours, auto-scroll, Clear Log and Copy Log. The
+    // entries are stored by AppLog, so they are still here after the app is
+    // closed and opened again.
+    private fun showExecutionLogScreen() {
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        AppLog.init(applicationContext)
+
+        val shownLevels = mutableSetOf(
+            AppLog.Level.INFO,
+            AppLog.Level.WARNING,
+            AppLog.Level.ERROR
+        )
+
+        var autoScroll = true
+        var lastShownId = 0L
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Execution Log"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        }
+
+        val logText = TextView(this).apply {
+            typeface = android.graphics.Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(16, 16, 16, 16)
+        }
+
+        val logScroll = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#101418"))
+            addView(logText)
+        }
+
+        val autoScrollBox = CheckBox(this).apply {
+            text = "Auto-scroll"
+            setTextColor(Color.WHITE)
+            isChecked = true
+        }
+
+        fun levelColor(level: AppLog.Level): Int {
+            return when (level) {
+                AppLog.Level.INFO -> Color.parseColor("#D0D8E0")
+                AppLog.Level.WARNING -> Color.parseColor("#FFB74D")
+                AppLog.Level.ERROR -> Color.parseColor("#FF5252")
+            }
+        }
+
+        fun appendEntries(entries: List<AppLog.Entry>) {
+            if (entries.isEmpty()) return
+
+            val builder = android.text.SpannableStringBuilder()
+
+            for (entry in entries) {
+                val start = builder.length
+                builder.append(AppLog.formatLine(entry))
+
+                builder.setSpan(
+                    android.text.style.ForegroundColorSpan(levelColor(entry.level)),
+                    start,
+                    builder.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+
+                builder.append("\n")
+            }
+
+            logText.append(builder)
+        }
+
+        // Draws the whole log again (first draw, filter change, Clear Log).
+        fun rebuild() {
+            val snapshot = AppLog.snapshot()
+
+            lastShownId = snapshot.lastOrNull()?.id ?: 0L
+
+            logText.text = ""
+            appendEntries(snapshot.filter { shownLevels.contains(it.level) })
+        }
+
+        // Adds the entries written since the last check.
+        fun poll() {
+            AppLog.pullEngineLog()
+
+            val fresh = AppLog.snapshot().filter { it.id > lastShownId }
+
+            if (fresh.isEmpty()) return
+
+            lastShownId = fresh.last().id
+
+            // a screen left open for hours keeps growing, start over when huge
+            if (logText.text.length > 400_000) {
+                rebuild()
+                return
+            }
+
+            appendEntries(fresh.filter { shownLevels.contains(it.level) })
+        }
+
+        // Auto-scroll: after every layout jump to the newest line.
+        logScroll.viewTreeObserver.addOnGlobalLayoutListener {
+            if (autoScroll) {
+                logScroll.fullScroll(android.view.View.FOCUS_DOWN)
+            }
+        }
+
+        autoScrollBox.setOnCheckedChangeListener { _, checked ->
+            autoScroll = checked
+
+            if (checked) {
+                logScroll.post {
+                    logScroll.fullScroll(android.view.View.FOCUS_DOWN)
+                }
+            }
+        }
+
+        fun makeLevelBox(label: String, level: AppLog.Level): CheckBox {
+            return CheckBox(this).apply {
+                text = label
+                setTextColor(levelColor(level))
+                isChecked = true
+
+                setOnCheckedChangeListener { _, checked ->
+                    if (checked) {
+                        shownLevels.add(level)
+                    } else {
+                        shownLevels.remove(level)
+                    }
+
+                    rebuild()
+                }
+            }
+        }
+
+        val filterRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        filterRow.addView(makeLevelBox("INFO", AppLog.Level.INFO))
+        filterRow.addView(makeLevelBox("WARNING", AppLog.Level.WARNING))
+        filterRow.addView(makeLevelBox("ERROR", AppLog.Level.ERROR))
+
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        fun rowButton(label: String, onClick: () -> Unit): Button {
+            return Button(this).apply {
+                text = label
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+                setOnClickListener { onClick() }
+            }
+        }
+
+        buttonRow.addView(
+            rowButton("Clear Log") {
+                AppLog.clear()
+                AppLog.info("Execution log cleared")
+                rebuild()
+            }
+        )
+
+        buttonRow.addView(
+            rowButton("Copy Log") {
+                val lines = AppLog.snapshot()
+                    .filter { shownLevels.contains(it.level) }
+                    .map { AppLog.formatLine(it) }
+
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+
+                clipboard.setPrimaryClip(
+                    ClipData.newPlainText(
+                        "TorrentOr execution log",
+                        lines.joinToString("\n")
+                    )
+                )
+
+                Toast.makeText(
+                    this,
+                    "Copied ${lines.size} log line(s)",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
+
+        buttonRow.addView(
+            rowButton("Back") {
+                stopLogUiRefresh()
+                showMainScreen()
+            }
+        )
+
+        root.addView(title)
+        root.addView(filterRow)
+        root.addView(autoScrollBox)
+        root.addView(buttonRow)
+
+        root.addView(
+            logScroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        setContentView(root)
+
+        AppLog.pullEngineLog()
+        rebuild()
+
+        // New lines appear while the screen is open.
+        isLogScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isLogScreenActive) {
+                    return
+                }
+
+                try {
+                    poll()
+                } catch (_: Throwable) {
+                    // keep the screen alive
+                }
+
+                handler.postDelayed(this, 1000L)
+            }
+        }
+
+        logUiRefreshRunnable = runnable
+        handler.postDelayed(runnable, 1000L)
+    }
+
+    private fun stopLogUiRefresh() {
+        isLogScreenActive = false
+
+        logUiRefreshRunnable?.let { runnable ->
+            handler.removeCallbacks(runnable)
+        }
+
+        logUiRefreshRunnable = null
     }
 
     private fun showNetworkFeaturesScreen() {
@@ -1204,6 +2102,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(dhtRow)
         root.addView(pexRow)
         root.addView(lsdRow)
+        root.addView(buildEncryptionSection())
         root.addView(refreshButton)
         root.addView(backButton)
 
@@ -1212,6 +2111,97 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(outerScroll)
+    }
+
+    // Protocol encryption (like qBittorrent's "Encryption mode"), shown on the
+    // Network Features screen. It hides BitTorrent traffic from ISPs that
+    // throttle it; it does not hide your IP address or make you anonymous.
+    private fun buildEncryptionSection(): LinearLayout {
+        val section = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 24, 0, 8)
+        }
+
+        val heading = TextView(this).apply {
+            text = "Protocol encryption"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+        }
+
+        val info = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 8)
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val modeButtons = mutableListOf<Button>()
+
+        fun describe(mode: Int): String {
+            return when (mode) {
+                1 -> "Require: only encrypted peer connections are used. Peers without encryption are refused, so you may find fewer peers."
+                2 -> "Disable: peer connections are never encrypted."
+                else -> "Allow (default): connections are encrypted when the other peer supports it, otherwise they stay plain."
+            }
+        }
+
+        fun refreshInfo() {
+            val mode = EngineExtras.loadEncryptionMode(this)
+
+            info.text =
+                "Current mode: ${EngineExtras.encryptionLabel(mode)}\n" +
+                        describe(mode) +
+                        "\nA change applies to new connections."
+
+            for ((index, button) in modeButtons.withIndex()) {
+                button.text = if (index == mode) {
+                    "[${EngineExtras.encryptionLabel(index)}]"
+                } else {
+                    EngineExtras.encryptionLabel(index)
+                }
+            }
+        }
+
+        for (mode in 0..2) {
+            val button = Button(this).apply {
+                text = EngineExtras.encryptionLabel(mode)
+
+                setOnClickListener {
+                    EngineExtras.saveEncryptionMode(this@MainActivity, mode)
+
+                    try {
+                        EngineExtras.setEncryptionMode(mode)
+                    } catch (e: Throwable) {
+                        AppLog.error(
+                            "Could not change the encryption mode: " +
+                                    e.javaClass.simpleName + " " + (e.message ?: "")
+                        )
+                    }
+
+                    refreshInfo()
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Encryption: ${EngineExtras.encryptionLabel(mode)}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+
+            modeButtons.add(button)
+            row.addView(button)
+        }
+
+        section.addView(heading)
+        section.addView(info)
+        section.addView(row)
+
+        refreshInfo()
+
+        return section
     }
 
     private fun buildNetworkFeaturesText(): String {
@@ -1811,6 +2801,7 @@ class MainActivity : AppCompatActivity() {
 
                 saveMagnetOnly(magnet)
                 TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+                saveFileSelectionForTorrent(torrentIndex, selected)
                 TorrentNative.resumeTorrent(torrentIndex)
 
                 Toast.makeText(
@@ -1830,6 +2821,7 @@ class MainActivity : AppCompatActivity() {
 
                 saveMagnetOnly(magnet)
                 TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+                saveFileSelectionForTorrent(torrentIndex, allIndexes)
                 TorrentNative.resumeTorrent(torrentIndex)
 
                 Toast.makeText(
@@ -2071,6 +3063,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         currentDetailsFileListLayout = fileListLayout
+
+        filesBuiltForIndex = -1
+        filesPendingSelection = null
+        filesProgressViews.clear()
 
         fun clearContent() {
             fileListLayout.removeAllViews()
@@ -2343,7 +3339,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Auto-refresh all live tabs every 3 seconds.
-    // Trackers and Files are intentionally excluded — static data.
+    // The Files tab is only refreshed in place (progress bars), it is never
+    // rebuilt here, because rebuilding throws away the user's tick boxes.
     private fun updateActiveDetailsTab() {
         val contentText = currentDetailsContentText ?: return
         val torrentIndex = currentDetailsTorrentIndex
@@ -2404,11 +3401,19 @@ class MainActivity : AppCompatActivity() {
             "Files" -> {
                 val fileListLayout = currentDetailsFileListLayout
                 if (fileListLayout != null) {
-                    showFilesForOpening(
-                        torrentIndex,
-                        fileListLayout,
-                        contentText
-                    )
+                    if (
+                        filesBuiltForIndex == torrentIndex &&
+                        fileListLayout.childCount > 0
+                    ) {
+                        refreshFileProgressInPlace(torrentIndex)
+                    } else {
+                        // list not built yet (e.g. magnet metadata was not ready)
+                        showFilesForOpening(
+                            torrentIndex,
+                            fileListLayout,
+                            contentText
+                        )
+                    }
                 }
             }
         }
@@ -2717,7 +3722,7 @@ class MainActivity : AppCompatActivity() {
         getSharedPreferences("file_priorities", MODE_PRIVATE)
             .edit()
             .putString("selected_$key", value)
-            .apply()
+            .commit()
     }
 
 
@@ -2775,7 +3780,19 @@ class MainActivity : AppCompatActivity() {
         fileListLayout: LinearLayout,
         contentText: TextView
     ) {
+        // If this is only a rebuild of the same torrent's list, keep the ticks
+        // the user has changed but not applied yet.
+        val previousPending: Set<Int>? =
+            if (filesBuiltForIndex == torrentIndex) {
+                filesPendingSelection?.toSet()
+            } else {
+                null
+            }
+
         fileListLayout.removeAllViews()
+        filesProgressViews.clear()
+        filesBuiltForIndex = -1
+        filesPendingSelection = null
 
         val fileData = try {
             TorrentNative.getTorrentFilesByIndex(torrentIndex)
@@ -2805,10 +3822,10 @@ class MainActivity : AppCompatActivity() {
                     "Long press Open for Share / Delete / Rename."
 
         val selected = mutableSetOf<Int>()
+        filesPendingSelection = selected
         val allIndexes = mutableSetOf<Int>()
         val checkBoxes = mutableListOf<CheckBox>()
         val savedSelection = getSavedFileSelectionForTorrent(torrentIndex)
-        val pendingSelection = pendingFileSelections[torrentIndex]
         val lines = fileData.split("\n").filter { it.isNotBlank() }
 
         val selectButtonsRow = LinearLayout(this).apply {
@@ -2867,9 +3884,10 @@ class MainActivity : AppCompatActivity() {
 
             allIndexes.add(index)
 
-            val shouldBeChecked = pendingSelection?.contains(index)
-                ?: savedSelection?.contains(index)
-                ?: true
+            val shouldBeChecked =
+                previousPending?.contains(index)
+                    ?: savedSelection?.contains(index)
+                    ?: true
 
             if (shouldBeChecked) {
                 selected.add(index)
@@ -2939,6 +3957,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            filesProgressViews[index] = Pair(progressText, progressBar)
+
             row.addView(checkBox)
             row.addView(progressText)
             row.addView(progressBar)
@@ -2959,6 +3979,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         fileListLayout.addView(applyBottomButton)
+
+        filesBuiltForIndex = torrentIndex
+    }
+
+    // Updates only the progress text/bars of an already built Files list, so
+    // tick boxes, scroll position and taps are left alone.
+    private fun refreshFileProgressInPlace(torrentIndex: Int) {
+        val progressMap = getTorrentFileProgressMap(torrentIndex)
+
+        if (progressMap.isEmpty()) return
+
+        for ((index, views) in filesProgressViews) {
+            val progress = progressMap[index] ?: continue
+
+            views.first.text =
+                "Progress: ${progress.percent}%  •  " +
+                        "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}"
+
+            views.second.progress = progress.percent
+        }
     }
 
     private fun applyFilePrioritySelection(
@@ -3003,7 +4043,6 @@ class MainActivity : AppCompatActivity() {
 
         try {
             TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
-            pendingFileSelections[torrentIndex] = selected.toMutableSet()
             saveFileSelectionForTorrent(torrentIndex, selected)
 
             Toast.makeText(
