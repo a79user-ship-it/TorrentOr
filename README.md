@@ -50,7 +50,7 @@ It provides a fast, lightweight, and polished torrent experience on Android with
 * AMOLED theme
 * Android Foreground Service
 * Native C++ performance using Android NDK
-
+* RSS Feed function
 ---
 
 # Screenshots
@@ -168,19 +168,3 @@ Users are responsible for complying with the copyright laws applicable in their 
 Made with ❤️ using Kotlin, Android NDK and native libtorrent.
 
 </p>
-
-## Known Issues
-
-TorrentOr is still under active development. The following issues are currently known:
-
-### Paused Torrents Resume Automatically
-
-In some cases, torrents that have been manually paused may automatically resume after restarting the app. This behavior is unintended and is being investigated.
-
-### Previously Deleted Torrents Reappear
-
-Torrents that have been deleted may reappear after installing the app on another device or after a fresh installation. This is a known issue related to torrent state persistence and will be fixed in a future update.
-
-The file selection function doesn't work properly it resets after selecting the required files or when selecting none
-
-These issues are known and are being actively worked on. Thank you for your patience and support.
