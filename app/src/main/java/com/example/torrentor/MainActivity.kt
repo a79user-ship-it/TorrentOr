@@ -58,6 +58,15 @@ class MainActivity : AppCompatActivity() {
     private var activeFilter = "All"
     private var searchQuery = ""
 
+    // Online Search remembers what you typed, the results found, and the
+    // sort/filter choice, so leaving the screen (e.g. to Provider Settings)
+    // and coming back doesn't lose them. Cleared only when you search again.
+    private var onlineSearchQueryText = ""
+    private var onlineSearchResults: List<TorrentSearchResult> = emptyList()
+    private var onlineSearchSortMode = "Seeders"
+    private var onlineSearchProviderFilter = "All"
+    private var onlineSearchStatus = "Enter a search and tap Search."
+
     private var currentDetailsTab = ""
     private var currentDetailsTorrentIndex = -1
     private var currentDetailsContentText: TextView? = null
@@ -186,6 +195,7 @@ class MainActivity : AppCompatActivity() {
         startUiUpdates()
         handleIncomingIntent(intent)
         ensureStorageAccess()
+        ensureNotificationAccess()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -285,6 +295,24 @@ class MainActivity : AppCompatActivity() {
                     1001
                 )
             }
+        }
+    }
+
+    // Android 13+ (API 33) requires this runtime permission before any
+    // notification can be shown at all - without it, the "download
+    // complete" alert from TorrentService is silently skipped by the
+    // system. Older versions don't need it (granted automatically).
+    private fun ensureNotificationAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+
+        if (!granted) {
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                1002
+            )
         }
     }
 
@@ -708,6 +736,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val onlineSearchButton = Button(this).apply {
+            text = "Online Search"
+            setOnClickListener {
+                showOnlineSearchScreen()
+            }
+        }
+
         val filterTitle = TextView(this).apply {
             text = "Filter: $activeFilter"
             textSize = 16f
@@ -769,6 +804,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(storageSpaceButton)
         root.addView(rssButton)
         root.addView(executionLogButton)
+        root.addView(onlineSearchButton)
         root.addView(filterTitle)
         root.addView(horizontalScrollFor(filterRowOne))
         root.addView(horizontalScrollFor(filterRowTwo))
@@ -785,6 +821,464 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ RSS
 
     // The list of feeds. A tap on a feed opens that feed in its own screen.
+    // -------------------------------------------------------------- Online Search
+
+    private fun showOnlineSearchScreen() {
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        // read the remembered state instead of starting blank each time
+        var allResults: List<TorrentSearchResult> = onlineSearchResults
+        var sortMode = onlineSearchSortMode
+        var providerFilter = onlineSearchProviderFilter
+        var searching = false
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val outerScroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        val title = TextView(this).apply {
+            text = "Online Search"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        }
+
+        val hintText = TextView(this).apply {
+            text = "Searches multiple providers. This is separate from the search box on the main screen, which only searches torrents already in TorrentOr."
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 0, 0, 12)
+        }
+
+        val queryBox = EditText(this).apply {
+            hint = "Search online, e.g. ubuntu 24.04"
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+            setText(onlineSearchQueryText)
+            setSelection(text.length)
+
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    onlineSearchQueryText = s?.toString() ?: ""
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+
+        val statusText = TextView(this).apply {
+            text = onlineSearchStatus
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 8)
+        }
+
+        val resultsLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // (defined below, referenced by both the sort/filter buttons and search())
+        var redraw: () -> Unit = {}
+
+        fun visibleProviderNames(): List<String> {
+            return OnlineSearchManager.ALL_PROVIDERS.map { it.name }.distinct()
+        }
+
+        fun applySortAndFilter(): List<TorrentSearchResult> {
+            val filtered = if (providerFilter == "All") {
+                allResults
+            } else {
+                allResults.filter { it.sourceName == providerFilter }
+            }
+
+            return when (sortMode) {
+                "Name" -> filtered.sortedBy { it.name.lowercase() }
+                "Size" -> filtered.sortedByDescending { it.sizeBytes }
+                "Leechers" -> filtered.sortedByDescending { it.leechers }
+                "Age" -> filtered.sortedByDescending { it.publicationDate }
+                else -> filtered.sortedByDescending { it.seeders }
+            }
+        }
+
+        fun resultLabel(result: TorrentSearchResult): String {
+            val parts = mutableListOf<String>()
+
+            if (result.sizeText.isNotBlank()) {
+                parts.add(result.sizeText)
+            } else if (result.sizeBytes > 0) {
+                parts.add("${result.sizeBytes / (1024 * 1024)} MB")
+            }
+
+            if (result.seeders >= 0) parts.add("Seeds: ${result.seeders}")
+            if (result.leechers >= 0) parts.add("Leechers: ${result.leechers}")
+            parts.add("Source: ${result.sourceName}")
+
+            if (result.publicationDate.isNotBlank()) {
+                parts.add(result.publicationDate)
+            }
+
+            return result.name + "\n" + parts.joinToString("  •  ")
+        }
+
+        fun rebuildResultsList() {
+            resultsLayout.removeAllViews()
+
+            val shown = applySortAndFilter()
+
+            if (shown.isEmpty()) {
+                val emptyText = TextView(this).apply {
+                    text = if (searching) "Searching..." else "No results."
+                    textSize = 14f
+                    setTextColor(Color.LTGRAY)
+                    setPadding(0, 12, 0, 12)
+                }
+                resultsLayout.addView(emptyText)
+                return
+            }
+
+            for (result in shown) {
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(16, 16, 16, 16)
+                    setBackgroundColor(cardColor())
+
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        bottomMargin = 12
+                    }
+                }
+
+                val label = TextView(this).apply {
+                    text = resultLabel(result)
+                    textSize = 13f
+                    setTextColor(Color.WHITE)
+                    setPadding(0, 0, 0, 8)
+                }
+
+                val buttonRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+
+                val canAdd = result.magnetUri.isNotBlank() ||
+                        result.torrentUrl.isNotBlank() ||
+                        result.resultPageUrl.isNotBlank()
+
+                val addButton = Button(this).apply {
+                    text = when {
+                        result.magnetUri.isNotBlank() || result.torrentUrl.isNotBlank() -> "Add Magnet"
+                        result.resultPageUrl.isNotBlank() -> "Add (via page)"
+                        else -> "Add"
+                    }
+
+                    isEnabled = canAdd
+
+                    setOnClickListener {
+                        isEnabled = false
+                        val originalText = text
+                        text = "Adding..."
+
+                        Thread {
+                            val error = OnlineSearchAdder.add(this@MainActivity, result)
+
+                            runOnUiThread {
+                                if (error == null) {
+                                    text = "Added"
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Added to downloads",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    isEnabled = true
+                                    text = originalText
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Could not add: $error",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
+                        }.start()
+                    }
+                }
+
+                val openSiteButton = Button(this).apply {
+                    text = "Open Site"
+
+                    val pageUrl = result.resultPageUrl.trim()
+                    val canOpen = pageUrl.startsWith("http://", ignoreCase = true) ||
+                            pageUrl.startsWith("https://", ignoreCase = true)
+
+                    isEnabled = canOpen
+
+                    if (canOpen) {
+                        setOnClickListener {
+                            try {
+                                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(pageUrl))
+                                startActivity(browserIntent)
+                            } catch (_: Throwable) {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "No app can open this link",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }
+                }
+
+                buttonRow.addView(addButton)
+                buttonRow.addView(openSiteButton)
+
+                card.addView(label)
+                card.addView(buttonRow)
+                resultsLayout.addView(card)
+            }
+        }
+
+        redraw = { rebuildResultsList() }
+
+        fun runSearch() {
+            val query = queryBox.text.toString().trim()
+
+            if (query.isBlank()) {
+                statusText.text = "Enter something to search for."
+                onlineSearchStatus = statusText.text.toString()
+                return
+            }
+
+            searching = true
+            allResults = emptyList()
+            redraw()
+
+            val providerNames = OnlineSearchManager.ALL_PROVIDERS
+                .filter { OnlineSearchManager.isProviderEnabled(this, it.name) }
+                .map { it.name }
+
+            if (providerNames.isEmpty()) {
+                searching = false
+                statusText.text = "No providers are enabled. Use Provider Settings below."
+                onlineSearchStatus = statusText.text.toString()
+                redraw()
+                return
+            }
+
+            val doneNames = mutableSetOf<String>()
+            statusText.text = "Searching ${providerNames.size} provider(s)..."
+            onlineSearchStatus = statusText.text.toString()
+            onlineSearchResults = emptyList()
+
+            OnlineSearchManager.search(
+                this,
+                query,
+                onProviderDone = { outcome ->
+                    runOnUiThread {
+                        doneNames.add(outcome.providerName)
+
+                        statusText.text = if (outcome.error == null) {
+                            "${outcome.providerName}: ${outcome.resultCount} result(s)   " +
+                                    "(${doneNames.size}/${providerNames.size} providers done)"
+                        } else {
+                            "${outcome.providerName}: ${outcome.error}   " +
+                                    "(${doneNames.size}/${providerNames.size} providers done)"
+                        }
+                        onlineSearchStatus = statusText.text.toString()
+                    }
+                },
+                onAllDone = { combined ->
+                    runOnUiThread {
+                        searching = false
+                        allResults = combined
+
+                        statusText.text = if (combined.isEmpty()) {
+                            "No results from any provider."
+                        } else {
+                            "${combined.size} result(s) from ${providerNames.size} provider(s)."
+                        }
+                        onlineSearchStatus = statusText.text.toString()
+                        onlineSearchResults = allResults
+
+                        redraw()
+                    }
+                }
+            )
+        }
+
+        val searchButton = Button(this).apply {
+            text = "Search"
+            setOnClickListener { runSearch() }
+        }
+
+        queryBox.setOnEditorActionListener { _, _, _ ->
+            runSearch()
+            true
+        }
+
+        val sortButton = Button(this).apply {
+            text = "Sort: $sortMode"
+            setOnClickListener {
+                val options = arrayOf("Seeders", "Leechers", "Size", "Name", "Age")
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Sort by")
+                    .setItems(options) { _, which ->
+                        sortMode = options[which]
+                        onlineSearchSortMode = sortMode
+                        text = "Sort: $sortMode"
+                        redraw()
+                    }
+                    .show()
+            }
+        }
+
+        val filterButton = Button(this).apply {
+            text = "Provider: $providerFilter"
+            setOnClickListener {
+                val options = (listOf("All") + visibleProviderNames()).toTypedArray()
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Show results from")
+                    .setItems(options) { _, which ->
+                        providerFilter = options[which]
+                        onlineSearchProviderFilter = providerFilter
+                        text = "Provider: $providerFilter"
+                        redraw()
+                    }
+                    .show()
+            }
+        }
+
+        val settingsButton = Button(this).apply {
+            text = "Provider Settings"
+            setOnClickListener {
+                showOnlineSearchProviderSettings()
+            }
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                showMainScreen()
+            }
+        }
+
+        root.addView(title)
+        root.addView(hintText)
+        root.addView(queryBox)
+        root.addView(
+            horizontalScrollFor(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(searchButton)
+                    addView(sortButton)
+                    addView(filterButton)
+                    addView(settingsButton)
+                }
+            )
+        )
+        root.addView(statusText)
+        root.addView(resultsLayout)
+        root.addView(backButton)
+
+        setContentView(outerScroll)
+    }
+
+    private fun showOnlineSearchProviderSettings() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Search Provider Settings"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 12)
+        }
+
+        for (provider in OnlineSearchManager.ALL_PROVIDERS) {
+            val box = CheckBox(this).apply {
+                text = provider.name
+                setTextColor(Color.WHITE)
+                isChecked = OnlineSearchManager.isProviderEnabled(this@MainActivity, provider.name)
+
+                setOnCheckedChangeListener { _, checked ->
+                    OnlineSearchManager.setProviderEnabled(
+                        this@MainActivity,
+                        provider.name,
+                        checked
+                    )
+                }
+            }
+
+            root.addView(box)
+        }
+
+        val timeoutLabel = TextView(this).apply {
+            text = "Timeout per provider (seconds)"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val timeoutInput = EditText(this).apply {
+            setText(OnlineSearchManager.loadTimeoutSeconds(this@MainActivity).toString())
+            setTextColor(Color.WHITE)
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+        }
+
+        val saveButton = Button(this).apply {
+            text = "Save"
+            setOnClickListener {
+                val seconds = timeoutInput.text.toString().toIntOrNull()
+
+                if (seconds != null && seconds in 3..60) {
+                    OnlineSearchManager.saveTimeoutSeconds(this@MainActivity, seconds)
+                    Toast.makeText(this@MainActivity, "Saved", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Enter a number between 3 and 60",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                showOnlineSearchScreen()
+            }
+        }
+
+        root.addView(title)
+        root.addView(timeoutLabel)
+        root.addView(timeoutInput)
+        root.addView(saveButton)
+        root.addView(backButton)
+
+        setContentView(ScrollView(this).apply { addView(root) })
+    }
+
     private fun showRssScreen() {
         stopNetworkFeaturesAutoRefresh()
         stopStorageAutoRefresh()
@@ -1788,6 +2282,10 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTextColor(Color.WHITE)
             setPadding(16, 16, 16, 16)
+            // Long-press to select and drag handles to extend the
+            // selection, then use the system "Copy" action - lets you
+            // grab one line (or a few) instead of the whole log.
+            setTextIsSelectable(true)
         }
 
         val logScroll = ScrollView(this).apply {
@@ -3563,16 +4061,40 @@ class MainActivity : AppCompatActivity() {
             ""
         }
 
-        val creator = try {
+        // The tool that made the .torrent (qBittorrent, Transmission,
+        // mktorrent, Deluge, rTorrent, ...), when the torrent itself says so.
+        // libtorrent reads this straight from the "created by" field that
+        // tool wrote into the .torrent file - TorrentOr doesn't guess it.
+        //
+        // It is often unavailable for a torrent added by MAGNET LINK: a
+        // magnet only carries a hash, and the BitTorrent metadata exchange
+        // that follows (BEP 9 / ut_metadata) only fetches the "info"
+        // dictionary (file list + piece hashes) - "created by" and
+        // "creation date" live outside "info", so they are never part of
+        // what gets exchanged over a magnet. A .torrent FILE has both, but
+        // even then some tools simply don't write this field.
+        val creatorRaw = try {
             TorrentNative.getTorrentCreator(torrentIndex)
         } catch (e: Throwable) {
             "Unknown"
         }
 
-        val createdDate = try {
+        val creator = if (creatorRaw.isBlank() || creatorRaw.equals("Unknown", ignoreCase = true)) {
+            "Unknown (not in this torrent's metadata - magnet-added torrents usually can't carry this field, and some tools don't write it either)"
+        } else {
+            creatorRaw
+        }
+
+        val createdDateRaw = try {
             TorrentNative.getTorrentCreationDate(torrentIndex)
         } catch (e: Throwable) {
             "Unknown"
+        }
+
+        val createdDate = if (createdDateRaw.isBlank() || createdDateRaw.equals("Unknown", ignoreCase = true)) {
+            "Unknown (same reason as Creator, above)"
+        } else {
+            createdDateRaw
         }
 
         val privateTorrent = try {
@@ -3610,6 +4132,8 @@ class MainActivity : AppCompatActivity() {
 
         text.append("General\n\n")
         text.append("Name:\n").append(name).append("\n\n")
+        text.append("Created with: ").append(creator).append("\n")
+        text.append("Created on: ").append(createdDate).append("\n\n")
         text.append("Status: ").append(state).append("\n")
         text.append("Progress: ").append(progress).append("\n")
         text.append("Download: ").append(download).append("\n")
@@ -3624,8 +4148,6 @@ class MainActivity : AppCompatActivity() {
         text.append("Availability: ").append(availability).append("\n")
         text.append("Swarm:\n").append(swarmHealth).append("\n")
         text.append("Web Seeds: ").append(webSeedCount).append("\n")
-        text.append("Creator: ").append(creator).append("\n")
-        text.append("Created: ").append(createdDate).append("\n")
         text.append("Private: ").append(privateTorrent).append("\n")
         text.append("Source: ").append(source).append("\n")
         text.append("Encoding: ").append(encoding).append("\n")

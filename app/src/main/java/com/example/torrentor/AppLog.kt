@@ -171,12 +171,23 @@ object AppLog {
      */
     private var engineLogWarned = false
     private var ipv6NoticeShown = false
+    private var httpsTrackerNoticeShown = false
 
     // libtorrent listens on IPv4 and on IPv6 ([::]). On a network without IPv6
     // the announce over [::] to a tracker always fails with "unreachable" while
     // the IPv4 announce works, so torrents run fine. These lines only add noise.
     private fun isIpv6Unreachable(text: String): Boolean {
         return text.contains("[::]") && text.contains("unreachable", ignoreCase = true)
+    }
+
+    // This build of libtorrent has no OpenSSL/TLS linked in, so it can never
+    // announce to a tracker whose URL starts with https:// - every attempt
+    // fails instantly with "unsupported URL protocol". It is permanent (not
+    // a network hiccup) and harmless: the same torrent's udp:// trackers plus
+    // DHT/PEX still find peers. Say it once, then hide the repeats.
+    private fun isUnsupportedHttpsTracker(text: String): Boolean {
+        return text.contains("https://", ignoreCase = true) &&
+                text.contains("unsupported URL protocol", ignoreCase = true)
     }
 
     fun pullEngineLog() {
@@ -218,6 +229,24 @@ object AppLog {
                         Level.INFO,
                         "Tracker announces over IPv6 are unreachable on this network " +
                                 "and are skipped. IPv4 announces are used, this is normal. " +
+                                "Further messages of this kind are hidden."
+                    )
+                }
+
+                continue
+            }
+
+            if (isUnsupportedHttpsTracker(text)) {
+                // say it once, then leave these lines out
+                if (!httpsTrackerNoticeShown) {
+                    httpsTrackerNoticeShown = true
+
+                    add(
+                        Level.INFO,
+                        "Some trackers use an https:// announce URL, which this build " +
+                                "cannot reach (no TLS support), so announces to them always " +
+                                "fail with \"unsupported URL protocol\". Their udp:// trackers " +
+                                "and DHT/PEX still find peers normally. " +
                                 "Further messages of this kind are hidden."
                     )
                 }

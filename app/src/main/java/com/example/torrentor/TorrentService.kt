@@ -3,6 +3,7 @@ package com.example.torrentor
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.Build
@@ -11,6 +12,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import java.io.File
 
 class TorrentService : Service() {
@@ -1090,11 +1092,15 @@ class TorrentService : Service() {
         }
     }
 
-    private fun saveCompletedDateIfMissing(hash: String) {
-        if (!isGoodHash(hash)) return
+    // Returns true the FIRST time this hash is recorded as completed (i.e.
+    // the exact moment it finished), false on every later check - that is
+    // the signal checkCompletedTorrentDates() uses to fire a notification
+    // only once per torrent, not on every 3-second status poll.
+    private fun saveCompletedDateIfMissing(hash: String): Boolean {
+        if (!isGoodHash(hash)) return false
 
         val key = normalizeHashForKey(hash)
-        if (key.isBlank()) return
+        if (key.isBlank()) return false
 
         val prefs = getSharedPreferences("torrent_dates", MODE_PRIVATE)
 
@@ -1102,7 +1108,11 @@ class TorrentService : Service() {
             prefs.edit()
                 .putLong("completed_$key", System.currentTimeMillis())
                 .apply()
+
+            return true
         }
+
+        return false
     }
 
     private fun removeTorrentDates(hash: String) {
@@ -1162,7 +1172,11 @@ class TorrentService : Service() {
                 }
 
                 if (isGoodHash(hash)) {
-                    saveCompletedDateIfMissing(hash)
+                    val justCompleted = saveCompletedDateIfMissing(hash)
+
+                    if (justCompleted) {
+                        showTorrentCompleteNotification(extractTorrentName(line), hash)
+                    }
                 }
             }
         }
@@ -1171,6 +1185,49 @@ class TorrentService : Service() {
     private fun extractPercent(line: String): Int {
         val match = Regex("""(\d+)%""").find(line)
         return match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+    }
+
+    // The status line looks like "Name • State • 100% • ..." (the same
+    // format MainActivity parses for the torrent list), so the name is
+    // everything before the first " • ".
+    private fun extractTorrentName(line: String): String {
+        val name = line.split(" \u2022 ").firstOrNull()?.trim()
+        return if (name.isNullOrBlank()) "A torrent" else name
+    }
+
+    // A real, user-visible notification (separate from the silent ongoing
+    // "TorrentOr is running" one) the moment a torrent finishes. Tapping it
+    // opens the app, same as tapping the app icon.
+    private fun showTorrentCompleteNotification(name: String, hash: String) {
+        try {
+            val openIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("COMPLETED_TORRENT_HASH", hash)
+            }
+
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                hash.hashCode(),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(this, "torrent_complete")
+                .setContentTitle("Download complete")
+                .setContentText(name)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(name))
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentIntent(pendingIntent)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+
+            NotificationManagerCompat.from(this).notify(hash.hashCode(), notification)
+        } catch (e: SecurityException) {
+            // POST_NOTIFICATIONS not granted - the ongoing service
+            // notification still works, this one is just skipped.
+        } catch (e: Throwable) {
+        }
     }
 
     private fun startUpdates() {
@@ -1342,6 +1399,19 @@ class TorrentService : Service() {
                 getSystemService(NotificationManager::class.java)
 
             manager.createNotificationChannel(channel)
+
+            // (added) Separate, higher-importance channel just for "a
+            // torrent finished" alerts, so it can make a sound/pop up
+            // without touching the always-silent ongoing service one.
+            val completeChannel = NotificationChannel(
+                "torrent_complete",
+                "Download Complete",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notifies you when a torrent finishes downloading"
+            }
+
+            manager.createNotificationChannel(completeChannel)
         }
     }
 }

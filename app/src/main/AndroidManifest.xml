@@ -16,6 +16,9 @@
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- (added) Needed on Android 13+ to show the "download complete" notification. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
