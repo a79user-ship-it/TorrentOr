@@ -2981,6 +2981,57 @@ class MainActivity : AppCompatActivity() {
     private fun torrentSpeedLimitPrefs() =
         getSharedPreferences("torrent_speed_limits", MODE_PRIVATE)
 
+    // Low Disk Space Warning - same prefs file TorrentService reads from
+    // for its own periodic check. Warn-only: this never blocks an add.
+    private fun storageSettingsPrefs() =
+        getSharedPreferences("storage_settings", MODE_PRIVATE)
+
+    private fun getLowSpaceThresholdMb(): Int {
+        return storageSettingsPrefs().getInt("low_space_threshold_mb", 500)
+    }
+
+    private fun getLowSpaceThresholdBytes(): Long {
+        return getLowSpaceThresholdMb().toLong() * 1024L * 1024L
+    }
+
+    // Gates a "Download..." button's action behind a low-disk-space
+    // check. If "Ignore low storage space" is checked, or there's
+    // nothing to warn about (including a storage read error - never
+    // block an add over that), onContinue runs immediately with no
+    // dialog. Otherwise shows a Continue/Cancel dialog; Cancel simply
+    // leaves the user on the same screen having done nothing.
+    private fun confirmLowDiskSpaceThenRun(
+        ignoreLowSpace: Boolean,
+        onContinue: () -> Unit
+    ) {
+        if (ignoreLowSpace) {
+            onContinue()
+            return
+        }
+
+        val free = try {
+            StatFs(savePath).availableBytes
+        } catch (_: Throwable) {
+            onContinue()
+            return
+        }
+
+        if (free >= getLowSpaceThresholdBytes()) {
+            onContinue()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Low Disk Space")
+            .setMessage(
+                "Only ${formatSize(free)} free on this device. " +
+                        "This download may fail if space runs out. Continue anyway?"
+            )
+            .setPositiveButton("Continue") { _, _ -> onContinue() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     // Used from the add-time file-selection screens (magnet metadata,
     // magnet file selection, .torrent file selection) where the user
     // can opt in to Sequential Download before the download even
@@ -3769,26 +3820,34 @@ class MainActivity : AppCompatActivity() {
             isChecked = false
         }
 
+        val ignoreLowSpaceCheckBox = CheckBox(this).apply {
+            text = "Ignore low storage space"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
         val downloadNowButton = Button(this).apply {
             text = "Download All Without Waiting"
             setOnClickListener {
-                skipMagnetSelection = true
+                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                    skipMagnetSelection = true
 
-                applySequentialDownloadForHash(
-                    getSafeTorrentHashForAction(torrentIndex),
-                    sequentialCheckBox.isChecked
-                )
+                    applySequentialDownloadForHash(
+                        getSafeTorrentHashForAction(torrentIndex),
+                        sequentialCheckBox.isChecked
+                    )
 
-                saveMagnetOnly(magnet)
-                TorrentNative.resumeTorrent(torrentIndex)
+                    saveMagnetOnly(magnet)
+                    TorrentNative.resumeTorrent(torrentIndex)
 
-                Toast.makeText(
-                    this@MainActivity,
-                    "Download started. Files will begin after metadata is ready.",
-                    Toast.LENGTH_SHORT
-                ).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Download started. Files will begin after metadata is ready.",
+                        Toast.LENGTH_SHORT
+                    ).show()
 
-                showMainScreen()
+                    showMainScreen()
+                }
             }
         }
 
@@ -3804,6 +3863,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(title)
         root.addView(statusText)
         root.addView(sequentialCheckBox)
+        root.addView(ignoreLowSpaceCheckBox)
         root.addView(downloadNowButton)
         root.addView(cancelButton)
 
@@ -3939,6 +3999,12 @@ class MainActivity : AppCompatActivity() {
             isChecked = false
         }
 
+        val ignoreLowSpaceCheckBox = CheckBox(this).apply {
+            text = "Ignore low storage space"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
         val downloadSelected = Button(this).apply {
             text = "Download Selected"
             setOnClickListener {
@@ -3947,50 +4013,54 @@ class MainActivity : AppCompatActivity() {
                     return@setOnClickListener
                 }
 
-                val indexes = selected.sorted().joinToString(",")
+                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                    val indexes = selected.sorted().joinToString(",")
 
-                applySequentialDownloadForHash(
-                    getSafeTorrentHashForAction(torrentIndex),
-                    sequentialCheckBox.isChecked
-                )
+                    applySequentialDownloadForHash(
+                        getSafeTorrentHashForAction(torrentIndex),
+                        sequentialCheckBox.isChecked
+                    )
 
-                saveMagnetOnly(magnet)
-                TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
-                saveFileSelectionForTorrent(torrentIndex, selected)
-                TorrentNative.resumeTorrent(torrentIndex)
+                    saveMagnetOnly(magnet)
+                    TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+                    saveFileSelectionForTorrent(torrentIndex, selected)
+                    TorrentNative.resumeTorrent(torrentIndex)
 
-                Toast.makeText(
-                    this@MainActivity,
-                    "Magnet download started",
-                    Toast.LENGTH_SHORT
-                ).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Magnet download started",
+                        Toast.LENGTH_SHORT
+                    ).show()
 
-                showMainScreen()
+                    showMainScreen()
+                }
             }
         }
 
         val downloadAll = Button(this).apply {
             text = "Download All"
             setOnClickListener {
-                val indexes = allIndexes.sorted().joinToString(",")
+                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                    val indexes = allIndexes.sorted().joinToString(",")
 
-                applySequentialDownloadForHash(
-                    getSafeTorrentHashForAction(torrentIndex),
-                    sequentialCheckBox.isChecked
-                )
+                    applySequentialDownloadForHash(
+                        getSafeTorrentHashForAction(torrentIndex),
+                        sequentialCheckBox.isChecked
+                    )
 
-                saveMagnetOnly(magnet)
-                TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
-                saveFileSelectionForTorrent(torrentIndex, allIndexes)
-                TorrentNative.resumeTorrent(torrentIndex)
+                    saveMagnetOnly(magnet)
+                    TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+                    saveFileSelectionForTorrent(torrentIndex, allIndexes)
+                    TorrentNative.resumeTorrent(torrentIndex)
 
-                Toast.makeText(
-                    this@MainActivity,
-                    "Magnet download started",
-                    Toast.LENGTH_SHORT
-                ).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Magnet download started",
+                        Toast.LENGTH_SHORT
+                    ).show()
 
-                showMainScreen()
+                    showMainScreen()
+                }
             }
         }
 
@@ -4006,6 +4076,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(selectButtonsRow)
         container.addView(scroll)
         container.addView(sequentialCheckBox)
+        container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
         container.addView(cancel)
@@ -4132,6 +4203,12 @@ class MainActivity : AppCompatActivity() {
             isChecked = false
         }
 
+        val ignoreLowSpaceCheckBox = CheckBox(this).apply {
+            text = "Ignore low storage space"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
         // The torrent handle doesn't exist yet at this point - it's only
         // created once TorrentService receives the Intent below - so this
         // only persists the choice (keyed by the file's own hash); the
@@ -4160,28 +4237,32 @@ class MainActivity : AppCompatActivity() {
                     return@setOnClickListener
                 }
 
-                val indexes = selected.sorted().joinToString(",")
+                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                    val indexes = selected.sorted().joinToString(",")
 
-                persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
+                    persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
 
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("TORRENT_PATH", filePath)
-                intent.putExtra("SELECTED_INDEXES", indexes)
+                    val intent = Intent(this@MainActivity, TorrentService::class.java)
+                    intent.putExtra("TORRENT_PATH", filePath)
+                    intent.putExtra("SELECTED_INDEXES", indexes)
 
-                startTorrentService(intent)
-                showMainScreen()
+                    startTorrentService(intent)
+                    showMainScreen()
+                }
             }
         }
 
         val downloadAll = Button(this).apply {
             text = "Download All"
             setOnClickListener {
-                persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
+                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                    persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
 
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("TORRENT_PATH", filePath)
-                startTorrentService(intent)
-                showMainScreen()
+                    val intent = Intent(this@MainActivity, TorrentService::class.java)
+                    intent.putExtra("TORRENT_PATH", filePath)
+                    startTorrentService(intent)
+                    showMainScreen()
+                }
             }
         }
 
@@ -4194,6 +4275,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(selectButtonsRow)
         container.addView(scroll)
         container.addView(sequentialCheckBox)
+        container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
         container.addView(back)
@@ -6287,6 +6369,45 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val thresholdLabel = TextView(this).apply {
+            text = "Low Space Warning Threshold (MB)"
+            setTextColor(Color.WHITE)
+            setPadding(0, 24, 0, 4)
+        }
+
+        val thresholdInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(getLowSpaceThresholdMb().toString())
+        }
+
+        val applyThresholdButton = Button(this).apply {
+            text = "Apply Threshold"
+            setOnClickListener {
+                val mb = thresholdInput.text.toString().toIntOrNull()
+
+                if (mb == null || mb <= 0) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Enter a threshold greater than 0",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                storageSettingsPrefs().edit()
+                    .putInt("low_space_threshold_mb", mb)
+                    .apply()
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Low space threshold set to $mb MB",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                info.text = buildStorageSpaceText()
+            }
+        }
+
         val back = Button(this).apply {
             text = "Back"
             setOnClickListener {
@@ -6298,6 +6419,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(title)
         root.addView(info)
         root.addView(refresh)
+        root.addView(thresholdLabel)
+        root.addView(thresholdInput)
+        root.addView(applyThresholdButton)
         root.addView(back)
 
         val scroll = ScrollView(this).apply {
@@ -6320,12 +6444,22 @@ class MainActivity : AppCompatActivity() {
                 0.0
             }
 
+            val thresholdMb = getLowSpaceThresholdMb()
+            val lowSpaceLine = if (free < getLowSpaceThresholdBytes()) {
+                "\n⚠ LOW SPACE WARNING - free space is below the " +
+                        "$thresholdMb MB threshold"
+            } else {
+                ""
+            }
+
             "Save Path:\n$savePath\n\n" +
                     "Free Space: ${formatSize(free)}\n" +
                     "Used Space: ${formatSize(used)}\n" +
                     "Total Space: ${formatSize(total)}\n" +
-                    "Used: ${String.format("%.1f", usedPercent)}%\n\n" +
-                    "Auto-refresh: Every 3 seconds"
+                    "Used: ${String.format("%.1f", usedPercent)}%\n" +
+                    "Low Space Warning Threshold: $thresholdMb MB" +
+                    lowSpaceLine +
+                    "\n\nAuto-refresh: Every 3 seconds"
         } catch (e: Throwable) {
             "Could not read storage space\n\n$savePath"
         }

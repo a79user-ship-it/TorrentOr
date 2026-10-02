@@ -27,6 +27,10 @@ class TorrentService : Service() {
     private var lastSessionDownload = 0L
     private var lastSessionUpload = 0L
 
+    // Fixed id so each new low-space notification replaces the last one
+    // instead of stacking up a new row every time an episode starts.
+    private val LOW_SPACE_NOTIFICATION_ID = 9001
+
     // Feature 4: UPnP discovery listens for SSDP multicast responses, which
     // on many devices need this lock held to actually arrive. Held only
     // while UPnP is enabled and this service is running - acquired in
@@ -1662,11 +1666,77 @@ class TorrentService : Service() {
         }
     }
 
+    // Low Disk Space Warning. A simple StatFs check against a configurable
+    // threshold (same prefs the Storage Space screen in MainActivity writes
+    // to). Warn-only, per design - this never pauses, resumes, or touches
+    // any torrent. lowSpaceWarned stops the Execution Log being spammed
+    // every 3 seconds while space stays low; it resets once space recovers
+    // above the threshold, so a later drop warns again.
+    private var lowSpaceWarned = false
+
+    private fun storageSettingsPrefs() =
+        getSharedPreferences("storage_settings", MODE_PRIVATE)
+
+    private fun checkLowDiskSpace() {
+        try {
+            val stat = android.os.StatFs(savePath)
+            val free = stat.availableBytes
+            val thresholdMb = storageSettingsPrefs().getInt("low_space_threshold_mb", 500)
+            val thresholdBytes = thresholdMb.toLong() * 1024L * 1024L
+
+            if (free < thresholdBytes) {
+                if (!lowSpaceWarned) {
+                    lowSpaceWarned = true
+
+                    val mbFree = free / (1024 * 1024)
+
+                    AppLog.warning(
+                        "Low disk space: only ${mbFree} MB free " +
+                        "(threshold ${thresholdMb} MB). Downloads may fail if space runs out."
+                    )
+
+                    // Warn-only, same as the log line above - this never
+                    // pauses or touches any torrent. One notification per
+                    // "episode" (lowSpaceWarned resets once space recovers
+                    // above the threshold), so it doesn't repeat every
+                    // 3-second poll while space stays low.
+                    try {
+                        val notification =
+                            NotificationCompat.Builder(this, "low_space_warning")
+                                .setContentTitle("Low disk space")
+                                .setContentText(
+                                    "Only $mbFree MB free - downloads may fail " +
+                                            "if space runs out"
+                                )
+                                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                                .setAutoCancel(true)
+                                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                                .build()
+
+                        NotificationManagerCompat.from(this).notify(
+                            LOW_SPACE_NOTIFICATION_ID,
+                            notification
+                        )
+                    } catch (e: SecurityException) {
+                        // POST_NOTIFICATIONS not granted - the Execution
+                        // Log warning above still recorded it.
+                    } catch (e: Throwable) {
+                    }
+                }
+            } else {
+                lowSpaceWarned = false
+            }
+        } catch (_: Throwable) {
+            // Not fatal - a storage read error should never crash the update loop.
+        }
+    }
+
     private fun startUpdates() {
         handler.post(object : Runnable {
             override fun run() {
                 savePermanentGlobalStats()
                 checkCompletedTorrentDates()
+                checkLowDiskSpace()
 
                 updateNotification(
                     TorrentNative.getDetailedStatus()
@@ -1844,6 +1914,19 @@ class TorrentService : Service() {
             }
 
             manager.createNotificationChannel(completeChannel)
+
+            // (added) Separate channel for low-disk-space warnings, so it
+            // can be muted independently of the download-complete and
+            // ongoing-service channels.
+            val lowSpaceChannel = NotificationChannel(
+                "low_space_warning",
+                "Low Disk Space",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Warns when free storage drops below your threshold"
+            }
+
+            manager.createNotificationChannel(lowSpaceChannel)
         }
     }
 }
