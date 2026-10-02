@@ -19,6 +19,18 @@
     <!-- (added) Needed on Android 13+ to show the "download complete" notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- (added, Feature 4) Lets the Connection screen detect mobile data, so it can
+         show "not available on mobile data" instead of letting UPnP/NAT-PMP loop on
+         a failure that can never succeed over a carrier connection. Normal permission,
+         no runtime prompt. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- (added, Feature 4) Needed to hold a WifiManager.MulticastLock while UPnP is
+         enabled, so SSDP multicast responses from the router can actually reach the
+         app on networks/devices that otherwise filter them. Normal permission, no
+         runtime prompt. Held only while UPnP is on and the service is running. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <application
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"

@@ -3,7 +3,10 @@ package com.example.torrentor
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -13,6 +16,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.os.Looper
 import android.os.StatFs
+import android.util.Log
 import android.webkit.MimeTypeMap
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,6 +62,25 @@ class MainActivity : AppCompatActivity() {
     private var activeFilter = "All"
     private var searchQuery = ""
 
+    // Which field the visible torrent list is ordered by. This only
+    // changes display order; it never changes the native list index used
+    // for Pause/Resume/Remove actions, since those are resolved from the
+    // original (unsorted) position captured before sorting.
+    private var sortMode = "None"
+
+    private val TORRENT_SORT_MODES = arrayOf(
+        "None",
+        "Name (A-Z)",
+        "Name (Z-A)",
+        "Size (Largest First)",
+        "Size (Smallest First)",
+        "Date Added (Newest First)",
+        "Date Added (Oldest First)",
+        "Progress (Highest First)",
+        "Progress (Lowest First)",
+        "Status (A-Z)"
+    )
+
     // Online Search remembers what you typed, the results found, and the
     // sort/filter choice, so leaving the screen (e.g. to Provider Settings)
     // and coming back doesn't lose them. Cleared only when you search again.
@@ -80,6 +103,9 @@ class MainActivity : AppCompatActivity() {
 
     private var networkFeaturesRefreshRunnable: Runnable? = null
     private var isNetworkFeaturesScreenActive = false
+
+    private var connectionRefreshRunnable: Runnable? = null
+    private var isConnectionScreenActive = false
 
     private var storageRefreshRunnable: Runnable? = null
     private var isStorageScreenActive = false
@@ -715,6 +741,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val connectionSettingsButton = Button(this).apply {
+            text = "Connection"
+            setOnClickListener {
+                showConnectionSettingsScreen()
+            }
+        }
+
+        val speedLimitsButton = Button(this).apply {
+            text = "Speed Limits"
+            setOnClickListener {
+                showSpeedLimitsScreen()
+            }
+        }
+
         val storageSpaceButton = Button(this).apply {
             text = "Storage Space"
             setOnClickListener {
@@ -777,6 +817,19 @@ class MainActivity : AppCompatActivity() {
         filterRowTwo.addView(makeFilterButton("Paused"))
         filterRowTwo.addView(makeFilterButton("Completed"))
 
+        val sortButton = Button(this).apply {
+            text = "Sort: $sortMode"
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Sort torrents by")
+                    .setItems(TORRENT_SORT_MODES) { _, which ->
+                        sortMode = TORRENT_SORT_MODES[which]
+                        showMainScreen()
+                    }
+                    .show()
+            }
+        }
+
         listLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -801,6 +854,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(globalStatistics)
         root.addView(portForwardingStatus)
         root.addView(networkFeatures)
+        root.addView(connectionSettingsButton)
+        root.addView(speedLimitsButton)
         root.addView(storageSpaceButton)
         root.addView(rssButton)
         root.addView(executionLogButton)
@@ -808,6 +863,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(filterTitle)
         root.addView(horizontalScrollFor(filterRowOne))
         root.addView(horizontalScrollFor(filterRowTwo))
+        root.addView(sortButton)
         root.addView(listLayout)
 
         val outerScroll = ScrollView(this).apply {
@@ -2903,6 +2959,545 @@ class MainActivity : AppCompatActivity() {
         networkFeaturesRefreshRunnable = null
     }
 
+    // ------------------------------------------------- Feature 4: Connection
+
+    // Feature 3: Sequential Download & First/Last Piece Priority - same
+    // prefs files TorrentService reads from on restore, keyed the same
+    // way (normalizeHashForDateKey matches TorrentService's own
+    // normalizeHashForKey exactly).
+    private fun sequentialDownloadPrefs() =
+        getSharedPreferences("sequential_download", MODE_PRIVATE)
+
+    private fun firstLastPriorityPrefs() =
+        getSharedPreferences("firstlast_priority", MODE_PRIVATE)
+
+    // Feature 1: Speed Control (global limits + per-torrent override,
+    // no scheduling) - same prefs files TorrentService reads from.
+    // Stored in bytes/second (what the native calls take); the UI
+    // itself works in KB/s, converting at the boundary.
+    private fun globalSpeedLimitPrefs() =
+        getSharedPreferences("global_speed_limits", MODE_PRIVATE)
+
+    private fun torrentSpeedLimitPrefs() =
+        getSharedPreferences("torrent_speed_limits", MODE_PRIVATE)
+
+    // Used from the add-time file-selection screens (magnet metadata,
+    // magnet file selection, .torrent file selection) where the user
+    // can opt in to Sequential Download before the download even
+    // starts. Always persists first, then tries the live native call -
+    // for the .torrent-file-picker screen specifically, the torrent
+    // handle doesn't exist yet at this point (TorrentService creates it
+    // only after receiving the Intent), so the live call is expected to
+    // no-op there; TorrentService re-applies every saved piece setting
+    // itself each time it handles any action, so it catches up either way.
+    private fun applySequentialDownloadForHash(hash: String, enabled: Boolean) {
+        if (hash.isBlank()) return
+
+        sequentialDownloadPrefs().edit()
+            .putBoolean(normalizeHashForDateKey(hash), enabled)
+            .apply()
+
+        try {
+            TorrentNative.setSequentialDownload(hash, enabled)
+        } catch (_: Throwable) {
+            // Not fatal - see note above.
+        }
+    }
+
+    private fun connectionPrefs() =
+        getSharedPreferences("connection_settings", MODE_PRIVATE)
+
+    // True when the active network is cellular. UPnP/NAT-PMP port mapping
+    // cannot work over mobile data (carrier-grade NAT), so the Connection
+    // screen shows that plainly instead of letting a real failure alert
+    // read like a generic error loop.
+    private fun isOnMobileData(): Boolean {
+        return try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            val network = cm?.activeNetwork ?: return false
+            val capabilities = cm.getNetworkCapabilities(network) ?: return false
+
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                    !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) &&
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun buildConnectionStatusText(): String {
+        val native = try {
+            TorrentNative.getConnectionStatus()
+        } catch (e: Throwable) {
+            Log.e("TorrentOrLT", "getConnectionStatus() threw", e)
+            return "Could not load connection status: " +
+                    "${e.javaClass.simpleName}: ${e.message}"
+        }
+
+        if (!isOnMobileData()) {
+            return native
+        }
+
+        // Replace whatever UPnP/NAT-PMP lines came back with a single,
+        // honest line - trying to map a port over mobile data just loops
+        // on the same failure, which would otherwise look like a bug.
+        val lines = native.lines()
+        val kept = StringBuilder()
+        var skipping = false
+
+        for (line in lines) {
+            if (line.startsWith("UPnP:") || line.startsWith("NAT-PMP:")) {
+                skipping = true
+                continue
+            }
+
+            if (skipping && (line.isBlank() || line.startsWith("Note:"))) {
+                skipping = false
+                continue
+            }
+
+            if (skipping) {
+                continue
+            }
+
+            kept.append(line).append("\n")
+        }
+
+        kept.append("\nUPnP / NAT-PMP: not available on mobile data")
+
+        return kept.toString()
+    }
+
+    private fun showConnectionSettingsScreen() {
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+
+        TorrentNative.startSession(savePath)
+
+        val prefs = connectionPrefs()
+
+        var utpIn = prefs.getBoolean("utp_in", true)
+        var utpOut = prefs.getBoolean("utp_out", true)
+        var tcpIn = prefs.getBoolean("tcp_in", true)
+        var tcpOut = prefs.getBoolean("tcp_out", true)
+        var upnpEnabled = prefs.getBoolean("upnp_enabled", true)
+        var natpmpEnabled = prefs.getBoolean("natpmp_enabled", true)
+        var randomPortOnStart = prefs.getBoolean("random_port_on_start", false)
+        val savedPort = prefs.getInt("listen_port", 6881)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Connection"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val statusText = TextView(this).apply {
+            text = buildConnectionStatusText()
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, 16, 0, 16)
+        }
+
+        fun refreshStatus() {
+            statusText.text = buildConnectionStatusText()
+        }
+
+        startConnectionAutoRefresh(statusText)
+
+        // Applies and persists every toggle together (never just the one
+        // that changed), so the saved state and the live session can never
+        // drift apart. Native re-validates the uTP/TCP combination too, but
+        // checking here first means an invalid tap never has to silently
+        // no-op without explanation.
+        fun applyAndPersist(label: String) {
+            val utpOn = utpIn || utpOut
+            val tcpOn = tcpIn || tcpOut
+
+            if (!utpOn && !tcpOn) {
+                Toast.makeText(
+                    this,
+                    "At least one of uTP or TCP must stay enabled",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+
+            prefs.edit()
+                .putBoolean("utp_in", utpIn)
+                .putBoolean("utp_out", utpOut)
+                .putBoolean("tcp_in", tcpIn)
+                .putBoolean("tcp_out", tcpOut)
+                .putBoolean("upnp_enabled", upnpEnabled)
+                .putBoolean("natpmp_enabled", natpmpEnabled)
+                .apply()
+
+            try {
+                TorrentNative.applyConnectionSettings(
+                    utpIn,
+                    utpOut,
+                    tcpIn,
+                    tcpOut,
+                    upnpEnabled,
+                    natpmpEnabled,
+                    prefs.getInt("listen_port", savedPort)
+                )
+            } catch (e: Throwable) {
+                Log.e("TorrentOrLT", "applyConnectionSettings(...) threw", e)
+                Toast.makeText(
+                    this,
+                    "Could not apply connection settings: " +
+                            "${e.javaClass.simpleName}: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+
+            // Only the UPnP multicast lock depends on crossing a Service
+            // boundary (it's a system resource the Service owns so it keeps
+            // working whether or not this screen is open) - everything else
+            // above already took effect directly through the native call.
+            val intent = Intent(this, TorrentService::class.java)
+            intent.putExtra("ACTION", "CONNECTION_SETTINGS_CHANGED")
+            intent.putExtra("UPNP_ENABLED", upnpEnabled)
+            startTorrentService(intent)
+
+            refreshStatus()
+            Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
+        }
+
+        fun toggleButton(
+            onLabel: String,
+            offLabel: String,
+            getValue: () -> Boolean,
+            setValue: (Boolean) -> Unit
+        ): Button {
+            lateinit var button: Button
+
+            fun relabel() {
+                button.text = if (getValue()) onLabel else offLabel
+            }
+
+            button = Button(this).apply {
+                setOnClickListener {
+                    val newValue = !getValue()
+                    setValue(newValue)
+                    applyAndPersist(if (newValue) "Enabled" else "Disabled")
+                    relabel()
+                }
+            }
+
+            relabel()
+            return button
+        }
+
+        val utpInButton = toggleButton(
+            "uTP Incoming: On", "uTP Incoming: Off",
+            { utpIn }, { utpIn = it }
+        )
+
+        val utpOutButton = toggleButton(
+            "uTP Outgoing: On", "uTP Outgoing: Off",
+            { utpOut }, { utpOut = it }
+        )
+
+        val tcpInButton = toggleButton(
+            "TCP Incoming: On", "TCP Incoming: Off",
+            { tcpIn }, { tcpIn = it }
+        )
+
+        val tcpOutButton = toggleButton(
+            "TCP Outgoing: On", "TCP Outgoing: Off",
+            { tcpOut }, { tcpOut = it }
+        )
+
+        val upnpButton = toggleButton(
+            "UPnP: On", "UPnP: Off",
+            { upnpEnabled }, { upnpEnabled = it }
+        )
+
+        val natpmpButton = toggleButton(
+            "NAT-PMP: On", "NAT-PMP: Off",
+            { natpmpEnabled }, { natpmpEnabled = it }
+        )
+
+        val utpRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        utpRow.addView(utpInButton)
+        utpRow.addView(utpOutButton)
+
+        val tcpRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tcpRow.addView(tcpInButton)
+        tcpRow.addView(tcpOutButton)
+
+        val portForwardingRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        portForwardingRow.addView(upnpButton)
+        portForwardingRow.addView(natpmpButton)
+
+        val portLabel = TextView(this).apply {
+            text = "Listening port"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(0, 24, 0, 8)
+        }
+
+        val portInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(savedPort.toString())
+            setTextColor(Color.WHITE)
+            isEnabled = !randomPortOnStart
+        }
+
+        val randomPortCheckbox = CheckBox(this).apply {
+            text = "Use a random port every time the app starts"
+            setTextColor(Color.WHITE)
+            isChecked = randomPortOnStart
+
+            setOnCheckedChangeListener { _, isChecked ->
+                randomPortOnStart = isChecked
+                portInput.isEnabled = !isChecked
+
+                prefs.edit()
+                    .putBoolean("random_port_on_start", isChecked)
+                    .apply()
+
+                Toast.makeText(
+                    this@MainActivity,
+                    if (isChecked) {
+                        "A new random port will be used next time TorrentOr starts"
+                    } else {
+                        "A fixed port will be used next time TorrentOr starts"
+                    },
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
+        val applyPortButton = Button(this).apply {
+            text = "Apply Port Now"
+            setOnClickListener {
+                val typed = portInput.text.toString().trim().toIntOrNull()
+
+                if (typed == null || typed <= 0 || typed > 65535) {
+                    Toast.makeText(this@MainActivity, "Enter a port between 1 and 65535", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                prefs.edit().putInt("listen_port", typed).apply()
+                applyAndPersist("Listening on port $typed")
+            }
+        }
+
+        val portNote = TextView(this).apply {
+            text = "Changing the port or toggling UPnP/NAT-PMP never pauses, " +
+                    "resumes or re-adds any torrent."
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 8, 0, 16)
+        }
+
+        val refreshButton = Button(this).apply {
+            text = "Refresh"
+            setOnClickListener { refreshStatus() }
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                stopConnectionAutoRefresh()
+                showMainScreen()
+            }
+        }
+
+        root.addView(title)
+        root.addView(statusText)
+        root.addView(utpRow)
+        root.addView(tcpRow)
+        root.addView(portForwardingRow)
+        root.addView(portLabel)
+        root.addView(portInput)
+        root.addView(randomPortCheckbox)
+        root.addView(applyPortButton)
+        root.addView(portNote)
+        root.addView(refreshButton)
+        root.addView(backButton)
+
+        val outerScroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        setContentView(outerScroll)
+    }
+
+    private fun startConnectionAutoRefresh(statusText: TextView) {
+        stopConnectionAutoRefresh()
+
+        isConnectionScreenActive = true
+
+        val runnable = object : Runnable {
+            override fun run() {
+                if (!isConnectionScreenActive) {
+                    return
+                }
+
+                try {
+                    statusText.text = buildConnectionStatusText()
+                } catch (_: Throwable) {
+                    // Keep the screen alive even if native status is temporarily unavailable.
+                }
+
+                handler.postDelayed(this, interval)
+            }
+        }
+
+        connectionRefreshRunnable = runnable
+        handler.postDelayed(runnable, interval)
+    }
+
+    private fun stopConnectionAutoRefresh() {
+        isConnectionScreenActive = false
+
+        connectionRefreshRunnable?.let { runnable ->
+            handler.removeCallbacks(runnable)
+        }
+
+        connectionRefreshRunnable = null
+    }
+
+    // Feature 1: Speed Control - global limits only, no scheduling.
+    // The UI works in KB/s; everything stored in prefs and sent to
+    // native is bytes/second, converted at this boundary.
+    private fun showSpeedLimitsScreen() {
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopConnectionAutoRefresh()
+
+        TorrentNative.startSession(savePath)
+
+        val prefs = globalSpeedLimitPrefs()
+        val savedUploadBytes = prefs.getInt("upload_limit", 0)
+        val savedDownloadBytes = prefs.getInt("download_limit", 0)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Speed Limits"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val subtitle = TextView(this).apply {
+            text = "Global limits only. Leave a field blank or 0 for unlimited."
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val uploadLabel = TextView(this).apply {
+            text = "Upload limit (KB/s)"
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val uploadInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "Unlimited"
+            setText(
+                if (savedUploadBytes > 0) (savedUploadBytes / 1024).toString() else ""
+            )
+        }
+
+        val downloadLabel = TextView(this).apply {
+            text = "Download limit (KB/s)"
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val downloadInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            hint = "Unlimited"
+            setText(
+                if (savedDownloadBytes > 0) (savedDownloadBytes / 1024).toString() else ""
+            )
+        }
+
+        val applyButton = Button(this).apply {
+            text = "Apply"
+            setOnClickListener {
+                val uploadKb = uploadInput.text.toString().toIntOrNull() ?: 0
+                val downloadKb = downloadInput.text.toString().toIntOrNull() ?: 0
+
+                val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
+                val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
+
+                prefs.edit()
+                    .putInt("upload_limit", uploadBytes)
+                    .putInt("download_limit", downloadBytes)
+                    .apply()
+
+                try {
+                    TorrentNative.applyGlobalSpeedLimits(uploadBytes, downloadBytes)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Speed limits applied",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } catch (e: Throwable) {
+                    Log.e("TorrentOrLT", "applyGlobalSpeedLimits(...) threw", e)
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Could not apply speed limits: " +
+                                "${e.javaClass.simpleName}: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setOnClickListener { showMainScreen() }
+        }
+
+        root.addView(title)
+        root.addView(subtitle)
+        root.addView(uploadLabel)
+        root.addView(uploadInput)
+        root.addView(downloadLabel)
+        root.addView(downloadInput)
+        root.addView(applyButton)
+        root.addView(backButton)
+
+        val outerScroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        setContentView(outerScroll)
+    }
+
     private fun showPortForwardingStatusScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -3168,10 +3763,21 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 24, 0, 24)
         }
 
+        val sequentialCheckBox = CheckBox(this).apply {
+            text = "Sequential Download"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
         val downloadNowButton = Button(this).apply {
             text = "Download All Without Waiting"
             setOnClickListener {
                 skipMagnetSelection = true
+
+                applySequentialDownloadForHash(
+                    getSafeTorrentHashForAction(torrentIndex),
+                    sequentialCheckBox.isChecked
+                )
 
                 saveMagnetOnly(magnet)
                 TorrentNative.resumeTorrent(torrentIndex)
@@ -3197,6 +3803,7 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(title)
         root.addView(statusText)
+        root.addView(sequentialCheckBox)
         root.addView(downloadNowButton)
         root.addView(cancelButton)
 
@@ -3326,6 +3933,12 @@ class MainActivity : AppCompatActivity() {
         selectButtonsRow.addView(selectAllButton)
         selectButtonsRow.addView(selectNoneButton)
 
+        val sequentialCheckBox = CheckBox(this).apply {
+            text = "Sequential Download"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
         val downloadSelected = Button(this).apply {
             text = "Download Selected"
             setOnClickListener {
@@ -3335,6 +3948,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val indexes = selected.sorted().joinToString(",")
+
+                applySequentialDownloadForHash(
+                    getSafeTorrentHashForAction(torrentIndex),
+                    sequentialCheckBox.isChecked
+                )
 
                 saveMagnetOnly(magnet)
                 TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
@@ -3355,6 +3973,11 @@ class MainActivity : AppCompatActivity() {
             text = "Download All"
             setOnClickListener {
                 val indexes = allIndexes.sorted().joinToString(",")
+
+                applySequentialDownloadForHash(
+                    getSafeTorrentHashForAction(torrentIndex),
+                    sequentialCheckBox.isChecked
+                )
 
                 saveMagnetOnly(magnet)
                 TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
@@ -3382,6 +4005,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(title)
         container.addView(selectButtonsRow)
         container.addView(scroll)
+        container.addView(sequentialCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
         container.addView(cancel)
@@ -3502,6 +4126,32 @@ class MainActivity : AppCompatActivity() {
         selectButtonsRow.addView(selectAllButton)
         selectButtonsRow.addView(selectNoneButton)
 
+        val sequentialCheckBox = CheckBox(this).apply {
+            text = "Sequential Download"
+            setTextColor(Color.WHITE)
+            isChecked = false
+        }
+
+        // The torrent handle doesn't exist yet at this point - it's only
+        // created once TorrentService receives the Intent below - so this
+        // only persists the choice (keyed by the file's own hash); the
+        // handle-dependent live apply happens inside TorrentService once
+        // it actually adds the torrent (reapplySavedPieceSettings runs on
+        // every action it handles).
+        fun persistSequentialDownloadChoice(enabled: Boolean) {
+            val hash = try {
+                TorrentNative.getTorrentFileHash(filePath)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (hash.isNotBlank()) {
+                sequentialDownloadPrefs().edit()
+                    .putBoolean(normalizeHashForDateKey(hash), enabled)
+                    .apply()
+            }
+        }
+
         val downloadSelected = Button(this).apply {
             text = "Download Selected"
             setOnClickListener {
@@ -3511,6 +4161,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val indexes = selected.sorted().joinToString(",")
+
+                persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
 
                 val intent = Intent(this@MainActivity, TorrentService::class.java)
                 intent.putExtra("TORRENT_PATH", filePath)
@@ -3524,6 +4176,8 @@ class MainActivity : AppCompatActivity() {
         val downloadAll = Button(this).apply {
             text = "Download All"
             setOnClickListener {
+                persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
+
                 val intent = Intent(this@MainActivity, TorrentService::class.java)
                 intent.putExtra("TORRENT_PATH", filePath)
                 startTorrentService(intent)
@@ -3539,6 +4193,7 @@ class MainActivity : AppCompatActivity() {
         container.addView(title)
         container.addView(selectButtonsRow)
         container.addView(scroll)
+        container.addView(sequentialCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
         container.addView(back)
@@ -3798,6 +4453,204 @@ class MainActivity : AppCompatActivity() {
         }
 
 
+        // Feature 3: Sequential Download & First/Last Piece Priority.
+        // Both call native directly by info-hash (never the list index,
+        // which can shift) and persist in SharedPreferences the moment
+        // the engine confirms the change actually took effect - never
+        // optimistically, so a failed apply (e.g. metadata not ready
+        // yet for first/last priority) never gets saved as if it worked.
+        fun pieceSettingToggleButton(
+            onLabel: String,
+            offLabel: String,
+            prefs: SharedPreferences,
+            getEngine: (String) -> Boolean,
+            setEngine: (String, Boolean) -> Boolean,
+            enableMessage: String,
+            disableMessage: String,
+            notReadyMessage: String
+        ): Button {
+            lateinit var button: Button
+
+            fun currentHash(): String = getSafeTorrentHashForAction(torrentIndex)
+
+            fun relabel() {
+                val hash = currentHash()
+
+                val enabled = if (hash.isBlank()) {
+                    false
+                } else {
+                    try {
+                        getEngine(hash)
+                    } catch (_: Throwable) {
+                        false
+                    }
+                }
+
+                button.text = if (enabled) onLabel else offLabel
+            }
+
+            button = Button(this).apply {
+                setOnClickListener {
+                    val hash = currentHash()
+
+                    if (hash.isBlank()) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Torrent hash not available yet",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        return@setOnClickListener
+                    }
+
+                    val currentlyEnabled = try {
+                        getEngine(hash)
+                    } catch (e: Throwable) {
+                        Log.e("TorrentOrLT", "piece setting getEngine() threw", e)
+                        false
+                    }
+                    val newValue = !currentlyEnabled
+
+                    val applied = try {
+                        setEngine(hash, newValue)
+                    } catch (e: Throwable) {
+                        Log.e("TorrentOrLT", "piece setting setEngine() threw", e)
+                        false
+                    }
+
+                    if (applied) {
+                        prefs.edit()
+                            .putBoolean(normalizeHashForDateKey(hash), newValue)
+                            .apply()
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (newValue) enableMessage else disableMessage,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            notReadyMessage,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+
+                    relabel()
+                }
+            }
+
+            relabel()
+            return button
+        }
+
+        val sequentialButton = pieceSettingToggleButton(
+            onLabel = "Sequential Download: On",
+            offLabel = "Sequential Download: Off",
+            prefs = sequentialDownloadPrefs(),
+            getEngine = { h -> TorrentNative.getSequentialDownload(h) },
+            setEngine = { h, v -> TorrentNative.setSequentialDownload(h, v) },
+            enableMessage = "Sequential download enabled",
+            disableMessage = "Sequential download disabled",
+            notReadyMessage = "Could not change sequential download"
+        )
+
+        val firstLastButton = pieceSettingToggleButton(
+            onLabel = "First/Last Piece Priority: On",
+            offLabel = "First/Last Piece Priority: Off",
+            prefs = firstLastPriorityPrefs(),
+            getEngine = { h -> TorrentNative.getFirstLastPiecePriority(h) },
+            setEngine = { h, v -> TorrentNative.setFirstLastPiecePriority(h, v) },
+            enableMessage = "First/last piece priority enabled",
+            disableMessage = "First/last piece priority disabled",
+            notReadyMessage = "Could not change this yet - the torrent's " +
+                    "metadata may still be loading. Try again in a moment."
+        )
+
+        // Feature 1: per-torrent speed limit override. 0 or blank means
+        // no cap of its own for this torrent - the global limit (Speed
+        // Limits screen) still applies on top, same as any other torrent.
+        val savedTorrentLimits = try {
+            TorrentNative.getTorrentSpeedLimits(getSafeTorrentHashForAction(torrentIndex))
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val savedLimitParts = savedTorrentLimits.split("|")
+        val savedTorrentUploadBytes = savedLimitParts.getOrNull(0)?.toIntOrNull() ?: 0
+        val savedTorrentDownloadBytes = savedLimitParts.getOrNull(1)?.toIntOrNull() ?: 0
+
+        val speedLimitLabel = TextView(this).apply {
+            text = "Per-Torrent Speed Limit (KB/s, 0 or blank = use global)"
+            setTextColor(Color.WHITE)
+            setPadding(0, 24, 0, 4)
+        }
+
+        val uploadLimitInput = EditText(this).apply {
+            hint = "Upload KB/s - unlimited"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(
+                if (savedTorrentUploadBytes > 0) (savedTorrentUploadBytes / 1024).toString() else ""
+            )
+        }
+
+        val downloadLimitInput = EditText(this).apply {
+            hint = "Download KB/s - unlimited"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(
+                if (savedTorrentDownloadBytes > 0) (savedTorrentDownloadBytes / 1024).toString() else ""
+            )
+        }
+
+        val applySpeedLimitButton = Button(this).apply {
+            text = "Apply Torrent Speed Limit"
+            setOnClickListener {
+                val hash = getSafeTorrentHashForAction(torrentIndex)
+
+                if (hash.isBlank()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Torrent hash not available yet",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                val uploadKb = uploadLimitInput.text.toString().toIntOrNull() ?: 0
+                val downloadKb = downloadLimitInput.text.toString().toIntOrNull() ?: 0
+
+                val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
+                val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
+
+                val applied = try {
+                    TorrentNative.setTorrentSpeedLimits(hash, uploadBytes, downloadBytes)
+                } catch (e: Throwable) {
+                    Log.e("TorrentOrLT", "setTorrentSpeedLimits(...) threw", e)
+                    false
+                }
+
+                if (applied) {
+                    torrentSpeedLimitPrefs().edit()
+                        .putString(
+                            normalizeHashForDateKey(hash),
+                            "$uploadBytes|$downloadBytes"
+                        )
+                        .apply()
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Torrent speed limit applied",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Could not apply torrent speed limit",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
+
         val forceReannounce = Button(this).apply {
             text = "Force Reannounce"
             setOnClickListener {
@@ -3838,6 +4691,12 @@ class MainActivity : AppCompatActivity() {
         root.addView(copyHash)
         root.addView(pauseButton)
         root.addView(resumeButton)
+        root.addView(sequentialButton)
+        root.addView(firstLastButton)
+        root.addView(speedLimitLabel)
+        root.addView(uploadLimitInput)
+        root.addView(downloadLimitInput)
+        root.addView(applySpeedLimitButton)
         root.addView(forceReannounce)
         root.addView(forceRecheck)
         root.addView(openFolderButton)
@@ -5077,9 +5936,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val allLines = status.lines().filter { it.isNotBlank() }
-        val filteredLines = allLines.withIndex().filter { item ->
-            torrentMatchesFilter(item.value)
-        }
+        val filteredLines = sortTorrentLines(
+            allLines.withIndex().filter { item ->
+                torrentMatchesFilter(item.value)
+            }
+        )
 
         if (filteredLines.isEmpty()) {
             listLayout.addView(TextView(this).apply {
@@ -5247,6 +6108,107 @@ class MainActivity : AppCompatActivity() {
     private fun extractPercent(line: String): Int {
         val match = Regex("""(\d+)%""").find(line)
         return match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    }
+
+    // ---- Sort helpers --------------------------------------------------
+    // The visible list is one plain-text status line per torrent (built
+    // natively in getDetailedStatus). Sorting only reorders how those
+    // lines are displayed; the IndexedValue.index each line carries is
+    // always the original native-list position, which is what Pause /
+    // Resume / Remove send back as TORRENT_INDEX. So sorting here can
+    // never point an action at the wrong torrent.
+
+    private fun extractNameForSort(line: String): String {
+        return line.substringBefore(" • ").trim()
+    }
+
+    // The 2nd " • "-separated field is the state text built natively
+    // ("Downloading", "Seeding", "Paused", "Paused (queued)",
+    // "Paused (error: ...)"). Used as-is for "Status (A-Z)".
+    private fun extractStatusForSort(line: String): String {
+        val parts = line.split(" • ")
+        return parts.getOrNull(1)?.trim() ?: ""
+    }
+
+    private fun unitMultiplier(unit: String): Double {
+        return when (unit.uppercase()) {
+            "B" -> 1.0
+            "KB" -> 1024.0
+            "MB" -> 1024.0 * 1024.0
+            "GB" -> 1024.0 * 1024.0 * 1024.0
+            "TB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+            else -> 1.0
+        }
+    }
+
+    // Reads the "Size <done> <unit> / <total> <unit>" segment and returns
+    // the *total* size in bytes, so "Size" sorting reflects how big the
+    // torrent is rather than how far along it happens to be.
+    private fun extractTotalSizeBytes(line: String): Double {
+        val match = Regex(
+            """Size\s+[\d.]+\s*(?:B|KB|MB|GB|TB)\s*/\s*([\d.]+)\s*(B|KB|MB|GB|TB)"""
+        ).find(line) ?: return 0.0
+
+        val value = match.groupValues[1].toDoubleOrNull() ?: return 0.0
+        return value * unitMultiplier(match.groupValues[2])
+    }
+
+    // Raw epoch millis behind getTorrentAddedDate's formatted string, keyed
+    // the same way (normalizeHashForDateKey), so "Date Added" sorting can
+    // compare instants instead of parsing the display text back apart.
+    private fun getTorrentAddedTimestamp(hash: String): Long {
+        val key = normalizeHashForDateKey(hash)
+        if (key.isBlank()) return 0L
+
+        val prefs = getSharedPreferences("torrent_dates", MODE_PRIVATE)
+        return prefs.getLong("added_$key", 0L)
+    }
+
+    // sortedBy/sortedByDescending are stable, so torrents tied on the
+    // chosen field keep their existing relative order instead of jumping
+    // around on every refresh. torrentIndex (position + 1) is the same
+    // 1-based index Pause/Resume/Remove already use to look up the hash.
+    private fun sortTorrentLines(
+        lines: List<IndexedValue<String>>
+    ): List<IndexedValue<String>> {
+        return when (sortMode) {
+            "Name (A-Z)" ->
+                lines.sortedBy { extractNameForSort(it.value).lowercase() }
+
+            "Name (Z-A)" ->
+                lines.sortedByDescending { extractNameForSort(it.value).lowercase() }
+
+            "Size (Largest First)" ->
+                lines.sortedByDescending { extractTotalSizeBytes(it.value) }
+
+            "Size (Smallest First)" ->
+                lines.sortedBy { extractTotalSizeBytes(it.value) }
+
+            "Date Added (Newest First)" ->
+                lines.sortedByDescending {
+                    getTorrentAddedTimestamp(
+                        getSafeTorrentHashForAction(it.index + 1)
+                    )
+                }
+
+            "Date Added (Oldest First)" ->
+                lines.sortedBy {
+                    getTorrentAddedTimestamp(
+                        getSafeTorrentHashForAction(it.index + 1)
+                    )
+                }
+
+            "Progress (Highest First)" ->
+                lines.sortedByDescending { extractPercent(it.value) }
+
+            "Progress (Lowest First)" ->
+                lines.sortedBy { extractPercent(it.value) }
+
+            "Status (A-Z)" ->
+                lines.sortedBy { extractStatusForSort(it.value).lowercase() }
+
+            else -> lines
+        }
     }
 
     private fun copyTorrentToFiles(uriString: String): String {

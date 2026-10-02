@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -25,6 +26,13 @@ class TorrentService : Service() {
 
     private var lastSessionDownload = 0L
     private var lastSessionUpload = 0L
+
+    // Feature 4: UPnP discovery listens for SSDP multicast responses, which
+    // on many devices need this lock held to actually arrive. Held only
+    // while UPnP is enabled and this service is running - acquired in
+    // onCreate() (if UPnP is on) or when the Connection screen turns UPnP
+    // on, released when it's turned off or the service is destroyed.
+    private var upnpMulticastLock: WifiManager.MulticastLock? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -48,10 +56,195 @@ class TorrentService : Service() {
             )
         }
 
+        // Feature 4: apply the saved Connection settings before the session
+        // (and therefore before any torrent) starts, same reasoning as the
+        // encryption mode above. applyConnectionSettings() is safe to call
+        // before startSession() - it just stores the values for the native
+        // session's first settings_pack to pick up.
+        applySavedConnectionSettings()
+        applySavedGlobalSpeedLimits()
+
         TorrentNative.startSession(savePath)
 
         restoreSavedTorrents()
         startUpdates()
+    }
+
+    override fun onDestroy() {
+        releaseUpnpMulticastLock()
+        super.onDestroy()
+    }
+
+    // ------------------------------------------------------- Feature 4: Connection
+
+    private fun connectionPrefs() =
+        getSharedPreferences("connection_settings", MODE_PRIVATE)
+
+    // ------------------------------------------------------- Feature 1: Speed Control
+    // Global limits only - no scheduling. Bytes/second, 0 = unlimited.
+
+    private fun globalSpeedLimitPrefs() =
+        getSharedPreferences("global_speed_limits", MODE_PRIVATE)
+
+    private fun applySavedGlobalSpeedLimits() {
+        val prefs = globalSpeedLimitPrefs()
+        val uploadLimit = prefs.getInt("upload_limit", 0)
+        val downloadLimit = prefs.getInt("download_limit", 0)
+
+        try {
+            TorrentNative.applyGlobalSpeedLimits(uploadLimit, downloadLimit)
+        } catch (e: Throwable) {
+            AppLog.error("Could not apply saved global speed limits: ${e.message}")
+        }
+    }
+
+    // ---- Feature 1: Speed Control (per-torrent override) ----
+    // Saved per torrent, keyed by info-hash, as "upload|download" in
+    // bytes/second. Unlike First/Last Piece Priority, set_upload_limit/
+    // set_download_limit need no metadata, so - like Sequential Download -
+    // this is simply re-sent every pass. Cheap and idempotent, so no
+    // "applied" tracking or retry scheduler is needed.
+
+    private fun torrentSpeedLimitPrefs() =
+        getSharedPreferences("torrent_speed_limits", MODE_PRIVATE)
+
+    private fun getSavedTorrentSpeedLimits(hash: String): Pair<Int, Int>? {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return null
+
+        val saved = torrentSpeedLimitPrefs().getString(key, null) ?: return null
+        val parts = saved.split("|")
+        val uploadLimit = parts.getOrNull(0)?.toIntOrNull() ?: 0
+        val downloadLimit = parts.getOrNull(1)?.toIntOrNull() ?: 0
+
+        return Pair(uploadLimit, downloadLimit)
+    }
+
+    private fun removeSavedTorrentSpeedLimits(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        torrentSpeedLimitPrefs().edit().remove(key).apply()
+    }
+
+    private fun reapplySavedTorrentSpeedLimits() {
+        val count = getActiveTorrentCount()
+
+        for (index in 1..count) {
+            val hash = try {
+                TorrentNative.getTorrentHash(index)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (!isGoodHash(hash)) continue
+
+            val limits = getSavedTorrentSpeedLimits(hash) ?: continue
+
+            try {
+                TorrentNative.setTorrentSpeedLimits(
+                    hash,
+                    limits.first,
+                    limits.second
+                )
+            } catch (_: Throwable) {
+                // Harmless - this runs every time the service handles
+                // any action, not just at restore, so it will catch up.
+            }
+        }
+    }
+
+    private fun applySavedConnectionSettings() {
+        val prefs = connectionPrefs()
+
+        val utpIn = prefs.getBoolean("utp_in", true)
+        val utpOut = prefs.getBoolean("utp_out", true)
+        val tcpIn = prefs.getBoolean("tcp_in", true)
+        val tcpOut = prefs.getBoolean("tcp_out", true)
+        val upnpEnabled = prefs.getBoolean("upnp_enabled", true)
+        val natpmpEnabled = prefs.getBoolean("natpmp_enabled", true)
+        val savedPort = prefs.getInt("listen_port", 6881)
+        val randomPortOnStart = prefs.getBoolean("random_port_on_start", false)
+
+        // "Random port on start" picks a fresh port every time the service
+        // starts (app open or boot), rather than a port that's remembered
+        // across restarts. The chosen port is NOT written back into
+        // "listen_port" so the user's own saved port (if they turn this
+        // back off) is never overwritten by a random one.
+        val listenPort = if (randomPortOnStart) {
+            val randomPort = (10000..65000).random()
+            AppLog.info("Connection: random port on start - using $randomPort for this session")
+            randomPort
+        } else {
+            savedPort
+        }
+
+        try {
+            TorrentNative.applyConnectionSettings(
+                utpIn,
+                utpOut,
+                tcpIn,
+                tcpOut,
+                upnpEnabled,
+                natpmpEnabled,
+                listenPort
+            )
+        } catch (e: Throwable) {
+            AppLog.error(
+                "Could not apply the saved connection settings: " +
+                        e.javaClass.simpleName + " " + (e.message ?: "")
+            )
+        }
+
+        updateUpnpMulticastLock(upnpEnabled)
+    }
+
+    // Called both at startup (above) and whenever the Connection screen
+    // changes the UPnP toggle (via ACTION = CONNECTION_SETTINGS_CHANGED
+    // below), so the lock always matches the current setting without
+    // MainActivity needing to know anything about WifiManager.
+    private fun updateUpnpMulticastLock(upnpEnabled: Boolean) {
+        try {
+            if (upnpEnabled) {
+                if (upnpMulticastLock?.isHeld != true) {
+                    val wifiManager = applicationContext
+                        .getSystemService(WIFI_SERVICE) as? WifiManager
+
+                    val lock = wifiManager?.createMulticastLock("TorrentOrUpnpSsdp")
+                    lock?.setReferenceCounted(false)
+                    lock?.acquire()
+                    upnpMulticastLock = lock
+
+                    if (lock != null) {
+                        AppLog.info("UPnP: multicast lock acquired (for SSDP discovery)")
+                    }
+                }
+            } else {
+                releaseUpnpMulticastLock()
+            }
+        } catch (e: Throwable) {
+            AppLog.error(
+                "Could not update the UPnP multicast lock: " +
+                        e.javaClass.simpleName + " " + (e.message ?: "")
+            )
+        }
+    }
+
+    private fun releaseUpnpMulticastLock() {
+        try {
+            val lock = upnpMulticastLock
+            if (lock != null && lock.isHeld) {
+                lock.release()
+                AppLog.info("UPnP: multicast lock released")
+            }
+        } catch (e: Throwable) {
+            AppLog.error(
+                "Could not release the UPnP multicast lock: " +
+                        e.javaClass.simpleName + " " + (e.message ?: "")
+            )
+        } finally {
+            upnpMulticastLock = null
+        }
     }
 
     override fun onStartCommand(
@@ -74,7 +267,32 @@ class TorrentService : Service() {
             action == "SAVE_MAGNET_ONLY" -> {
                 if (!magnet.isNullOrEmpty()) {
                     val normalizedMagnet = normalizeMagnet(magnet)
-                    saveAddedDateIfMissing(extractHashFromMagnet(normalizedMagnet))
+                    val hash = extractHashFromMagnet(normalizedMagnet)
+
+                    // This fires right after the user has explicitly chosen
+                    // to download a magnet they just added from the magnet
+                    // box's metadata/file-selection screen (Download
+                    // Selected / Download All / Download All Without
+                    // Waiting). That screen adds the torrent natively
+                    // straight away, bypassing this Service entirely, so
+                    // this was the ONLY place that could have cleared a
+                    // stale "deleted" flag for this path - and it never
+                    // did, which is why a torrent added this way could
+                    // stay permanently invisible to restoreSavedTorrents
+                    // even after being re-added many times.
+                    if (isGoodHash(hash)) {
+                        val wasDeleted = isDeletedHash(hash)
+                        removeDeletedHash(hash)
+                        removePausedHash(hash)
+
+                        if (wasDeleted) {
+                            AppLog.info(
+                                "Add (magnet box): cleared stale 'deleted' flag for hash $hash"
+                            )
+                        }
+                    }
+
+                    saveAddedDateIfMissing(hash)
                     saveMagnetEntry(normalizedMagnet)
                 }
             }
@@ -88,6 +306,17 @@ class TorrentService : Service() {
             action == "CLEAN_DELETED_SAVED_TORRENTS" -> {
                 cleanDeletedSavedTorrentsOnly()
                 updateNotification("Old deleted torrents cleaned")
+            }
+
+            // Feature 4: MainActivity already called TorrentNative.applyConnectionSettings()
+            // directly and saved the new values to SharedPreferences before sending this -
+            // this only exists so the UPnP multicast lock (owned by this Service, since it
+            // must keep working whether or not the app is in the foreground) stays in sync
+            // with the new UPnP setting. It never touches any torrent, pause state or file
+            // selection.
+            action == "CONNECTION_SETTINGS_CHANGED" -> {
+                val upnpEnabled = intent.getBooleanExtra("UPNP_ENABLED", true)
+                updateUpnpMulticastLock(upnpEnabled)
             }
 
             action == "PAUSE_ALL" -> {
@@ -149,6 +378,9 @@ class TorrentService : Service() {
                         saveDeletedHash(hashBeforeRemove)
                         removePausedHash(hashBeforeRemove)
                         removeSavedFileSelection(hashBeforeRemove)
+                        removeSequentialDownload(hashBeforeRemove)
+                        removeFirstLastPriority(hashBeforeRemove)
+                        removeSavedTorrentSpeedLimits(hashBeforeRemove)
                         // must run before the saved entry is removed (it needs the path)
                         deleteStoredTorrentCopy(hashBeforeRemove)
                         removeSavedTorrentByHash(hashBeforeRemove)
@@ -170,12 +402,30 @@ class TorrentService : Service() {
                 val alreadyAdded =
                     hash.isNotBlank() && TorrentNative.hasTorrentHash(hash)
 
-                // Adding something that is already in the list (for example
-                // "Add all" from an RSS feed) must leave its pause state alone.
-                if (isGoodHash(hash) && !alreadyAdded) {
+                // Explicitly adding something always means "I want this
+                // torrent", even if it was removed before - a stale
+                // "deleted" flag from an earlier removal must never make
+                // it vanish again the next time the service restarts, so
+                // that is cleared unconditionally. The paused flag is
+                // different: adding something that is already in the list
+                // (for example "Add all" from an RSS feed) must leave its
+                // pause state alone.
+                AppLog.info(
+                    "Add magnet: hash=$hash alreadyAdded=$alreadyAdded " +
+                    "wasDeleted=${isDeletedHash(hash)} wasPaused=${isPausedHash(hash)}"
+                )
+
+                if (isGoodHash(hash)) {
                     removeDeletedHash(hash)
-                    removePausedHash(hash)
+                    if (!alreadyAdded) {
+                        removePausedHash(hash)
+                    }
                 }
+
+                AppLog.info(
+                    "Add magnet: after clearing, hash=$hash " +
+                    "isDeletedHash=${isDeletedHash(hash)}"
+                )
 
                 if (alreadyAdded) {
                     saveAddedDateIfMissing(hash)
@@ -207,11 +457,24 @@ class TorrentService : Service() {
 
                 val alreadyAdded = TorrentNative.hasTorrentHash(hash)
 
-                // an existing torrent keeps its saved pause state
+                AppLog.info(
+                    "Add file: hash=$hash alreadyAdded=$alreadyAdded " +
+                    "wasDeleted=${isDeletedHash(hash)} wasPaused=${isPausedHash(hash)}"
+                )
+
+                // Explicitly adding a .torrent file always means "I want
+                // this torrent", even if it was removed before, so any
+                // stale "deleted" flag is cleared unconditionally. An
+                // existing torrent still keeps its saved pause state.
+                removeDeletedHash(hash)
                 if (!alreadyAdded) {
-                    removeDeletedHash(hash)
                     removePausedHash(hash)
                 }
+
+                AppLog.info(
+                    "Add file: after clearing, hash=$hash " +
+                    "isDeletedHash=${isDeletedHash(hash)}"
+                )
 
                 if (alreadyAdded) {
                     saveAddedDateIfMissing(hash)
@@ -245,6 +508,25 @@ class TorrentService : Service() {
         savePermanentGlobalStats()
         checkCompletedTorrentDates()
 
+        // Feature 3: catches a torrent that was just added this call (by
+        // magnet or .torrent file) and already has a saved Sequential
+        // Download / First-Last Piece Priority choice waiting for it -
+        // e.g. from the add-time file-selection screens in MainActivity,
+        // which can only persist the choice (no handle exists yet when
+        // the user taps Download there). restoreSavedTorrents() only
+        // covers torrents present when the service starts, not ones
+        // added afterward, so this call is what actually applies a
+        // freshly-added torrent's saved setting. Cheap and idempotent -
+        // already-applied torrents are skipped via appliedPieceSettingsKeys.
+        if (!reapplySavedPieceSettings()) {
+            scheduleSavedPieceSettingsRetry()
+        }
+
+        // Feature 1: same reasoning as the piece-settings call above -
+        // catches a torrent that was just added this call and already
+        // has a saved per-torrent speed limit waiting for it.
+        reapplySavedTorrentSpeedLimits()
+
         updateNotification(
             TorrentNative.getDetailedStatus()
         )
@@ -273,6 +555,16 @@ class TorrentService : Service() {
                     val hash = extractHashFromMagnet(magnet)
 
                     if (isDeletedHash(hash)) {
+                        // This used to be a silent "continue" - the entry
+                        // dropped out of cleanedEntries below with no
+                        // trace anywhere, so a stale "deleted" flag could
+                        // make a torrent vanish on restart with nothing
+                        // in the Execution Log to explain it.
+                        AppLog.warning(
+                            "Restore: not re-adding a torrent marked " +
+                            "deleted (hash $hash). If this is wrong, " +
+                            "re-add it from its magnet link."
+                        )
                         continue
                     }
 
@@ -296,6 +588,7 @@ class TorrentService : Service() {
 
                         saveAddedDateIfMissing(hash)
                         Log.d("TorrentOr", "RESTORE magnet hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
+                        AppLog.info("Restore: magnet hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
                         applySavedPauseState(hash)
 
                         val cleaned = "MAGNET||$magnet"
@@ -314,6 +607,11 @@ class TorrentService : Service() {
                         val selected = parsed.selected
 
                         if (isDeletedHash(hash)) {
+                            AppLog.warning(
+                                "Restore: not re-adding a torrent marked " +
+                                "deleted (hash $hash). If this is wrong, " +
+                                "re-add it from its .torrent file."
+                            )
                             continue
                         }
 
@@ -350,6 +648,7 @@ class TorrentService : Service() {
 
                             saveAddedDateIfMissing(hash)
                             Log.d("TorrentOr", "RESTORE file hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
+                            AppLog.info("Restore: file hash=$hash paused=${isPausedHash(hash)} deleted=${isDeletedHash(hash)}")
                             applySavedPauseState(hash)
 
                             val cleaned = "FILE||$hash||$path||$selected"
@@ -369,6 +668,18 @@ class TorrentService : Service() {
         if (!reapplySavedFileSelections()) {
             scheduleSavedFileSelectionRetry()
         }
+
+        // Feature 3: neither Sequential Download nor First/Last Piece
+        // Priority is kept by the engine across a restart either - same
+        // retry-until-ready treatment as file selection above.
+        if (!reapplySavedPieceSettings()) {
+            scheduleSavedPieceSettingsRetry()
+        }
+
+        // Feature 1: per-torrent speed limit overrides - no metadata
+        // dependency, so no retry scheduler needed (see note above
+        // reapplySavedTorrentSpeedLimits).
+        reapplySavedTorrentSpeedLimits()
 
         handler.postDelayed({
             applyAllSavedPausedStatesOnce()
@@ -457,6 +768,127 @@ class TorrentService : Service() {
 
                 val done = try {
                     reapplySavedFileSelections()
+                } catch (_: Throwable) {
+                    true
+                }
+
+                if (!done && attempts < 120) {
+                    handler.postDelayed(this, 5000L)
+                }
+            }
+        }, 5000L)
+    }
+
+    // ---- Feature 3: Sequential Download & First/Last Piece Priority ----
+    // Saved per torrent, keyed by info-hash, in their own prefs files -
+    // same shape as file selection above. Sequential download has no
+    // metadata dependency, so it is simply re-sent every pass (cheap and
+    // idempotent). First/last priority needs metadata to know which piece
+    // index is actually "last", so - like file selection - it is tracked
+    // in appliedPieceSettingsKeys and retried until the native call
+    // reports the metadata is ready.
+
+    private val appliedPieceSettingsKeys = mutableSetOf<String>()
+
+    private fun sequentialDownloadPrefs() =
+        getSharedPreferences("sequential_download", MODE_PRIVATE)
+
+    private fun firstLastPriorityPrefs() =
+        getSharedPreferences("firstlast_priority", MODE_PRIVATE)
+
+    private fun getSavedSequentialDownload(hash: String): Boolean {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return false
+
+        return sequentialDownloadPrefs().getBoolean(key, false)
+    }
+
+    private fun removeSequentialDownload(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        sequentialDownloadPrefs().edit().remove(key).apply()
+    }
+
+    private fun getSavedFirstLastPriority(hash: String): Boolean {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return false
+
+        return firstLastPriorityPrefs().getBoolean(key, false)
+    }
+
+    private fun removeFirstLastPriority(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        firstLastPriorityPrefs().edit().remove(key).apply()
+    }
+
+    // Returns true when there is nothing left to apply.
+    private fun reapplySavedPieceSettings(): Boolean {
+        val count = getActiveTorrentCount()
+        var pending = false
+
+        for (index in 1..count) {
+            val hash = try {
+                TorrentNative.getTorrentHash(index)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (!isGoodHash(hash)) {
+                pending = true
+                continue
+            }
+
+            val key = normalizeHashForKey(hash)
+
+            val sequential = getSavedSequentialDownload(hash)
+            try {
+                TorrentNative.setSequentialDownload(hash, sequential)
+            } catch (_: Throwable) {
+                // Harmless to retry next pass alongside first/last below.
+            }
+
+            if (appliedPieceSettingsKeys.contains(key)) {
+                continue
+            }
+
+            val firstLast = getSavedFirstLastPriority(hash)
+
+            if (!firstLast) {
+                // Nothing to apply - a freshly added torrent already has
+                // default piece priorities, so there is no "off" state
+                // to restore.
+                appliedPieceSettingsKeys.add(key)
+                continue
+            }
+
+            val applied = try {
+                TorrentNative.setFirstLastPiecePriority(hash, true)
+            } catch (_: Throwable) {
+                false
+            }
+
+            if (applied) {
+                appliedPieceSettingsKeys.add(key)
+            } else {
+                pending = true
+            }
+        }
+
+        return !pending
+    }
+
+    private fun scheduleSavedPieceSettingsRetry() {
+        var attempts = 0
+
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                attempts++
+
+                val done = try {
+                    reapplySavedPieceSettings()
                 } catch (_: Throwable) {
                     true
                 }

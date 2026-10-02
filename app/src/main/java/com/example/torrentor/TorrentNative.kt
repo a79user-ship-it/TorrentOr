@@ -62,4 +62,39 @@ object TorrentNative {
     external fun getLsdStatus(): String
     external fun setLsdEnabled(enabled: Boolean)
     external fun getNetworkFeaturesStatus(): String
+
+    // Feature 4: Connection settings (uTP/TCP/UPnP/NAT-PMP/listen port).
+    // Safe to call before or after startSession() - see applyConnectionSettings
+    // in torrentor.cpp for exactly how each case is handled.
+    external fun applyConnectionSettings(
+        utpIn: Boolean,
+        utpOut: Boolean,
+        tcpIn: Boolean,
+        tcpOut: Boolean,
+        upnpEnabled: Boolean,
+        natpmpEnabled: Boolean,
+        listenPort: Int
+    )
+
+    external fun getConnectionStatus(): String
+
+    // Feature 3: Sequential Download & First/Last Piece Priority.
+    // Identified by info-hash (never list index) per the project's
+    // persistence rules. Each setter/getter returns false - never
+    // throws - when the hash isn't found, or (first/last priority only)
+    // when the torrent's metadata isn't ready yet; it never crashes.
+    external fun setSequentialDownload(hash: String, enabled: Boolean): Boolean
+    external fun getSequentialDownload(hash: String): Boolean
+    external fun setFirstLastPiecePriority(hash: String, enabled: Boolean): Boolean
+    external fun getFirstLastPiecePriority(hash: String): Boolean
+
+    // Feature 1: Speed Control (global limits + per-torrent override,
+    // no scheduling). All limits are bytes/second; 0 means unlimited.
+    // The per-torrent pair is identified by info-hash (never list
+    // index) and returns "" from the getter / false from the setter -
+    // never throws - when the hash isn't found.
+    external fun applyGlobalSpeedLimits(uploadLimit: Int, downloadLimit: Int)
+    external fun getGlobalSpeedLimits(): String
+    external fun setTorrentSpeedLimits(hash: String, uploadLimit: Int, downloadLimit: Int): Boolean
+    external fun getTorrentSpeedLimits(hash: String): String
 }

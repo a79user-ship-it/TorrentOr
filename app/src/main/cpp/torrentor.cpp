@@ -35,7 +35,16 @@ static std::mutex g_mutex;
 static std::string g_savePath;
 static bool g_pausedAll = false;
 
-static const int g_listenPort = 6881;
+// Connection settings (Feature 4). Defaults match exactly what the app
+// already did before this feature existed, so an existing install behaves
+// the same until the user changes something in the new Connection screen.
+static int g_listenPort = 6881;
+static bool g_utpIn = true;
+static bool g_utpOut = true;
+static bool g_tcpIn = true;
+static bool g_tcpOut = true;
+static bool g_upnpEnabled = true;
+static bool g_natpmpEnabled = true;
 
 static std::string g_upnpState = "Waiting";
 static std::string g_upnpMessage = "No UPnP response yet";
@@ -48,6 +57,13 @@ static int g_natpmpExternalPort = 0;
 static bool g_dhtEnabled = true;
 static bool g_pexEnabled = true;
 static bool g_lsdEnabled = true;
+
+// Feature 1: Speed Control (global limits only - no scheduling). Bytes
+// per second, matching libtorrent's own convention where 0 means
+// unlimited. Defaults to unlimited, matching the app's behavior before
+// this feature existed.
+static int g_globalUploadLimit = 0;
+static int g_globalDownloadLimit = 0;
 
 // ---- Execution Log ----
 // libtorrent alerts are turned into short lines ("<level>|<text>", level is
@@ -265,6 +281,38 @@ static bool hasHashAlready(const std::string& rawHash) {
     return false;
 }
 
+// Feature 3 (Sequential Download / First-Last Piece Priority): every new
+// native function for that feature identifies its torrent by info-hash,
+// never by list index, per the project's standing rule - indexes shift as
+// torrents are added/removed/sorted, hashes don't. This is the shared
+// lookup both of those functions use.
+static lt::torrent_handle findHandleByHash(const std::string& rawHash) {
+    std::string hash = normalizeHash(rawHash);
+
+    if (hash.empty()) {
+        return lt::torrent_handle();
+    }
+
+    for (auto& handle : g_handles) {
+        if (!handle.is_valid()) {
+            continue;
+        }
+
+        std::string existingHash = getHashFromHandle(handle);
+
+        if (!existingHash.empty() && existingHash == hash) {
+            return handle;
+        }
+    }
+
+    return lt::torrent_handle();
+}
+
+static std::string buildListenInterfaces(int port) {
+    std::string p = std::to_string(port);
+    return "0.0.0.0:" + p + ",[::]:" + p;
+}
+
 static void ensureSession(const std::string& savePath) {
     if (!savePath.empty()) {
         g_savePath = savePath;
@@ -293,23 +341,34 @@ static void ensureSession(const std::string& savePath) {
         // Protocol encryption mode chosen in the app.
         fillEncryptionSettings(pack, g_encryptionMode);
 
-        // Automatic port forwarding.
-        // This asks supported routers to open the listening port using UPnP / NAT-PMP.
-        // It will not work on networks that block port forwarding, CGNAT, mobile data,
-        // or routers where UPnP / NAT-PMP is disabled.
+        // Connection settings (Feature 4) - listen port, uTP/TCP and
+        // automatic port forwarding. These come from g_listenPort /
+        // g_utpIn / g_utpOut / g_tcpIn / g_tcpOut / g_upnpEnabled /
+        // g_natpmpEnabled, which already hold either the built-in
+        // defaults (first run) or whatever TorrentService restored from
+        // SharedPreferences before calling startSession() - see
+        // Java_..._applyConnectionSettings below for the live-apply path
+        // used after the session already exists.
+        //
+        // Automatic port forwarding asks supported routers to open the
+        // listening port using UPnP / NAT-PMP. It will not work on
+        // networks that block port forwarding, CGNAT, mobile data, or
+        // routers where UPnP / NAT-PMP is disabled - the Connection
+        // screen shows the real alert-derived reason in that case
+        // instead of claiming success.
         pack.set_str(
                 lt::settings_pack::listen_interfaces,
-                "0.0.0.0:6881,[::]:6881"
+                buildListenInterfaces(g_listenPort)
         );
 
         pack.set_bool(
                 lt::settings_pack::enable_upnp,
-                true
+                g_upnpEnabled
         );
 
         pack.set_bool(
                 lt::settings_pack::enable_natpmp,
-                true
+                g_natpmpEnabled
         );
 
         // DHT: finds peers without trackers, important for magnet links.
@@ -327,13 +386,50 @@ static void ensureSession(const std::string& savePath) {
         // uTP: enables µTP peer connections, commonly used by modern clients.
         pack.set_bool(
                 lt::settings_pack::enable_incoming_utp,
-                true
+                g_utpIn
         );
 
         pack.set_bool(
                 lt::settings_pack::enable_outgoing_utp,
-                true
+                g_utpOut
         );
+
+        // TCP: libtorrent defaults these to true, so this keeps the exact
+        // prior behavior unless the user turns one off in the Connection
+        // screen.
+        pack.set_bool(
+                lt::settings_pack::enable_incoming_tcp,
+                g_tcpIn
+        );
+
+        pack.set_bool(
+                lt::settings_pack::enable_outgoing_tcp,
+                g_tcpOut
+        );
+
+        // Feature 1: Speed Control - global upload/download limits in
+        // bytes/second, from g_globalUploadLimit / g_globalDownloadLimit
+        // (same first-run-default-or-restored-from-prefs pattern as the
+        // Connection settings above). 0 means unlimited.
+        pack.set_int(
+                lt::settings_pack::upload_rate_limit,
+                g_globalUploadLimit
+        );
+
+        pack.set_int(
+                lt::settings_pack::download_rate_limit,
+                g_globalDownloadLimit
+        );
+
+        if (!g_upnpEnabled) {
+            g_upnpState = "Disabled";
+            g_upnpMessage = "UPnP is turned off";
+        }
+
+        if (!g_natpmpEnabled) {
+            g_natpmpState = "Disabled";
+            g_natpmpMessage = "NAT-PMP is turned off";
+        }
 
         g_session = std::make_unique<lt::session>(pack);
 
@@ -606,6 +702,43 @@ static void applyNetworkFeatureSettings() {
         pack.set_bool(
                 lt::settings_pack::enable_lsd,
                 g_lsdEnabled
+        );
+
+        g_session->apply_settings(pack);
+    } catch (...) {
+        // Prevent crash if settings cannot be applied at runtime.
+    }
+}
+
+// Feature 4: pushes the current uTP/TCP/UPnP/NAT-PMP/listen-port globals
+// into the running session with apply_settings() - no restart, and
+// (unlike adding/removing a torrent) this never touches g_handles, so it
+// cannot pause, resume or re-add anything, nor touch the paused-hash or
+// file-selection prefs - those live entirely on the Kotlin side and this
+// function never goes near them.
+//
+// If the session does not exist yet, this is a no-op: ensureSession()
+// above already reads the same globals when it builds the very first
+// settings_pack, so a call made before startSession() still takes effect
+// once the session actually starts.
+static void applyConnectionSettings() {
+    if (!g_session) {
+        return;
+    }
+
+    try {
+        lt::settings_pack pack;
+
+        pack.set_bool(lt::settings_pack::enable_incoming_utp, g_utpIn);
+        pack.set_bool(lt::settings_pack::enable_outgoing_utp, g_utpOut);
+        pack.set_bool(lt::settings_pack::enable_incoming_tcp, g_tcpIn);
+        pack.set_bool(lt::settings_pack::enable_outgoing_tcp, g_tcpOut);
+        pack.set_bool(lt::settings_pack::enable_upnp, g_upnpEnabled);
+        pack.set_bool(lt::settings_pack::enable_natpmp, g_natpmpEnabled);
+
+        pack.set_str(
+                lt::settings_pack::listen_interfaces,
+                buildListenInterfaces(g_listenPort)
         );
 
         g_session->apply_settings(pack);
@@ -1858,6 +1991,273 @@ Java_com_example_torrentor_TorrentNative_getTorrentPieceSize(
     return env->NewStringUTF(output.c_str());
 }
 
+// Feature 1: pushes the global upload/download rate limit globals into
+// the running session - no restart needed, and (like applyConnectionSettings
+// above) this never touches g_handles, so it cannot pause, resume or
+// re-add anything. If the session doesn't exist yet, this is a no-op;
+// ensureSession() above reads the same globals when it builds the first
+// settings_pack, so a call made before startSession() still takes effect
+// once the session actually starts.
+static void applyGlobalSpeedLimits() {
+    if (!g_session) {
+        return;
+    }
+
+    try {
+        lt::settings_pack pack;
+
+        pack.set_int(lt::settings_pack::upload_rate_limit, g_globalUploadLimit);
+        pack.set_int(lt::settings_pack::download_rate_limit, g_globalDownloadLimit);
+
+        g_session->apply_settings(pack);
+    } catch (...) {
+        // Prevent crash if settings cannot be applied at runtime.
+    }
+}
+
+// Feature 1: Speed Control - global limits, in bytes/second (0 = unlimited).
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_applyGlobalSpeedLimits(
+        JNIEnv*,
+        jobject,
+        jint uploadLimit,
+        jint downloadLimit) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    g_globalUploadLimit = uploadLimit > 0 ? uploadLimit : 0;
+    g_globalDownloadLimit = downloadLimit > 0 ? downloadLimit : 0;
+
+    applyGlobalSpeedLimits();
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getGlobalSpeedLimits(
+        JNIEnv* env,
+        jobject) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string output =
+            std::to_string(g_globalUploadLimit) + "|" +
+            std::to_string(g_globalDownloadLimit);
+
+    return env->NewStringUTF(output.c_str());
+}
+
+// Feature 1: Speed Control - per-torrent override, in bytes/second (0 =
+// no per-torrent cap of its own; the global limit above still applies
+// on top, same as every other torrent). Identified by info-hash, never
+// list index, per the project's standing rule. Returns false (never
+// throws/crashes) if the hash isn't found.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setTorrentSpeedLimits(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jint uploadLimit,
+        jint downloadLimit) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        handle.set_upload_limit(uploadLimit > 0 ? uploadLimit : 0);
+        handle.set_download_limit(downloadLimit > 0 ? downloadLimit : 0);
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+// Returns "" if the hash isn't found, otherwise "uploadLimit|downloadLimit"
+// in bytes/second (0 = no per-torrent cap of its own).
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentSpeedLimits(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    int uploadLimit = 0;
+    int downloadLimit = 0;
+
+    try {
+        uploadLimit = handle.upload_limit();
+        downloadLimit = handle.download_limit();
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
+
+    std::string output =
+            std::to_string(uploadLimit) + "|" +
+            std::to_string(downloadLimit);
+
+    return env->NewStringUTF(output.c_str());
+}
+
+// Feature 3: Sequential Download. set_sequential_download()/
+// is_sequential_download() are plain torrent_handle methods - unlike
+// first/last piece priority below, they don't need metadata, so they
+// work the moment the handle exists (even for a magnet still resolving).
+// Returns false (never throws/crashes) when the hash isn't found, so
+// Kotlin can tell "not found" apart from "found, now off".
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setSequentialDownload(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jboolean enabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        handle.set_sequential_download(enabled == JNI_TRUE);
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_getSequentialDownload(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        return handle.is_sequential_download() ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+// Feature 3: First/Last Piece Priority. Boosts piece 0 and the final
+// piece to top_priority (useful for previewing video/audio before the
+// whole torrent finishes) or resets them to default_priority when
+// turned off - this app has no other per-piece priority control, so
+// default_priority is always the correct "off" state to restore.
+// Needs the torrent's metadata (to know how many pieces it has and
+// which index is actually last), so unlike sequential download this
+// can genuinely fail on a magnet that hasn't resolved yet - that is
+// reported back as false, not thrown, so the caller can retry once
+// metadata is ready instead of mistaking it for a crash.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setFirstLastPiecePriority(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jboolean enabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    auto info = handle.torrent_file();
+
+    if (!info) {
+        return JNI_FALSE;
+    }
+
+    try {
+        int numPieces = info->num_pieces();
+
+        if (numPieces <= 0) {
+            return JNI_FALSE;
+        }
+
+        lt::download_priority_t priority =
+                (enabled == JNI_TRUE) ? lt::top_priority : lt::default_priority;
+
+        handle.piece_priority(lt::piece_index_t{0}, priority);
+
+        if (numPieces > 1) {
+            handle.piece_priority(
+                    lt::piece_index_t{numPieces - 1},
+                    priority
+            );
+        }
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_getFirstLastPiecePriority(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    auto info = handle.torrent_file();
+
+    if (!info) {
+        return JNI_FALSE;
+    }
+
+    try {
+        auto priority = handle.piece_priority(lt::piece_index_t{0});
+        return (priority == lt::top_priority) ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentPieces(
@@ -2373,6 +2773,146 @@ Java_com_example_torrentor_TorrentNative_getPortForwardingStatus(
 }
 
 
+// Feature 4: live-applies the Connection screen's settings. Safe to call
+// before startSession() (it just stores the values for ensureSession() to
+// pick up) or after (it calls apply_settings() on the live session).
+// Refuses a combination that would leave both uTP and TCP off, since that
+// would make libtorrent unable to make or accept any connection at all -
+// the Kotlin side already blocks this in the UI, this is just a backstop.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_applyConnectionSettings(
+        JNIEnv*,
+        jobject,
+        jboolean utpIn,
+        jboolean utpOut,
+        jboolean tcpIn,
+        jboolean tcpOut,
+        jboolean upnpEnabled,
+        jboolean natpmpEnabled,
+        jint listenPort) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    bool utpOn = (utpIn == JNI_TRUE) || (utpOut == JNI_TRUE);
+    bool tcpOn = (tcpIn == JNI_TRUE) || (tcpOut == JNI_TRUE);
+
+    if (!utpOn && !tcpOn) {
+        pushEngineLog(
+                'W',
+                "Connection settings: refused to turn off both uTP and "
+                "TCP (at least one must stay on) - keeping the previous "
+                "setting"
+        );
+        return;
+    }
+
+    bool upnpWasEnabled = g_upnpEnabled;
+    bool natpmpWasEnabled = g_natpmpEnabled;
+
+    g_utpIn = utpIn == JNI_TRUE;
+    g_utpOut = utpOut == JNI_TRUE;
+    g_tcpIn = tcpIn == JNI_TRUE;
+    g_tcpOut = tcpOut == JNI_TRUE;
+    g_upnpEnabled = upnpEnabled == JNI_TRUE;
+    g_natpmpEnabled = natpmpEnabled == JNI_TRUE;
+
+    if (listenPort > 0 && listenPort <= 65535) {
+        g_listenPort = listenPort;
+    }
+
+    // Reset the shown status when a method is turned off, and let it go
+    // back to "Waiting" for a fresh attempt when turned back on, so the
+    // UI never shows a stale Success/Failed from before the toggle.
+    if (!g_upnpEnabled) {
+        g_upnpState = "Disabled";
+        g_upnpMessage = "UPnP is turned off";
+        g_upnpExternalPort = 0;
+    } else if (!upnpWasEnabled) {
+        g_upnpState = "Waiting";
+        g_upnpMessage = "No UPnP response yet";
+    }
+
+    if (!g_natpmpEnabled) {
+        g_natpmpState = "Disabled";
+        g_natpmpMessage = "NAT-PMP is turned off";
+        g_natpmpExternalPort = 0;
+    } else if (!natpmpWasEnabled) {
+        g_natpmpState = "Waiting";
+        g_natpmpMessage = "No NAT-PMP response yet";
+    }
+
+    applyConnectionSettings();
+}
+
+// Feature 4: human-readable snapshot of the Connection screen's state -
+// the toggles plus whatever UPnP/NAT-PMP alerts have actually come back,
+// with the literal alert text rather than an assumed "mapped".
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getConnectionStatus(
+        JNIEnv* env,
+        jobject) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (g_session) {
+        updatePortForwardingAlerts();
+    }
+
+    std::string output;
+
+    output += "uTP: incoming ";
+    output += enabledText(g_utpIn);
+    output += ", outgoing ";
+    output += enabledText(g_utpOut);
+    output += "\n";
+
+    output += "TCP: incoming ";
+    output += enabledText(g_tcpIn);
+    output += ", outgoing ";
+    output += enabledText(g_tcpOut);
+    output += "\n\n";
+
+    output += "Listening port: ";
+    output += std::to_string(g_listenPort);
+    output += "\n\n";
+
+    output += "UPnP: ";
+    output += g_upnpState;
+
+    if (g_upnpExternalPort > 0) {
+        output += " (port ";
+        output += std::to_string(g_upnpExternalPort);
+        output += ")";
+    }
+
+    output += "\n";
+    output += g_upnpMessage;
+    output += "\n\n";
+
+    output += "NAT-PMP: ";
+    output += g_natpmpState;
+
+    if (g_natpmpExternalPort > 0) {
+        output += " (port ";
+        output += std::to_string(g_natpmpExternalPort);
+        output += ")";
+    }
+
+    output += "\n";
+    output += g_natpmpMessage;
+
+    if (
+            (g_upnpEnabled && g_upnpState == "Waiting") ||
+            (g_natpmpEnabled && g_natpmpState == "Waiting")
+    ) {
+        output += "\n\nNote: wait 30-60 seconds after starting the app or "
+                   "changing a setting, then press Refresh.";
+    }
+
+    return env->NewStringUTF(output.c_str());
+}
 
 
 static int getConnectedPeerCountSafe() {
