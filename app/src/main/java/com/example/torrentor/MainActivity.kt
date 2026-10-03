@@ -3112,94 +3112,107 @@ class MainActivity : AppCompatActivity() {
             if (it.isDirectory) it else File("/storage/emulated/0")
         }
 
-        lateinit var dialog: AlertDialog
-
-        fun buildAndShow() {
-            val root = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(24, 24, 24, 24)
-            }
-
-            val pathText = TextView(this).apply {
-                text = currentDir.absolutePath
-                setPadding(0, 0, 0, 16)
-                setTextIsSelectable(true)
-            }
-
-            val folderListLayout = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-            }
-
-            val parent = currentDir.parentFile
-            if (parent != null) {
-                val upRow = Button(this).apply {
-                    text = ".. (Up)"
-                    setOnClickListener {
-                        currentDir = parent
-                        dialog.dismiss()
-                        buildAndShow()
-                    }
-                }
-                folderListLayout.addView(upRow)
-            }
-
-            val subFolders = try {
-                currentDir.listFiles { f -> f.isDirectory }
-                    ?.sortedBy { it.name.lowercase() }
-                    ?: emptyList()
-            } catch (_: Throwable) {
-                emptyList()
-            }
-
-            if (subFolders.isEmpty()) {
-                val empty = TextView(this).apply {
-                    text = "No subfolders here"
-                    setPadding(0, 8, 0, 8)
-                }
-                folderListLayout.addView(empty)
-            }
-
-            for (folder in subFolders) {
-                val row = Button(this).apply {
-                    text = folder.name
-                    setOnClickListener {
-                        currentDir = folder
-                        dialog.dismiss()
-                        buildAndShow()
-                    }
-                }
-                folderListLayout.addView(row)
-            }
-
-            val scroll = ScrollView(this).apply {
-                addView(folderListLayout)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    800
-                )
-            }
-
-            root.addView(pathText)
-            root.addView(scroll)
-
-            dialog = AlertDialog.Builder(this)
-                .setTitle("Choose Folder")
-                .setView(root)
-                .setPositiveButton("Use This Folder") { _, _ ->
-                    onPicked(currentDir.absolutePath)
-                }
-                .setNeutralButton("New Folder") { _, _ ->
-                    showCreateFolderDialog(currentDir) {
-                        buildAndShow()
-                    }
-                }
-                .setNegativeButton("Cancel", null)
-                .create()
-
-            dialog.show()
+        // Bug fix: this used to dismiss() the whole AlertDialog and build a
+        // brand new one on every single "Up"/subfolder tap. Tearing down and
+        // recreating a dialog window that fast crashed the app on some
+        // devices. Now there is exactly one dialog - navigation just swaps
+        // out its content views in place (pathText + folderListLayout),
+        // never touching the dialog window itself.
+        val pathText = TextView(this).apply {
+            setPadding(0, 0, 0, 16)
+            setTextIsSelectable(true)
         }
 
-        buildAndShow()
+        val folderListLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        fun refreshContents() {
+            try {
+                pathText.text = currentDir.absolutePath
+                folderListLayout.removeAllViews()
+
+                val parent = currentDir.parentFile
+                if (parent != null) {
+                    val upRow = Button(this).apply {
+                        text = ".. (Up)"
+                        setOnClickListener {
+                            currentDir = parent
+                            refreshContents()
+                        }
+                    }
+                    folderListLayout.addView(upRow)
+                }
+
+                val subFolders = try {
+                    currentDir.listFiles { f -> f.isDirectory }
+                        ?.sortedBy { it.name.lowercase() }
+                        ?: emptyList()
+                } catch (_: Throwable) {
+                    emptyList()
+                }
+
+                if (subFolders.isEmpty()) {
+                    val empty = TextView(this).apply {
+                        text = "No subfolders here"
+                        setPadding(0, 8, 0, 8)
+                    }
+                    folderListLayout.addView(empty)
+                }
+
+                for (folder in subFolders) {
+                    val row = Button(this).apply {
+                        text = folder.name
+                        setOnClickListener {
+                            currentDir = folder
+                            refreshContents()
+                        }
+                    }
+                    folderListLayout.addView(row)
+                }
+            } catch (e: Throwable) {
+                // Belt-and-braces: never let a folder-browsing hiccup take
+                // the whole app down, just show what we can.
+                Toast.makeText(
+                    this,
+                    "Could not open that folder: ${e.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 24, 24, 24)
+        }
+
+        val scroll = ScrollView(this).apply {
+            addView(folderListLayout)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                800
+            )
+        }
+
+        root.addView(pathText)
+        root.addView(scroll)
+
+        refreshContents()
+
+        AlertDialog.Builder(this)
+            .setTitle("Choose Folder")
+            .setView(root)
+            .setPositiveButton("Use This Folder") { _, _ ->
+                onPicked(currentDir.absolutePath)
+            }
+            .setNeutralButton("New Folder") { _, _ ->
+                showCreateFolderDialog(currentDir) {
+                    refreshContents()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+            .show()
     }
 
     private fun showCreateFolderDialog(parentDir: File, onCreated: () -> Unit) {
