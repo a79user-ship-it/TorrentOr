@@ -97,4 +97,12 @@ object TorrentNative {
     external fun getGlobalSpeedLimits(): String
     external fun setTorrentSpeedLimits(hash: String, uploadLimit: Int, downloadLimit: Int): Boolean
     external fun getTorrentSpeedLimits(hash: String): String
+
+    // Feature 5: Custom Save Folder. Moves an already-added torrent's files
+    // to a new folder. Identified by info-hash (never list index). The move
+    // runs asynchronously in libtorrent - this call only issues it and
+    // returns false - never throws - when the hash isn't found or newPath
+    // is empty; success/failure is reported as an Execution Log line once
+    // libtorrent finishes the move.
+    external fun moveTorrentStorage(hash: String, newPath: String): Boolean
 }

@@ -313,12 +313,20 @@ static std::string buildListenInterfaces(int port) {
     return "0.0.0.0:" + p + ",[::]:" + p;
 }
 
+// Feature 5: Custom Save Folder. g_savePath is only the SESSION DEFAULT -
+// it is seeded once, the first time the session is created (normally from
+// TorrentService's startSession() call). After that, passing a different
+// savePath here does NOT change g_savePath; each add* function below uses
+// its own per-call savePath argument as that one torrent's save_path
+// (falling back to g_savePath only when the caller passed an empty
+// string), so a global default change never silently redirects a torrent
+// the user placed in a custom per-torrent folder, and vice versa.
 static void ensureSession(const std::string& savePath) {
-    if (!savePath.empty()) {
-        g_savePath = savePath;
-    }
-
     if (!g_session) {
+        if (!savePath.empty()) {
+            g_savePath = savePath;
+        }
+
         lt::settings_pack pack;
 
         pack.set_str(
@@ -576,7 +584,8 @@ static void logTorrentAlert(lt::alert* alert) {
         lt::alert_cast<lt::file_error_alert>(alert) ||
         lt::alert_cast<lt::listen_failed_alert>(alert) ||
         lt::alert_cast<lt::metadata_failed_alert>(alert) ||
-        lt::alert_cast<lt::torrent_delete_failed_alert>(alert)) {
+        lt::alert_cast<lt::torrent_delete_failed_alert>(alert) ||
+        lt::alert_cast<lt::storage_moved_failed_alert>(alert)) {
         level = 'C';
     } else if (lt::alert_cast<lt::tracker_error_alert>(alert) ||
                lt::alert_cast<lt::tracker_warning_alert>(alert) ||
@@ -592,6 +601,7 @@ static void logTorrentAlert(lt::alert* alert) {
                lt::alert_cast<lt::state_changed_alert>(alert) ||
                lt::alert_cast<lt::metadata_received_alert>(alert) ||
                lt::alert_cast<lt::listen_succeeded_alert>(alert) ||
+               lt::alert_cast<lt::storage_moved_alert>(alert) ||
                lt::alert_cast<lt::portmap_alert>(alert)) {
         level = 'I';
     }
@@ -771,7 +781,8 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
         jstring savePath) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string magnetText = toString(env, magnet);
     std::string hash = extractHashFromMagnet(magnetText);
@@ -786,7 +797,7 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
 
     if (ec) return;
 
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -810,7 +821,8 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
         jstring savePath) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string magnetText = toString(env, magnet);
     std::string hash = extractHashFromMagnet(magnetText);
@@ -832,7 +844,7 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
 
     if (ec) return -1;
 
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
     // Keep auto_managed here on purpose. A magnet has to be running to fetch
     // its metadata, and libtorrent's queue starts it for that. If auto_managed
@@ -864,7 +876,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
         jstring savePath) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string torrentPath = toString(env, path);
 
@@ -885,7 +898,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
 
     lt::add_torrent_params params;
     params.ti = info;
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -911,7 +924,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
         jstring savePath) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string torrentPath = toString(env, path);
 
@@ -932,7 +946,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
 
     lt::add_torrent_params params;
     params.ti = info;
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
     params.flags |= lt::torrent_flags::paused;
     params.flags &= ~lt::torrent_flags::auto_managed;
 
@@ -993,7 +1007,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
         jstring selectedIndexes) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string torrentPath = toString(env, path);
     std::string selected = toString(env, selectedIndexes);
@@ -1015,7 +1030,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
     lt::add_torrent_params params;
     params.ti = info;
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
     int fileCount = info->files().num_files();
 
@@ -1068,7 +1083,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
         jstring selectedIndexes) {
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    ensureSession(toString(env, savePath));
+    std::string torrentSavePath = toString(env, savePath);
+    ensureSession(torrentSavePath);
 
     std::string torrentPath = toString(env, path);
     std::string selected = toString(env, selectedIndexes);
@@ -1090,7 +1106,7 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
 
     lt::add_torrent_params params;
     params.ti = info;
-    params.save_path = g_savePath;
+    params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
     params.flags |= lt::torrent_flags::paused;
     params.flags &= ~lt::torrent_flags::auto_managed;
 
@@ -2256,6 +2272,46 @@ Java_com_example_torrentor_TorrentNative_getFirstLastPiecePriority(
     } catch (...) {
         return JNI_FALSE;
     }
+}
+
+// Feature 5: Custom Save Folder. Moves an already-added torrent's files to
+// a new folder. Identified by info-hash (never list index), per the
+// project's persistence rules. The move itself happens asynchronously in
+// libtorrent - this call only issues it; success or failure is reported
+// through storage_moved_alert / storage_moved_failed_alert, which
+// logTorrentAlert() already turns into an Execution Log line (see the 'I'
+// and 'C' level checks above). This function returns false - never
+// throws - when the hash isn't found or the new path is empty.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_moveTorrentStorage(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jstring newPath) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    std::string path = toString(env, newPath);
+
+    if (path.empty()) {
+        return JNI_FALSE;
+    }
+
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        handle.move_storage(path);
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
 }
 
 extern "C"

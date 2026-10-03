@@ -37,6 +37,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var listLayout: LinearLayout
     private lateinit var speedGraphText: TextView
+    // Modern replacement for the old block-character sparkline that used to
+    // live inside speedGraphText - speedGraphText now just holds the small
+    // colored "↓/↑ KB/s" readout above this drawn chart.
+    private lateinit var speedGraphView: SpeedGraphView
     private val downloadSpeedHistory = mutableListOf<Int>()
     private val uploadSpeedHistory = mutableListOf<Int>()
     private val maxSpeedHistoryPoints = 30
@@ -54,6 +58,11 @@ class MainActivity : AppCompatActivity() {
 
     // No refreshing while the app is not on screen.
     private var uiVisible = true
+    // Feature 5: Custom Save Folder - this is now only the built-in
+    // fallback default, used the first time the app ever runs (before any
+    // prefs file exists) and whenever a prefs read genuinely comes back
+    // empty. See getGlobalSaveFolder() / getSavedSaveFolderForHash() for
+    // the real, user-editable values everywhere else in this file uses.
     private val savePath = "/storage/emulated/0/Download"
 
     private var selectMode = false
@@ -679,12 +688,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         speedGraphText = TextView(this).apply {
-            text = buildSpeedTextGraph()
+            text = buildSpeedSummaryText()
             setTextColor(Color.WHITE)
             textSize = 14f
-            typeface = android.graphics.Typeface.MONOSPACE
-            setPadding(16, 16, 16, 16)
+            setPadding(16, 16, 16, 8)
             setBackgroundColor(Color.rgb(20, 20, 20))
+        }
+
+        speedGraphView = SpeedGraphView(this).apply {
+            // The view paints its own rounded dark panel in onDraw(), so no
+            // background/padding here - that would show as a mismatched
+            // square edge behind the rounded corners. Bottom margin only,
+            // to separate it from whatever comes next in the layout.
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                360
+            ).apply {
+                setMargins(0, 0, 0, 16)
+            }
+            setData(downloadSpeedHistory, uploadSpeedHistory)
         }
 
         val pauseAll = Button(this).apply {
@@ -759,6 +781,13 @@ class MainActivity : AppCompatActivity() {
             text = "Storage Space"
             setOnClickListener {
                 showStorageSpaceScreen()
+            }
+        }
+
+        val saveFolderButton = Button(this).apply {
+            text = "Save Folder"
+            setOnClickListener {
+                showSaveFolderScreen()
             }
         }
 
@@ -848,6 +877,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(searchBox)
         root.addView(clearSearch)
         root.addView(speedGraphText)
+        root.addView(speedGraphView)
         root.addView(pauseAll)
         root.addView(resumeAll)
         root.addView(clearSaved)
@@ -857,6 +887,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(connectionSettingsButton)
         root.addView(speedLimitsButton)
         root.addView(storageSpaceButton)
+        root.addView(saveFolderButton)
         root.addView(rssButton)
         root.addView(executionLogButton)
         root.addView(onlineSearchButton)
@@ -2572,7 +2603,7 @@ class MainActivity : AppCompatActivity() {
         stopStorageAutoRefresh()
         stopGlobalStatsAutoRefresh()
 
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2798,7 +2829,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildNetworkFeaturesText(): String {
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         val networkStatus = try {
             TorrentNative.getNetworkFeaturesStatus()
@@ -2824,7 +2855,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildNetworkFeaturesColoredText(): android.text.SpannableStringBuilder {
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         val networkStatus = try {
             buildString {
@@ -2994,14 +3025,51 @@ class MainActivity : AppCompatActivity() {
         return getLowSpaceThresholdMb().toLong() * 1024L * 1024L
     }
 
+    // ------------------------------------------------- Feature 5: Custom Save Folder
+    // Same two prefs files TorrentService reads from: a global default
+    // folder (used by any torrent with no override) and a per-torrent
+    // override keyed by info-hash, same key format as the other
+    // per-torrent prefs above (normalizeHashForDateKey).
+
+    private fun saveFolderPrefs() =
+        getSharedPreferences("save_folder_settings", MODE_PRIVATE)
+
+    private fun getGlobalSaveFolder(): String =
+        saveFolderPrefs().getString("global_save_path", savePath) ?: savePath
+
+    private fun setGlobalSaveFolder(path: String) {
+        saveFolderPrefs().edit().putString("global_save_path", path).apply()
+    }
+
+    private fun torrentSaveFolderPrefs() =
+        getSharedPreferences("torrent_save_folders", MODE_PRIVATE)
+
+    private fun getSavedSaveFolderForHash(hash: String): String? {
+        if (hash.isBlank()) return null
+        return torrentSaveFolderPrefs().getString(normalizeHashForDateKey(hash), null)
+    }
+
+    private fun saveSaveFolderForHash(hash: String, path: String) {
+        if (hash.isBlank() || path.isBlank()) return
+        torrentSaveFolderPrefs().edit()
+            .putString(normalizeHashForDateKey(hash), path)
+            .apply()
+    }
+
     // Gates a "Download..." button's action behind a low-disk-space
     // check. If "Ignore low storage space" is checked, or there's
     // nothing to warn about (including a storage read error - never
     // block an add over that), onContinue runs immediately with no
     // dialog. Otherwise shows a Continue/Cancel dialog; Cancel simply
     // leaves the user on the same screen having done nothing.
+    //
+    // targetPath defaults to the global save folder, but Feature 5 lets a
+    // screen pass the folder the torrent will actually land in (a custom
+    // per-torrent folder), so the free-space check reflects where the
+    // files are really going.
     private fun confirmLowDiskSpaceThenRun(
         ignoreLowSpace: Boolean,
+        targetPath: String = getGlobalSaveFolder(),
         onContinue: () -> Unit
     ) {
         if (ignoreLowSpace) {
@@ -3010,7 +3078,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val free = try {
-            StatFs(savePath).availableBytes
+            StatFs(targetPath).availableBytes
         } catch (_: Throwable) {
             onContinue()
             return
@@ -3028,6 +3096,144 @@ class MainActivity : AppCompatActivity() {
                         "This download may fail if space runs out. Continue anyway?"
             )
             .setPositiveButton("Continue") { _, _ -> onContinue() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ------------------------------------------------- Feature 5: Custom Save Folder
+    // Shared folder browser/creator - used by the global Save Folder
+    // screen, all three add-time screens, and the per-torrent "Change"
+    // button on the Details screen. Lets the user navigate anywhere on
+    // device storage (TorrentOr already holds MANAGE_EXTERNAL_STORAGE) and
+    // create new folders; it never deletes, renames or moves anything by
+    // itself - the caller decides what onPicked does with the chosen path.
+    private fun showFolderPickerDialog(startPath: String, onPicked: (String) -> Unit) {
+        var currentDir = File(startPath).let {
+            if (it.isDirectory) it else File("/storage/emulated/0")
+        }
+
+        lateinit var dialog: AlertDialog
+
+        fun buildAndShow() {
+            val root = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(24, 24, 24, 24)
+            }
+
+            val pathText = TextView(this).apply {
+                text = currentDir.absolutePath
+                setPadding(0, 0, 0, 16)
+                setTextIsSelectable(true)
+            }
+
+            val folderListLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+
+            val parent = currentDir.parentFile
+            if (parent != null) {
+                val upRow = Button(this).apply {
+                    text = ".. (Up)"
+                    setOnClickListener {
+                        currentDir = parent
+                        dialog.dismiss()
+                        buildAndShow()
+                    }
+                }
+                folderListLayout.addView(upRow)
+            }
+
+            val subFolders = try {
+                currentDir.listFiles { f -> f.isDirectory }
+                    ?.sortedBy { it.name.lowercase() }
+                    ?: emptyList()
+            } catch (_: Throwable) {
+                emptyList()
+            }
+
+            if (subFolders.isEmpty()) {
+                val empty = TextView(this).apply {
+                    text = "No subfolders here"
+                    setPadding(0, 8, 0, 8)
+                }
+                folderListLayout.addView(empty)
+            }
+
+            for (folder in subFolders) {
+                val row = Button(this).apply {
+                    text = folder.name
+                    setOnClickListener {
+                        currentDir = folder
+                        dialog.dismiss()
+                        buildAndShow()
+                    }
+                }
+                folderListLayout.addView(row)
+            }
+
+            val scroll = ScrollView(this).apply {
+                addView(folderListLayout)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    800
+                )
+            }
+
+            root.addView(pathText)
+            root.addView(scroll)
+
+            dialog = AlertDialog.Builder(this)
+                .setTitle("Choose Folder")
+                .setView(root)
+                .setPositiveButton("Use This Folder") { _, _ ->
+                    onPicked(currentDir.absolutePath)
+                }
+                .setNeutralButton("New Folder") { _, _ ->
+                    showCreateFolderDialog(currentDir) {
+                        buildAndShow()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .create()
+
+            dialog.show()
+        }
+
+        buildAndShow()
+    }
+
+    private fun showCreateFolderDialog(parentDir: File, onCreated: () -> Unit) {
+        val input = EditText(this).apply {
+            hint = "Folder name"
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("New Folder")
+            .setView(input)
+            .setPositiveButton("Create") { _, _ ->
+                val name = input.text.toString().trim()
+
+                if (name.isBlank() || name.contains("/") || name.contains("\\")) {
+                    Toast.makeText(this, "Enter a valid folder name", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                val newFolder = File(parentDir, name)
+
+                val created = try {
+                    newFolder.exists() || newFolder.mkdirs()
+                } catch (_: Throwable) {
+                    false
+                }
+
+                Toast.makeText(
+                    this,
+                    if (created) "Folder created" else "Could not create folder",
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                onCreated()
+            }
             .setNegativeButton("Cancel", null)
             .show()
     }
@@ -3129,7 +3335,7 @@ class MainActivity : AppCompatActivity() {
         stopStorageAutoRefresh()
         stopGlobalStatsAutoRefresh()
 
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         val prefs = connectionPrefs()
 
@@ -3441,7 +3647,7 @@ class MainActivity : AppCompatActivity() {
         stopGlobalStatsAutoRefresh()
         stopConnectionAutoRefresh()
 
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         val prefs = globalSpeedLimitPrefs()
         val savedUploadBytes = prefs.getInt("upload_limit", 0)
@@ -3783,8 +3989,14 @@ class MainActivity : AppCompatActivity() {
 
         skipMagnetSelection = false
 
+        // Feature 5: the handle has to be created now (paused) just to
+        // fetch metadata, before the user has had a chance to pick a
+        // folder, so it starts in the global default. If they pick a
+        // different one below, that's applied with moveTorrentStorage()
+        // the moment they pick it - see currentSaveFolder below - so by
+        // the time Download runs the torrent is already in the right place.
         val torrentIndex = try {
-            TorrentNative.addMagnetPaused(magnet, savePath)
+            TorrentNative.addMagnetPaused(magnet, getGlobalSaveFolder())
         } catch (e: Throwable) {
             e.printStackTrace()
             -1
@@ -3794,6 +4006,8 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Could not open magnet", Toast.LENGTH_SHORT).show()
             return
         }
+
+        var currentSaveFolder = getGlobalSaveFolder()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3814,6 +4028,55 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 24, 0, 24)
         }
 
+        val saveFolderText = TextView(this).apply {
+            text = "Save Folder:\n$currentSaveFolder"
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 4)
+        }
+
+        val changeSaveFolderButton = Button(this).apply {
+            text = "Change Save Folder"
+            setOnClickListener {
+                showFolderPickerDialog(currentSaveFolder) { newPath ->
+                    val hash = getSafeTorrentHashForAction(torrentIndex)
+
+                    if (hash.isBlank()) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Torrent not ready yet - try again in a moment",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        return@showFolderPickerDialog
+                    }
+
+                    val moved = try {
+                        TorrentNative.moveTorrentStorage(hash, newPath)
+                    } catch (e: Throwable) {
+                        Log.e("TorrentOrLT", "moveTorrentStorage(...) threw", e)
+                        false
+                    }
+
+                    if (moved) {
+                        currentSaveFolder = newPath
+                        saveSaveFolderForHash(hash, newPath)
+                        saveFolderText.text = "Save Folder:\n$currentSaveFolder"
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Save folder updated",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Could not change save folder",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+        }
+
         val sequentialCheckBox = CheckBox(this).apply {
             text = "Sequential Download"
             setTextColor(Color.WHITE)
@@ -3829,7 +4092,10 @@ class MainActivity : AppCompatActivity() {
         val downloadNowButton = Button(this).apply {
             text = "Download All Without Waiting"
             setOnClickListener {
-                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                confirmLowDiskSpaceThenRun(
+                    ignoreLowSpaceCheckBox.isChecked,
+                    targetPath = currentSaveFolder
+                ) {
                     skipMagnetSelection = true
 
                     applySequentialDownloadForHash(
@@ -3862,6 +4128,8 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(title)
         root.addView(statusText)
+        root.addView(saveFolderText)
+        root.addView(changeSaveFolderButton)
         root.addView(sequentialCheckBox)
         root.addView(ignoreLowSpaceCheckBox)
         root.addView(downloadNowButton)
@@ -3993,6 +4261,63 @@ class MainActivity : AppCompatActivity() {
         selectButtonsRow.addView(selectAllButton)
         selectButtonsRow.addView(selectNoneButton)
 
+        // Feature 5: this torrent was already added (paused) on the
+        // previous screen, so reflect whatever folder it's actually in
+        // right now (the default, or whatever the user already changed it
+        // to there) rather than assuming the global default.
+        val initialHash = getSafeTorrentHashForAction(torrentIndex)
+        var currentSaveFolder =
+            getSavedSaveFolderForHash(initialHash) ?: getGlobalSaveFolder()
+
+        val saveFolderText = TextView(this).apply {
+            text = "Save Folder:\n$currentSaveFolder"
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 4)
+        }
+
+        val changeSaveFolderButton = Button(this).apply {
+            text = "Change Save Folder"
+            setOnClickListener {
+                showFolderPickerDialog(currentSaveFolder) { newPath ->
+                    val hash = getSafeTorrentHashForAction(torrentIndex)
+
+                    if (hash.isBlank()) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Torrent not ready yet - try again in a moment",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        return@showFolderPickerDialog
+                    }
+
+                    val moved = try {
+                        TorrentNative.moveTorrentStorage(hash, newPath)
+                    } catch (e: Throwable) {
+                        Log.e("TorrentOrLT", "moveTorrentStorage(...) threw", e)
+                        false
+                    }
+
+                    if (moved) {
+                        currentSaveFolder = newPath
+                        saveSaveFolderForHash(hash, newPath)
+                        saveFolderText.text = "Save Folder:\n$currentSaveFolder"
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Save folder updated",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Could not change save folder",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
+        }
+
         val sequentialCheckBox = CheckBox(this).apply {
             text = "Sequential Download"
             setTextColor(Color.WHITE)
@@ -4013,7 +4338,10 @@ class MainActivity : AppCompatActivity() {
                     return@setOnClickListener
                 }
 
-                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                confirmLowDiskSpaceThenRun(
+                    ignoreLowSpaceCheckBox.isChecked,
+                    targetPath = currentSaveFolder
+                ) {
                     val indexes = selected.sorted().joinToString(",")
 
                     applySequentialDownloadForHash(
@@ -4040,7 +4368,10 @@ class MainActivity : AppCompatActivity() {
         val downloadAll = Button(this).apply {
             text = "Download All"
             setOnClickListener {
-                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                confirmLowDiskSpaceThenRun(
+                    ignoreLowSpaceCheckBox.isChecked,
+                    targetPath = currentSaveFolder
+                ) {
                     val indexes = allIndexes.sorted().joinToString(",")
 
                     applySequentialDownloadForHash(
@@ -4075,6 +4406,8 @@ class MainActivity : AppCompatActivity() {
         container.addView(title)
         container.addView(selectButtonsRow)
         container.addView(scroll)
+        container.addView(saveFolderText)
+        container.addView(changeSaveFolderButton)
         container.addView(sequentialCheckBox)
         container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
@@ -4197,6 +4530,28 @@ class MainActivity : AppCompatActivity() {
         selectButtonsRow.addView(selectAllButton)
         selectButtonsRow.addView(selectNoneButton)
 
+        // Feature 5: no torrent handle exists yet here - it's only created
+        // once TorrentService receives the Intent below - so this just
+        // picks the folder and sends it along as an Intent extra; the
+        // Service applies it at actual add time and persists it.
+        var selectedSaveFolder = getGlobalSaveFolder()
+
+        val saveFolderText = TextView(this).apply {
+            text = "Save Folder:\n$selectedSaveFolder"
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 4)
+        }
+
+        val changeSaveFolderButton = Button(this).apply {
+            text = "Change Save Folder"
+            setOnClickListener {
+                showFolderPickerDialog(selectedSaveFolder) { newPath ->
+                    selectedSaveFolder = newPath
+                    saveFolderText.text = "Save Folder:\n$selectedSaveFolder"
+                }
+            }
+        }
+
         val sequentialCheckBox = CheckBox(this).apply {
             text = "Sequential Download"
             setTextColor(Color.WHITE)
@@ -4237,7 +4592,10 @@ class MainActivity : AppCompatActivity() {
                     return@setOnClickListener
                 }
 
-                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                confirmLowDiskSpaceThenRun(
+                    ignoreLowSpaceCheckBox.isChecked,
+                    targetPath = selectedSaveFolder
+                ) {
                     val indexes = selected.sorted().joinToString(",")
 
                     persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
@@ -4245,6 +4603,7 @@ class MainActivity : AppCompatActivity() {
                     val intent = Intent(this@MainActivity, TorrentService::class.java)
                     intent.putExtra("TORRENT_PATH", filePath)
                     intent.putExtra("SELECTED_INDEXES", indexes)
+                    intent.putExtra("SAVE_PATH", selectedSaveFolder)
 
                     startTorrentService(intent)
                     showMainScreen()
@@ -4255,11 +4614,15 @@ class MainActivity : AppCompatActivity() {
         val downloadAll = Button(this).apply {
             text = "Download All"
             setOnClickListener {
-                confirmLowDiskSpaceThenRun(ignoreLowSpaceCheckBox.isChecked) {
+                confirmLowDiskSpaceThenRun(
+                    ignoreLowSpaceCheckBox.isChecked,
+                    targetPath = selectedSaveFolder
+                ) {
                     persistSequentialDownloadChoice(sequentialCheckBox.isChecked)
 
                     val intent = Intent(this@MainActivity, TorrentService::class.java)
                     intent.putExtra("TORRENT_PATH", filePath)
+                    intent.putExtra("SAVE_PATH", selectedSaveFolder)
                     startTorrentService(intent)
                     showMainScreen()
                 }
@@ -4274,6 +4637,8 @@ class MainActivity : AppCompatActivity() {
         container.addView(title)
         container.addView(selectButtonsRow)
         container.addView(scroll)
+        container.addView(saveFolderText)
+        container.addView(changeSaveFolderButton)
         container.addView(sequentialCheckBox)
         container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
@@ -4754,7 +5119,60 @@ class MainActivity : AppCompatActivity() {
         val openFolderButton = Button(this).apply {
             text = "Open Folder"
             setOnClickListener {
-                openDownloadFolder()
+                val hash = getSafeTorrentHashForAction(torrentIndex)
+                val folder = getSavedSaveFolderForHash(hash) ?: getGlobalSaveFolder()
+                openDownloadFolder(folder)
+            }
+        }
+
+        // Feature 5: moves this torrent's already-downloaded files to a
+        // new folder. Unlike the add-time pickers, this one acts on a
+        // torrent that may already have data on disk, so it always goes
+        // through moveTorrentStorage() (never a plain prefs-only change).
+        val changeSaveFolderButton = Button(this).apply {
+            text = "Change Save Folder"
+            setOnClickListener {
+                val hash = getSafeTorrentHashForAction(torrentIndex)
+
+                if (hash.isBlank()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Torrent hash not available yet",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                val currentFolder = getSavedSaveFolderForHash(hash) ?: getGlobalSaveFolder()
+
+                showFolderPickerDialog(currentFolder) { newPath ->
+                    val moved = try {
+                        TorrentNative.moveTorrentStorage(hash, newPath)
+                    } catch (e: Throwable) {
+                        Log.e("TorrentOrLT", "moveTorrentStorage(...) threw", e)
+                        false
+                    }
+
+                    if (moved) {
+                        saveSaveFolderForHash(hash, newPath)
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Moving files to $newPath - this may take a " +
+                                    "moment for large torrents. Check the " +
+                                    "Execution Log for when it's done.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        showGeneralTab()
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Could not change save folder",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
             }
         }
 
@@ -4782,6 +5200,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(forceReannounce)
         root.addView(forceRecheck)
         root.addView(openFolderButton)
+        root.addView(changeSaveFolderButton)
         root.addView(backButton)
 
         val outerScroll = ScrollView(this).apply {
@@ -5097,7 +5516,12 @@ class MainActivity : AppCompatActivity() {
             text.append(pieceSize).append("\n")
         }
 
-        text.append("\nSave path:\n").append(savePath).append("\n\n")
+        // Feature 5: this torrent's actual folder - either the one it was
+        // added into, or wherever it's since been moved to.
+        val currentTorrentSaveFolder =
+            getSavedSaveFolderForHash(hash) ?: getGlobalSaveFolder()
+
+        text.append("\nSave path:\n").append(currentTorrentSaveFolder).append("\n\n")
         text.append("Hash:\n").append(hash).append("\n\n")
         text.append("Magnet:\n").append(magnet)
 
@@ -5314,6 +5738,16 @@ class MainActivity : AppCompatActivity() {
 
         val progressMap = getTorrentFileProgressMap(torrentIndex)
 
+        // Feature 5: this torrent's actual folder, for locating its
+        // downloaded files below - not always the global default anymore.
+        val torrentHashForFiles = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+        val torrentSaveFolder =
+            getSavedSaveFolderForHash(torrentHashForFiles) ?: getGlobalSaveFolder()
+
         contentText.text =
             "Files\n\n" +
                     "Tick the files you want TorrentOr to download.\n" +
@@ -5382,7 +5816,7 @@ class MainActivity : AppCompatActivity() {
             val index = parts[0].toIntOrNull() ?: continue
             val name = parts[1]
             val sizeBytes = parts[2].toLongOrNull() ?: 0L
-            val file = File(savePath, name)
+            val file = File(torrentSaveFolder, name)
 
             allIndexes.add(index)
 
@@ -5563,11 +5997,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openDownloadFolder() {
+    // Feature 5: builds the "primary:relative/path" (or "VOLUME-ID:path"
+    // for an SD card) document authority string ACTION_OPEN_DOCUMENT_TREE
+    // expects, from a plain absolute path like the ones torrents are saved
+    // to. Returns null for a path this can't translate (not under
+    // /storage/...), in which case the caller falls back to the plain
+    // Download folder, same as before this feature existed.
+    private fun buildDocumentAuthorityForPath(path: String): String? {
+        val normalized = path.trim().trimEnd('/')
+        if (!normalized.startsWith("/storage/")) return null
+
+        val afterStorage = normalized.removePrefix("/storage/")
+        val segments = afterStorage.split("/", limit = 2)
+        val volume = segments.getOrNull(0) ?: return null
+        val relative = segments.getOrNull(1) ?: ""
+
+        val volumeId = if (volume == "emulated") {
+            // "/storage/emulated/0/X/Y" -> volume "primary", relative "X/Y"
+            val afterEmulated = relative.split("/", limit = 2)
+            val rest = afterEmulated.getOrNull(1) ?: ""
+            return if (rest.isBlank()) "primary:" else "primary:$rest"
+        } else {
+            volume
+        }
+
+        return if (relative.isBlank()) "$volumeId:" else "$volumeId:$relative"
+    }
+
+    private fun openDownloadFolder(path: String = getGlobalSaveFolder()) {
         try {
+            val authority = buildDocumentAuthorityForPath(path) ?: "primary:Download"
+
             val folderUri = DocumentsContract.buildDocumentUri(
                 "com.android.externalstorage.documents",
-                "primary:Download"
+                authority
             )
 
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
@@ -5937,41 +6400,45 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (::speedGraphText.isInitialized) {
-            speedGraphText.text = buildSpeedTextGraph()
+            speedGraphText.text = buildSpeedSummaryText()
+        }
+
+        if (::speedGraphView.isInitialized) {
+            speedGraphView.setData(downloadSpeedHistory, uploadSpeedHistory)
         }
     }
 
-    private fun buildSpeedTextGraph(): String {
+    // The old block-character sparkline (▁▂▃▄▅▆▇█, built by a removed
+    // buildSparkline() function) is now the drawn SpeedGraphView above this
+    // text - this just builds the small colored "↓/↑ KB/s" readout line
+    // that sits on top of it, in the same teal/orange as the graph's two
+    // lines so it reads as one piece.
+    private fun buildSpeedSummaryText(): CharSequence {
         val latestDown = downloadSpeedHistory.lastOrNull() ?: 0
         val latestUp = uploadSpeedHistory.lastOrNull() ?: 0
 
-        return "Speed Graph\n" +
-                "↓ $latestDown KB/s  ↑ $latestUp KB/s\n\n" +
-                "Download:\n" +
-                buildSparkline(downloadSpeedHistory) +
-                "\n\nUpload:\n" +
-                buildSparkline(uploadSpeedHistory)
-    }
+        val downPart = "↓ $latestDown KB/s"
+        val upPart = "↑ $latestUp KB/s"
+        val text = "$downPart   $upPart"
 
-    private fun buildSparkline(values: List<Int>): String {
-        if (values.isEmpty()) {
-            return "No speed data yet"
-        }
+        val builder = android.text.SpannableStringBuilder(text)
 
-        val blocks = listOf("▁", "▂", "▃", "▄", "▅", "▆", "▇", "█")
-        val maxValue = values.maxOrNull() ?: 0
+        builder.setSpan(
+            android.text.style.ForegroundColorSpan(Color.parseColor("#4FD1C5")),
+            0,
+            downPart.length,
+            android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
 
-        if (maxValue <= 0) {
-            return values.joinToString("") { "▁" }
-        }
+        val upStart = text.length - upPart.length
+        builder.setSpan(
+            android.text.style.ForegroundColorSpan(Color.parseColor("#F6AD55")),
+            upStart,
+            text.length,
+            android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
 
-        return values.joinToString("") { value ->
-            val index = ((value.toDouble() / maxValue.toDouble()) * (blocks.size - 1))
-                .toInt()
-                .coerceIn(0, blocks.size - 1)
-
-            blocks[index]
-        }
+        return builder
     }
 
     private fun extractTotalSpeedsFromStatus(status: String): Pair<Int, Int> {
@@ -6332,6 +6799,82 @@ class MainActivity : AppCompatActivity() {
         startTorrentService(intent)
     }
 
+    // ------------------------------------------------- Feature 5: Custom Save Folder
+    private fun showSaveFolderScreen() {
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Save Folder"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        fun infoText(): String =
+            "New torrents are saved here by default, unless you pick a " +
+                    "different folder for that one torrent when you add it " +
+                    "(or change it later from its Details screen).\n\n" +
+                    "Current default folder:\n${getGlobalSaveFolder()}"
+
+        val info = TextView(this).apply {
+            text = infoText()
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setPadding(0, 0, 0, 16)
+        }
+
+        val changeButton = Button(this).apply {
+            text = "Change Default Folder"
+            setOnClickListener {
+                showFolderPickerDialog(getGlobalSaveFolder()) { newPath ->
+                    setGlobalSaveFolder(newPath)
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Default save folder updated. This only affects new torrents.",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    info.text = infoText()
+                }
+            }
+        }
+
+        val newFolderButton = Button(this).apply {
+            text = "Create Folder Here"
+            setOnClickListener {
+                showCreateFolderDialog(File(getGlobalSaveFolder())) {
+                    info.text = infoText()
+                }
+            }
+        }
+
+        val back = Button(this).apply {
+            text = "Back"
+            setOnClickListener { showMainScreen() }
+        }
+
+        root.addView(title)
+        root.addView(info)
+        root.addView(changeButton)
+        root.addView(newFolderButton)
+        root.addView(back)
+
+        val scroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        setContentView(scroll)
+    }
+
     private fun showStorageSpaceScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -6432,8 +6975,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun buildStorageSpaceText(): String {
+        // Feature 5: individual torrents can now live in different custom
+        // folders (see the Save Folder screen and the per-torrent picker on
+        // each add screen) - this still monitors the global default
+        // folder's volume, a reasonable approximation since custom folders
+        // usually end up on the same storage partition.
+        val monitoredPath = getGlobalSaveFolder()
+
         return try {
-            val stat = StatFs(savePath)
+            val stat = StatFs(monitoredPath)
 
             val total = stat.totalBytes
             val free = stat.availableBytes
@@ -6452,7 +7002,7 @@ class MainActivity : AppCompatActivity() {
                 ""
             }
 
-            "Save Path:\n$savePath\n\n" +
+            "Save Path:\n$monitoredPath\n\n" +
                     "Free Space: ${formatSize(free)}\n" +
                     "Used Space: ${formatSize(used)}\n" +
                     "Total Space: ${formatSize(total)}\n" +
@@ -6461,7 +7011,7 @@ class MainActivity : AppCompatActivity() {
                     lowSpaceLine +
                     "\n\nAuto-refresh: Every 3 seconds"
         } catch (e: Throwable) {
-            "Could not read storage space\n\n$savePath"
+            "Could not read storage space\n\n$monitoredPath"
         }
     }
 

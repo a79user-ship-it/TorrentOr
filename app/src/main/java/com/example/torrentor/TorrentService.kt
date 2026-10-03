@@ -22,7 +22,11 @@ class TorrentService : Service() {
     private val interval = 3000L
     private var restored = false
 
-    private val savePath = "/storage/emulated/0/Download"
+    // Feature 5: Custom Save Folder. This is now just the fallback default -
+    // see getGlobalSaveFolder() / getSavedSaveFolder() below for the real,
+    // user-editable values. Kept as a constant (not a prefs read) so there
+    // is always a safe value even before any prefs file exists.
+    private val DEFAULT_SAVE_PATH = "/storage/emulated/0/Download"
 
     private var lastSessionDownload = 0L
     private var lastSessionUpload = 0L
@@ -68,7 +72,7 @@ class TorrentService : Service() {
         applySavedConnectionSettings()
         applySavedGlobalSpeedLimits()
 
-        TorrentNative.startSession(savePath)
+        TorrentNative.startSession(getGlobalSaveFolder())
 
         restoreSavedTorrents()
         startUpdates()
@@ -129,6 +133,45 @@ class TorrentService : Service() {
         if (key.isBlank()) return
 
         torrentSpeedLimitPrefs().edit().remove(key).apply()
+    }
+
+    // ------------------------------------------------------- Feature 5: Custom Save Folder
+    // Two layers: a global default folder (used by any torrent with no
+    // override) and, separately, a per-torrent override keyed by info-hash.
+    // Both prefs files are read/written under the same names from
+    // MainActivity directly (same pattern as Sequential Download / First-
+    // Last Piece Priority), so a folder picked there is visible here
+    // immediately without going through an Intent.
+
+    private fun saveFolderPrefs() =
+        getSharedPreferences("save_folder_settings", MODE_PRIVATE)
+
+    private fun getGlobalSaveFolder(): String =
+        saveFolderPrefs().getString("global_save_path", DEFAULT_SAVE_PATH)
+            ?: DEFAULT_SAVE_PATH
+
+    private fun torrentSaveFolderPrefs() =
+        getSharedPreferences("torrent_save_folders", MODE_PRIVATE)
+
+    private fun getSavedSaveFolder(hash: String): String? {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return null
+
+        return torrentSaveFolderPrefs().getString(key, null)
+    }
+
+    private fun saveSaveFolder(hash: String, path: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank() || path.isBlank()) return
+
+        torrentSaveFolderPrefs().edit().putString(key, path).apply()
+    }
+
+    private fun removeSaveFolder(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        torrentSaveFolderPrefs().edit().remove(key).apply()
     }
 
     private fun reapplySavedTorrentSpeedLimits() {
@@ -266,6 +309,14 @@ class TorrentService : Service() {
         val actionHash = intent?.getStringExtra("TORRENT_HASH") ?: ""
         val actionMagnet = intent?.getStringExtra("TORRENT_MAGNET") ?: ""
 
+        // Feature 5: Custom Save Folder - an optional per-torrent override
+        // for this one add, from whichever screen sent the Intent. Falls
+        // back to the global default folder when not provided, which is
+        // the same behavior as before this feature existed.
+        val requestedSavePath = intent?.getStringExtra("SAVE_PATH")
+        val effectiveSavePath =
+            if (requestedSavePath.isNullOrBlank()) getGlobalSaveFolder() else requestedSavePath
+
         when {
 
             action == "SAVE_MAGNET_ONLY" -> {
@@ -385,6 +436,7 @@ class TorrentService : Service() {
                         removeSequentialDownload(hashBeforeRemove)
                         removeFirstLastPriority(hashBeforeRemove)
                         removeSavedTorrentSpeedLimits(hashBeforeRemove)
+                        removeSaveFolder(hashBeforeRemove)
                         // must run before the saved entry is removed (it needs the path)
                         deleteStoredTorrentCopy(hashBeforeRemove)
                         removeSavedTorrentByHash(hashBeforeRemove)
@@ -437,8 +489,12 @@ class TorrentService : Service() {
                 } else {
                     TorrentNative.addMagnet(
                         normalizedMagnet,
-                        savePath
+                        effectiveSavePath
                     )
+
+                    if (isGoodHash(hash)) {
+                        saveSaveFolder(hash, effectiveSavePath)
+                    }
 
                     saveAddedDateIfMissing(hash)
                     saveMagnetEntry(normalizedMagnet)
@@ -487,15 +543,17 @@ class TorrentService : Service() {
                     if (selected.isNotBlank()) {
                         TorrentNative.addTorrentFileSelected(
                             filePath,
-                            savePath,
+                            effectiveSavePath,
                             selected
                         )
                     } else {
                         TorrentNative.addTorrentFile(
                             filePath,
-                            savePath
+                            effectiveSavePath
                         )
                     }
+
+                    saveSaveFolder(hash, effectiveSavePath)
 
                     if (selected.isNotBlank()) {
                         saveFileSelection(hash, selected)
@@ -577,15 +635,22 @@ class TorrentService : Service() {
                             hash.isBlank() ||
                             !TorrentNative.hasTorrentHash(hash)
                         ) {
+                            // Feature 5: restore into the folder this
+                            // torrent was originally added to (or moved
+                            // to later), not just whatever the global
+                            // default currently is.
+                            val restoreSavePath =
+                                getSavedSaveFolder(hash) ?: getGlobalSaveFolder()
+
                             if (isPausedHash(hash)) {
                                 TorrentNative.addMagnetPaused(
                                     magnet,
-                                    savePath
+                                    restoreSavePath
                                 )
                             } else {
                                 TorrentNative.addMagnet(
                                     magnet,
-                                    savePath
+                                    restoreSavePath
                                 )
                             }
                         }
@@ -621,30 +686,37 @@ class TorrentService : Service() {
 
                         if (File(path).exists()) {
                             if (!TorrentNative.hasTorrentHash(hash)) {
+                                // Feature 5: same reasoning as the magnet
+                                // branch above - restore into the saved
+                                // per-torrent folder, falling back to the
+                                // current global default.
+                                val restoreSavePath =
+                                    getSavedSaveFolder(hash) ?: getGlobalSaveFolder()
+
                                 if (isPausedHash(hash)) {
                                     if (selected.isNotBlank()) {
                                         TorrentNative.addTorrentFileSelectedPaused(
                                             path,
-                                            savePath,
+                                            restoreSavePath,
                                             selected
                                         )
                                     } else {
                                         TorrentNative.addTorrentFilePaused(
                                             path,
-                                            savePath
+                                            restoreSavePath
                                         )
                                     }
                                 } else {
                                     if (selected.isNotBlank()) {
                                         TorrentNative.addTorrentFileSelected(
                                             path,
-                                            savePath,
+                                            restoreSavePath,
                                             selected
                                         )
                                     } else {
                                         TorrentNative.addTorrentFile(
                                             path,
-                                            savePath
+                                            restoreSavePath
                                         )
                                     }
                                 }
@@ -1679,7 +1751,11 @@ class TorrentService : Service() {
 
     private fun checkLowDiskSpace() {
         try {
-            val stat = android.os.StatFs(savePath)
+            // Feature 5: individual torrents can now live in different
+            // custom folders, but this check still monitors the global
+            // default folder's volume - a reasonable approximation, since
+            // most custom folders end up on the same storage partition.
+            val stat = android.os.StatFs(getGlobalSaveFolder())
             val free = stat.availableBytes
             val thresholdMb = storageSettingsPrefs().getInt("low_space_threshold_mb", 500)
             val thresholdBytes = thresholdMb.toLong() * 1024L * 1024L
