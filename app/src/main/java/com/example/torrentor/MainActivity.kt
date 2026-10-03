@@ -4213,7 +4213,7 @@ class MainActivity : AppCompatActivity() {
             selected.add(index)
 
             val checkBox = CheckBox(this).apply {
-                text = "$name (${formatSize(sizeBytes)})"
+                text = "${fileTypeIcon(name)} $name (${formatSize(sizeBytes)})"
                 setTextColor(Color.WHITE)
                 isChecked = true
 
@@ -4481,7 +4481,7 @@ class MainActivity : AppCompatActivity() {
             allIndexes.add(index)
 
             val checkBox = CheckBox(this).apply {
-                text = "$name (${formatSize(sizeBytes)})"
+                text = "${fileTypeIcon(name)} $name (${formatSize(sizeBytes)})"
                 setTextColor(Color.WHITE)
                 isChecked = true
                 selected.add(index)
@@ -5843,7 +5843,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val checkBox = CheckBox(this).apply {
-                text = "$name (${formatSize(sizeBytes)})"
+                text = "${fileTypeIcon(name)} $name (${formatSize(sizeBytes)})"
                 setTextColor(Color.WHITE)
                 isChecked = shouldBeChecked
 
@@ -6357,6 +6357,33 @@ class MainActivity : AppCompatActivity() {
             "pdf" -> "application/pdf"
             "apk" -> "application/vnd.android.package-archive"
             else -> "*/*"
+        }
+    }
+
+    // Feature: a small emoji icon per file in the Files tab, based on
+    // extension - video/audio/text-document/executable each get their own,
+    // everything else falls back to a plain file icon. This is a simple
+    // prefix on the existing checkbox label text, not a real ImageView,
+    // consistent with the rest of the app's fully text-based UI (■/□ piece
+    // map, ↓/↑ speed readout, etc).
+    private fun fileTypeIcon(name: String): String {
+        return when (name.substringAfterLast('.', "").lowercase()) {
+            "mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv",
+            "ts", "mpg", "mpeg", "3gp" -> "🎬"
+
+            "mp3", "flac", "wav", "aac", "m4a", "ogg", "wma", "opus" -> "🎵"
+
+            "jpg", "jpeg", "png", "webp", "gif", "bmp", "heic" -> "🖼️"
+
+            "txt", "srt", "ass", "ssa", "nfo", "log", "json", "xml",
+            "md", "csv", "pdf", "doc", "docx", "rtf" -> "📄"
+
+            "exe", "msi", "apk", "bat", "sh", "jar", "deb", "dmg",
+            "run" -> "⚙️"
+
+            "zip", "rar", "7z", "tar", "gz", "bz2", "xz" -> "📦"
+
+            else -> "📁"
         }
     }
 
