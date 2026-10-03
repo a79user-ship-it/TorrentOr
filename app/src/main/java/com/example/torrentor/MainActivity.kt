@@ -6374,10 +6374,14 @@ class MainActivity : AppCompatActivity() {
                         updateTorrentList()
                     }
 
-                    // detail tabs are heavier: every third round (3 s)
+                    // detail tabs are heavier: every third round (3 s) -
+                    // except Peers, which the user wants live at 1 s since
+                    // peer connections/speeds change quickly.
                     uiTick++
 
-                    if (uiTick % 3 == 0) {
+                    if (currentDetailsTab == "Peers") {
+                        updateActiveDetailsTab()
+                    } else if (uiTick % 3 == 0) {
                         updateActiveDetailsTab()
                     }
                 }

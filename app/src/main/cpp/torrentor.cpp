@@ -1796,11 +1796,20 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
         std::string ipAddress =
                 peer.ip.address().to_string();
 
+        // uTP vs TCP: connection_type only separates BitTorrent/web-seed/
+        // http-seed, so whether the socket itself is uTP is a separate bit
+        // in peer.flags (peer_info::utp_socket) - same bitfield-flag
+        // pattern already used elsewhere in this file for torrent_flags_t.
+        bool isUtp = static_cast<bool>(peer.flags & lt::peer_info::utp_socket);
+
         output += "IP: ";
         output += ipAddress;
 
         output += "\nClient: ";
         output += client;
+
+        output += "\nConnection: ";
+        output += isUtp ? "uTP" : "TCP";
 
         output += "\nProgress: ";
         output += std::to_string(progressPercent);
