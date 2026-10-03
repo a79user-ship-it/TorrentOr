@@ -6445,16 +6445,45 @@ class MainActivity : AppCompatActivity() {
         return builder
     }
 
+    // The per-torrent card line now shows speeds auto-scaled (e.g. "2.14
+    // MB/s" instead of always "2190 KB/s"), so this parses whichever unit
+    // is present and converts back to KB/s (what addSpeedSample/the speed
+    // graph work in) instead of assuming "KB/s" literally.
+    private fun speedUnitToKb(value: Double, unit: String): Int {
+        val kb = when (unit) {
+            "B" -> value / 1024.0
+            "KB" -> value
+            "MB" -> value * 1024.0
+            "GB" -> value * 1024.0 * 1024.0
+            "TB" -> value * 1024.0 * 1024.0 * 1024.0
+            else -> 0.0
+        }
+        return kb.toInt()
+    }
+
     private fun extractTotalSpeedsFromStatus(status: String): Pair<Int, Int> {
         var totalDown = 0
         var totalUp = 0
 
-        val downRegex = Regex("""↓\s*(\d+)\s*KB/s""")
-        val upRegex = Regex("""↑\s*(\d+)\s*KB/s""")
+        val downRegex = Regex("""↓\s*([\d.]+)\s*(B|KB|MB|GB|TB)/s""")
+        val upRegex = Regex("""↑\s*([\d.]+)\s*(B|KB|MB|GB|TB)/s""")
 
         for (line in status.lines()) {
-            totalDown += downRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            totalUp += upRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+            downRegex.find(line)?.let { match ->
+                val value = match.groupValues.getOrNull(1)?.toDoubleOrNull()
+                val unit = match.groupValues.getOrNull(2)
+                if (value != null && unit != null) {
+                    totalDown += speedUnitToKb(value, unit)
+                }
+            }
+
+            upRegex.find(line)?.let { match ->
+                val value = match.groupValues.getOrNull(1)?.toDoubleOrNull()
+                val unit = match.groupValues.getOrNull(2)
+                if (value != null && unit != null) {
+                    totalUp += speedUnitToKb(value, unit)
+                }
+            }
         }
 
         return Pair(totalDown, totalUp)

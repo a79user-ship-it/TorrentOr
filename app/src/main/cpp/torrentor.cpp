@@ -528,6 +528,17 @@ static std::string formatEta(long seconds) {
 
     long mins = seconds / 60;
     long hrs = mins / 60;
+    long days = hrs / 24;
+
+    // Feature: once the ETA passes 24 hours, show it in days (+ remaining
+    // hours) instead of letting the hour count run up into the hundreds.
+    if (days > 0) {
+        return "ETA: " +
+               std::to_string(days) +
+               "d " +
+               std::to_string(hrs % 24) +
+               "h";
+    }
 
     if (hrs > 0) {
         return "ETA: " +
@@ -538,6 +549,38 @@ static std::string formatEta(long seconds) {
     }
 
     return "ETA: " + std::to_string(mins) + "m";
+}
+
+static std::string pluralUnit(long value, const char* singular, const char* plural) {
+    return std::to_string(value) + " " + (value == 1 ? singular : plural);
+}
+
+// Feature: "Time active" on the Statistics tab - same day/hour rollover
+// idea as formatEta, but spelled out ("12 days 7 hours") since this is a
+// standalone label rather than a short, repeated inline value.
+static std::string formatDuration(long seconds) {
+    if (seconds <= 0) return "0 seconds";
+
+    long mins = seconds / 60;
+    long hrs = mins / 60;
+    long days = hrs / 24;
+
+    if (days > 0) {
+        return pluralUnit(days, "day", "days") + " " +
+               pluralUnit(hrs % 24, "hour", "hours");
+    }
+
+    if (hrs > 0) {
+        return pluralUnit(hrs, "hour", "hours") + " " +
+               pluralUnit(mins % 60, "minute", "minutes");
+    }
+
+    if (mins > 0) {
+        return pluralUnit(mins, "minute", "minutes") + " " +
+               pluralUnit(seconds % 60, "second", "seconds");
+    }
+
+    return pluralUnit(seconds, "second", "seconds");
 }
 
 
@@ -1306,8 +1349,8 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
         output += name +
                   " • " + state +
                   " • " + std::to_string(pct) + "%" +
-                  " • ↓ " + std::to_string(downKb) + " KB/s" +
-                  " • ↑ " + std::to_string(upKb) + " KB/s" +
+                  " • ↓ " + formatBytes(st.download_payload_rate) + "/s" +
+                  " • ↑ " + formatBytes(st.upload_payload_rate) + "/s" +
                   " • Size " + downloadedText +
                   " • Seeds " +
                   std::to_string(connectedSeeds) +
@@ -2581,41 +2624,45 @@ Java_com_example_torrentor_TorrentNative_getTorrentStatistics(
 
     output += "Statistics\n\n";
 
+    // Feature: downloaded/uploaded/total size and both speeds now scale
+    // automatically (B/KB/MB/GB/TB) via formatBytes instead of always
+    // printing raw bytes or a fixed "KB/s", so large torrents and fast
+    // speeds read naturally instead of as huge byte counts.
     output += "Downloaded: ";
-    output += std::to_string(downloaded);
-    output += " bytes\n";
+    output += formatBytes(downloaded);
+    output += "\n";
 
     output += "Uploaded: ";
-    output += std::to_string(uploaded);
-    output += " bytes\n";
+    output += formatBytes(uploaded);
+    output += "\n";
 
     output += "Ratio: ";
     output += ratioStream.str();
     output += "\n\n";
 
     output += "Total size: ";
-    output += std::to_string(totalSize);
-    output += " bytes\n";
+    output += formatBytes(totalSize);
+    output += "\n";
 
     output += "Progress: ";
     output += std::to_string(progressPercent);
     output += "%\n";
 
     output += "Download speed: ";
-    output += std::to_string(downKb);
-    output += " KB/s\n";
+    output += formatBytes(st.download_payload_rate);
+    output += "/s\n";
 
     output += "Upload speed: ";
-    output += std::to_string(upKb);
-    output += " KB/s\n";
+    output += formatBytes(st.upload_payload_rate);
+    output += "/s\n";
 
-    output += "ETA: ";
+    // formatEta() already returns a string prefixed with "ETA: ", so don't
+    // prepend it again here (that was producing "ETA: ETA: --" on screen).
     output += formatEta(eta);
     output += "\n";
 
     output += "Time active: ";
-    output += std::to_string(st.active_duration.count());
-    output += " seconds";
+    output += formatDuration(static_cast<long>(st.active_duration.count()));
 
     return env->NewStringUTF(output.c_str());
 }
