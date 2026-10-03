@@ -1,9 +1,36 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Base.Theme.TorrentOr" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <!-- <item name="colorPrimary">@color/my_light_primary</item> -->
+        <!-- Feature: modern look - teal/orange accent (matching the speed
+             graph's colors) applied app-wide, plus routing every
+             programmatically created Button(this) through our own rounded,
+             flat style below. The app builds its whole UI in code rather
+             than XML layouts, so android:buttonStyle is the one theme
+             attribute that still reaches every button without touching
+             MainActivity.kt. -->
+        <item name="android:buttonStyle">@style/Widget.TorrentOr.Button</item>
+        <item name="colorPrimary">@color/torrentor_teal</item>
+        <item name="colorSecondary">@color/torrentor_orange</item>
+        <item name="colorAccent">@color/torrentor_teal</item>
+        <item name="android:colorAccent">@color/torrentor_teal</item>
+        <item name="colorControlActivated">@color/torrentor_teal</item>
     </style>
 
     <style name="Theme.TorrentOr" parent="Base.Theme.TorrentOr" />
+
+    <!-- Take 3: soft tonal fill + teal text (Flud-style minimal action
+         button) instead of a heavy solid pill, kept compact (6dp/10dp
+         padding, 8dp corner radius) so it never dominates a row. -->
+    <style name="Widget.TorrentOr.Button" parent="android:Widget.Material.Button">
+        <item name="android:background">@drawable/torrentor_button_background</item>
+        <item name="android:textColor">@color/torrentor_teal</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">6dp</item>
+        <item name="android:paddingStart">10dp</item>
+        <item name="android:paddingEnd">10dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
 </resources>

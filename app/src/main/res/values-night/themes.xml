@@ -1,7 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Base application theme. The app paints its own dark backgrounds in
+         code (bgColor()/cardColor()) regardless of system day/night, so
+         this stays identical to values/themes.xml for consistency. -->
     <style name="Base.Theme.TorrentOr" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your dark theme here. -->
-        <!-- <item name="colorPrimary">@color/my_dark_primary</item> -->
+        <item name="android:buttonStyle">@style/Widget.TorrentOr.Button</item>
+        <item name="colorPrimary">@color/torrentor_teal</item>
+        <item name="colorSecondary">@color/torrentor_orange</item>
+        <item name="colorAccent">@color/torrentor_teal</item>
+        <item name="android:colorAccent">@color/torrentor_teal</item>
+        <item name="colorControlActivated">@color/torrentor_teal</item>
     </style>
 </resources>

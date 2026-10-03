@@ -161,6 +161,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Feature: modern look, Flud-style rounded elevated cards - a plain
+    // flat setBackgroundColor(cardColor()) rectangle replaced with this
+    // rounded drawable everywhere the app lists cards (torrents, search
+    // results, RSS feed items), while still honoring the user's chosen
+    // card color theme from cardColor() above.
+    private fun roundedCardBackground(): android.graphics.drawable.GradientDrawable {
+        return android.graphics.drawable.GradientDrawable().apply {
+            setColor(cardColor())
+            cornerRadius = 22f
+        }
+    }
+
     private fun currentThemeName(): String {
         val theme = getSharedPreferences("prefs", MODE_PRIVATE)
             .getString("theme_color", "blue")
@@ -566,7 +578,7 @@ class MainActivity : AppCompatActivity() {
                     .setTitle("Remove Selected Torrents?")
                     .setMessage("Choose how you want to remove $count selected torrent(s).")
                     .setNegativeButton("Cancel", null)
-                    .setNeutralButton("Remove Only") { _, _ ->
+                    .setNeutralButton("Remove Torrent Only") { _, _ ->
                         for (index in selectedTorrents.sortedDescending()) {
                             sendTorrentAction(
                                 action = "REMOVE_TORRENT",
@@ -1042,7 +1054,7 @@ class MainActivity : AppCompatActivity() {
                 val card = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(16, 16, 16, 16)
-                    setBackgroundColor(cardColor())
+                    background = roundedCardBackground()
 
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1499,7 +1511,7 @@ class MainActivity : AppCompatActivity() {
                 val feedCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     setPadding(16, 16, 16, 16)
-                    setBackgroundColor(cardColor())
+                    background = roundedCardBackground()
 
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1904,7 +1916,7 @@ class MainActivity : AppCompatActivity() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
                     setPadding(12, 10, 12, 10)
-                    setBackgroundColor(cardColor())
+                    background = roundedCardBackground()
 
                     layoutParams = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -5885,7 +5897,7 @@ class MainActivity : AppCompatActivity() {
             ).apply {
                 max = 100
                 this.progress = percent
-                progressDrawable.setTint(Color.BLACK)
+                progressDrawable.setTint(Color.parseColor("#4FD1C5"))
             }
 
             val openButton = Button(this).apply {
@@ -6581,8 +6593,15 @@ class MainActivity : AppCompatActivity() {
 
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(16, 16, 16, 16)
-                setBackgroundColor(cardColor())
+                setPadding(20, 20, 20, 20)
+                background = roundedCardBackground()
+
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = 16
+                }
             }
 
             val label = TextView(this).apply {
@@ -6617,7 +6636,7 @@ class MainActivity : AppCompatActivity() {
             ).apply {
                 max = 100
                 progress = extractPercent(line)
-                progressDrawable.setTint(Color.BLACK)
+                progressDrawable.setTint(Color.parseColor("#4FD1C5"))
             }
 
             val buttonRow = LinearLayout(this).apply {
@@ -6695,36 +6714,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Bug fix: the card's Remove button used to pop a 3-way dialog
+    // (Cancel / Remove Only / Remove + Files). That's now skipped - Remove
+    // always does "Remove Only" (keeps the downloaded files on disk, just
+    // stops tracking the torrent) immediately, no dialog in the way.
     private fun showRemoveDialog(torrentIndex: Int) {
-        AlertDialog.Builder(this)
-            .setTitle("Remove Torrent?")
-            .setMessage("Choose how you want to remove this torrent.")
-            .setNegativeButton("Cancel", null)
-            .setNeutralButton("Remove Only") { _, _ ->
-                val intent = Intent(this, TorrentService::class.java)
-                intent.putExtra("ACTION", "REMOVE_TORRENT")
-                intent.putExtra("TORRENT_INDEX", torrentIndex)
-                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
-                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
-                intent.putExtra("DELETE_FILES", false)
-                startTorrentService(intent)
+        val intent = Intent(this, TorrentService::class.java)
+        intent.putExtra("ACTION", "REMOVE_TORRENT")
+        intent.putExtra("TORRENT_INDEX", torrentIndex)
+        intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+        intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+        intent.putExtra("DELETE_FILES", false)
+        startTorrentService(intent)
 
-                Toast.makeText(this, "Torrent removed", Toast.LENGTH_SHORT).show()
-                showMainScreen()
-            }
-            .setPositiveButton("Remove + Files") { _, _ ->
-                val intent = Intent(this, TorrentService::class.java)
-                intent.putExtra("ACTION", "REMOVE_TORRENT")
-                intent.putExtra("TORRENT_INDEX", torrentIndex)
-                intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
-                intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
-                intent.putExtra("DELETE_FILES", true)
-                startTorrentService(intent)
-
-                Toast.makeText(this, "Torrent and files removed", Toast.LENGTH_SHORT).show()
-                showMainScreen()
-            }
-            .show()
+        Toast.makeText(this, "Torrent removed", Toast.LENGTH_SHORT).show()
+        showMainScreen()
     }
 
     private fun extractPercent(line: String): Int {

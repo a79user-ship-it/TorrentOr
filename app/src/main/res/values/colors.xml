@@ -2,4 +2,12 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+
+    <!-- Feature: modern look - the app's accent colors, matching the teal/
+         orange already used by the speed graph and the ↓/↑ speed readout,
+         so buttons read as part of the same visual identity. -->
+    <color name="torrentor_teal">#FF4FD1C5</color>
+    <color name="torrentor_orange">#FFF6AD55</color>
+    <color name="torrentor_teal_tonal">#294FD1C5</color>
+    <color name="torrentor_ripple">#334FD1C5</color>
 </resources>

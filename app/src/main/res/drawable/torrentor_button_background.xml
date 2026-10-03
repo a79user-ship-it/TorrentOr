@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Feature: modern look, take 3 - a soft "tonal" button (light translucent
+     teal fill, bright teal text) instead of a heavy solid-filled pill. This
+     is the minimal, flat action-button look used by Flud and most modern
+     torrent/file-manager apps: compact, colored, but not a big block that
+     dominates the row. Wired in via android:buttonStyle in themes.xml. -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/torrentor_ripple">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/torrentor_teal_tonal" />
+            <corners android:radius="8dp" />
+        </shape>
+    </item>
+</ripple>
