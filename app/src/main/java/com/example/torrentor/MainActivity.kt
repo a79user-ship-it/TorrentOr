@@ -6714,21 +6714,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Bug fix: the card's Remove button used to pop a 3-way dialog
-    // (Cancel / Remove Only / Remove + Files). That's now skipped - Remove
-    // always does "Remove Only" (keeps the downloaded files on disk, just
-    // stops tracking the torrent) immediately, no dialog in the way.
+    // Restored: the card's Remove button asks Cancel / Remove Torrent Only /
+    // Remove Torrent + Files, same as the "Remove Selected" bulk dialog,
+    // instead of silently doing "Remove Only" with no confirmation.
     private fun showRemoveDialog(torrentIndex: Int) {
-        val intent = Intent(this, TorrentService::class.java)
-        intent.putExtra("ACTION", "REMOVE_TORRENT")
-        intent.putExtra("TORRENT_INDEX", torrentIndex)
-        intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
-        intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
-        intent.putExtra("DELETE_FILES", false)
-        startTorrentService(intent)
+        fun removeTorrent(deleteFiles: Boolean) {
+            val intent = Intent(this, TorrentService::class.java)
+            intent.putExtra("ACTION", "REMOVE_TORRENT")
+            intent.putExtra("TORRENT_INDEX", torrentIndex)
+            intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+            intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+            intent.putExtra("DELETE_FILES", deleteFiles)
+            startTorrentService(intent)
 
-        Toast.makeText(this, "Torrent removed", Toast.LENGTH_SHORT).show()
-        showMainScreen()
+            Toast.makeText(
+                this,
+                if (deleteFiles) "Torrent and files removed" else "Torrent removed",
+                Toast.LENGTH_SHORT
+            ).show()
+            showMainScreen()
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Remove Torrent?")
+            .setMessage("Choose how you want to remove this torrent.")
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Remove Torrent Only") { _, _ ->
+                removeTorrent(false)
+            }
+            .setPositiveButton("Remove + Files") { _, _ ->
+                removeTorrent(true)
+            }
+            .show()
     }
 
     private fun extractPercent(line: String): Int {
