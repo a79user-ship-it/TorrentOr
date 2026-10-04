@@ -844,14 +844,15 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
 
     auto handle = g_session->add_torrent(params, ec);
 
+    // Bug fix: a newly added torrent used to inherit g_pausedAll, which
+    // stays true indefinitely after a single "Pause All" tap (it's only
+    // cleared by Resume All / removeAllTorrents). That made every torrent
+    // added after any past Pause All start paused with no visible reason.
+    // Pause All only pauses the torrents that existed at that moment; new
+    // torrents always start running.
     if (!ec && handle.is_valid()) {
-        if (g_pausedAll) {
-            handle.unset_flags(lt::torrent_flags::auto_managed);
-            handle.pause();
-        }
-
         g_handles.push_back(handle);
-        g_pausedHandles.push_back(g_pausedAll);
+        g_pausedHandles.push_back(false);
     }
 }
 
@@ -945,14 +946,11 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
 
     auto handle = g_session->add_torrent(params, ec);
 
+    // Bug fix: see addMagnet above - new torrents must not inherit the
+    // sticky g_pausedAll flag.
     if (!ec && handle.is_valid()) {
-        if (g_pausedAll) {
-            handle.unset_flags(lt::torrent_flags::auto_managed);
-            handle.pause();
-        }
-
         g_handles.push_back(handle);
-        g_pausedHandles.push_back(g_pausedAll);
+        g_pausedHandles.push_back(false);
     }
 }
 
@@ -1103,14 +1101,11 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
     auto handle = g_session->add_torrent(params, ec);
 
+    // Bug fix: see addMagnet above - new torrents must not inherit the
+    // sticky g_pausedAll flag.
     if (!ec && handle.is_valid()) {
-        if (g_pausedAll) {
-            handle.unset_flags(lt::torrent_flags::auto_managed);
-            handle.pause();
-        }
-
         g_handles.push_back(handle);
-        g_pausedHandles.push_back(g_pausedAll);
+        g_pausedHandles.push_back(false);
     }
 }
 
