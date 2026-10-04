@@ -6636,7 +6636,7 @@ class MainActivity : AppCompatActivity() {
             ).apply {
                 max = 100
                 progress = extractPercent(line)
-                progressDrawable.setTint(Color.parseColor("#4FD1C5"))
+                progressDrawable.setTint(Color.BLACK)
             }
 
             val buttonRow = LinearLayout(this).apply {
