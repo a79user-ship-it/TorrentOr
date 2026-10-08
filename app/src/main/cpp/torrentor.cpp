@@ -1330,7 +1330,15 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
         } else if (st.is_seeding) {
             state = "Seeding";
         } else {
-            state = "Downloading";
+            // Feature: make it visible that an incomplete torrent is
+            // already uploading its downloaded pieces to other peers
+            // (libtorrent does this on its own - there's nothing to turn
+            // on). num_uploads is how many peers are currently unchoked,
+            // i.e. actively receiving data from us right now.
+            state = (st.num_uploads > 0)
+                    ? "Downloading (uploading to " + std::to_string(st.num_uploads) +
+                      (st.num_uploads == 1 ? " peer)" : " peers)")
+                    : "Downloading";
         }
 
         std::string name =
@@ -2650,6 +2658,16 @@ Java_com_example_torrentor_TorrentNative_getTorrentStatistics(
     output += "Upload speed: ";
     output += formatBytes(st.upload_payload_rate);
     output += "/s\n";
+
+    // Feature: visibility that this torrent uploads pieces it already has
+    // to peers while it's still downloading the rest - libtorrent does
+    // this automatically (no separate on/off switch needed), but the app
+    // never showed it explicitly. num_uploads is the number of currently
+    // unchoked peers, i.e. peers this torrent is actively sending data to
+    // right now, regardless of whether the download itself is finished.
+    output += "Uploading to: ";
+    output += std::to_string(st.num_uploads);
+    output += (st.num_uploads == 1) ? " peer\n" : " peers\n";
 
     // formatEta() already returns a string prefixed with "ETA: ", so don't
     // prepend it again here (that was producing "ETA: ETA: --" on screen).
