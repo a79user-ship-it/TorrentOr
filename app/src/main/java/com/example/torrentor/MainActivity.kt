@@ -19,6 +19,7 @@ import android.os.StatFs
 import android.util.Log
 import android.webkit.MimeTypeMap
 import android.widget.*
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -70,6 +71,16 @@ class MainActivity : AppCompatActivity() {
     private var skipMagnetSelection = false
     private var activeFilter = "All"
     private var searchQuery = ""
+
+    // Bug fix: the phone's own Back button (hardware key or gesture) used
+    // to just close the app on every screen, because nothing in this
+    // Activity ever handled it - only the in-app "Back" buttons called
+    // showMainScreen(). This flag tracks whether the torrent list (the
+    // screen showMainScreen() builds) is what's currently on screen. It's
+    // flipped to false by the setContentView() override below every time
+    // any other screen is shown, then flipped back to true by
+    // showMainScreen() itself right after its own setContentView() call.
+    private var isOnMainScreen = false
 
     // Which field the visible torrent list is ordered by. This only
     // changes display order; it never changes the native list index used
@@ -238,11 +249,38 @@ class MainActivity : AppCompatActivity() {
         val serviceIntent = Intent(this, TorrentService::class.java)
         startTorrentService(serviceIntent)
 
+        // Bug fix: route the phone's own Back button (hardware key or
+        // gesture) the same way every in-app "Back" button already
+        // goes - to the main torrent list - instead of letting it fall
+        // through to the default behavior of closing the app. On the
+        // main screen itself, Back keeps its normal behavior (exit).
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isOnMainScreen) {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
+                } else {
+                    showMainScreen()
+                }
+            }
+        })
+
         showMainScreen()
         startUiUpdates()
         handleIncomingIntent(intent)
         ensureStorageAccess()
         ensureNotificationAccess()
+    }
+
+    // Bug fix (see isOnMainScreen above): every screen in this app shows
+    // itself via setContentView(), so this is the one place that can tell
+    // which screen just became visible without touching all ~17 call
+    // sites individually. Defaults to "not main"; showMainScreen() flips
+    // it back to true right after calling this.
+    override fun setContentView(view: android.view.View?) {
+        super.setContentView(view)
+        isOnMainScreen = false
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -914,6 +952,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(outerScroll)
+        isOnMainScreen = true
         updateTorrentList()
     }
 
@@ -995,7 +1034,7 @@ class MainActivity : AppCompatActivity() {
         var redraw: () -> Unit = {}
 
         fun visibleProviderNames(): List<String> {
-            return OnlineSearchManager.ALL_PROVIDERS.map { it.name }.distinct()
+            return OnlineSearchManager.allProviders(this).map { it.name }.distinct()
         }
 
         fun applySortAndFilter(): List<TorrentSearchResult> {
@@ -1167,7 +1206,7 @@ class MainActivity : AppCompatActivity() {
             allResults = emptyList()
             redraw()
 
-            val providerNames = OnlineSearchManager.ALL_PROVIDERS
+            val providerNames = OnlineSearchManager.allProviders(this)
                 .filter { OnlineSearchManager.isProviderEnabled(this, it.name) }
                 .map { it.name }
 
@@ -1313,7 +1352,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 12)
         }
 
-        for (provider in OnlineSearchManager.ALL_PROVIDERS) {
+        for (provider in OnlineSearchManager.BUILTIN_PROVIDERS) {
             val box = CheckBox(this).apply {
                 text = provider.name
                 setTextColor(Color.WHITE)
@@ -1330,6 +1369,67 @@ class MainActivity : AppCompatActivity() {
 
             root.addView(box)
         }
+
+        val customProvidersTitle = TextView(this).apply {
+            text = "Custom Providers"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(0, 20, 0, 4)
+        }
+
+        root.addView(customProvidersTitle)
+
+        val customProviders = OnlineSearchManager.loadCustomProviders(this@MainActivity)
+
+        if (customProviders.isEmpty()) {
+            root.addView(TextView(this).apply {
+                text = "None added yet."
+                textSize = 13f
+                setTextColor(Color.LTGRAY)
+                setPadding(0, 0, 0, 8)
+            })
+        } else {
+            for (provider in customProviders) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+
+                val box = CheckBox(this).apply {
+                    text = provider.name
+                    setTextColor(Color.WHITE)
+                    isChecked = OnlineSearchManager.isProviderEnabled(this@MainActivity, provider.name)
+
+                    setOnCheckedChangeListener { _, checked ->
+                        OnlineSearchManager.setProviderEnabled(
+                            this@MainActivity,
+                            provider.name,
+                            checked
+                        )
+                    }
+                }
+
+                val removeButton = Button(this).apply {
+                    text = "Remove"
+                    setOnClickListener {
+                        OnlineSearchManager.removeCustomProvider(this@MainActivity, provider.name)
+                        showOnlineSearchProviderSettings()
+                    }
+                }
+
+                row.addView(box)
+                row.addView(removeButton)
+                root.addView(row)
+            }
+        }
+
+        val addCustomProviderButton = Button(this).apply {
+            text = "Add Custom Provider"
+            setOnClickListener {
+                showAddCustomProviderScreen()
+            }
+        }
+
+        root.addView(addCustomProviderButton)
 
         val timeoutLabel = TextView(this).apply {
             text = "Timeout per provider (seconds)"
@@ -1374,6 +1474,181 @@ class MainActivity : AppCompatActivity() {
         root.addView(timeoutInput)
         root.addView(saveButton)
         root.addView(backButton)
+
+        setContentView(ScrollView(this).apply { addView(root) })
+    }
+
+    // Lets the user point TorrentOr at any torrent site that has its own
+    // public JSON search API, without needing a hand-written provider
+    // class (see CustomSearchProvider.kt). Re-saving with the same Name
+    // overwrites the existing one, so this screen doubles as "Edit".
+    private fun showAddCustomProviderScreen() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Add Custom Provider"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        }
+
+        val hintBlock = TextView(this).apply {
+            text = "For a torrent site with its own public JSON search API. " +
+                    "Fill in the field names that API's JSON results use - " +
+                    "only Name, Search URL and Title field are required. " +
+                    "Saving again with the same Name replaces it."
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 0, 0, 16)
+        }
+
+        fun labeledInput(label: String, hintText: String, prefill: String = ""): EditText {
+            root.addView(TextView(this).apply {
+                text = label
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setPadding(0, 12, 0, 2)
+            })
+
+            return EditText(this).apply {
+                hint = hintText
+                setText(prefill)
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+                root.addView(this)
+            }
+        }
+
+        val nameInput = labeledInput("Name", "e.g. My Tracker")
+
+        val urlInput = labeledInput(
+            "Search URL",
+            "Must contain {query}, e.g. https://example.com/api/search?q={query}"
+        )
+
+        val resultsPathInput = labeledInput(
+            "Results array path (optional)",
+            "e.g. results - blank if the response is itself a list"
+        )
+
+        val titleFieldInput = labeledInput("Title field", "title", "title")
+        val infohashFieldInput = labeledInput("Info hash field (optional)", "infohash")
+        val magnetFieldInput = labeledInput(
+            "Magnet field (optional)",
+            "magnet - leave blank to build it from the info hash field"
+        )
+        val sizeFieldInput = labeledInput("Size in bytes field (optional)", "size")
+        val seedersFieldInput = labeledInput("Seeders field (optional)", "seeders")
+        val leechersFieldInput = labeledInput("Leechers field (optional)", "leechers")
+        val categoryFieldInput = labeledInput("Category field (optional)", "category")
+        val dateFieldInput = labeledInput("Date field (optional)", "createdAt")
+        val idFieldInput = labeledInput("Result id field (optional)", "id")
+
+        val detailUrlInput = labeledInput(
+            "Detail page URL template (optional)",
+            "Needs {id}, e.g. https://example.com/torrent/{id}"
+        )
+
+        fun buildConfig(): CustomProviderConfig {
+            return CustomProviderConfig(
+                name = nameInput.text.toString().trim(),
+                urlTemplate = urlInput.text.toString().trim(),
+                resultsPath = resultsPathInput.text.toString().trim(),
+                titleField = titleFieldInput.text.toString().trim().ifBlank { "title" },
+                infohashField = infohashFieldInput.text.toString().trim(),
+                magnetField = magnetFieldInput.text.toString().trim(),
+                sizeField = sizeFieldInput.text.toString().trim(),
+                seedersField = seedersFieldInput.text.toString().trim(),
+                leechersField = leechersFieldInput.text.toString().trim(),
+                categoryField = categoryFieldInput.text.toString().trim(),
+                dateField = dateFieldInput.text.toString().trim(),
+                idField = idFieldInput.text.toString().trim(),
+                detailUrlTemplate = detailUrlInput.text.toString().trim()
+            )
+        }
+
+        val testButton = Button(this).apply {
+            text = "Test"
+            setOnClickListener {
+                val config = buildConfig()
+
+                if (config.name.isBlank() || !config.urlTemplate.contains("{query}")) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Name and a Search URL containing {query} are required",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                isEnabled = false
+                val originalText = text
+                text = "Testing..."
+
+                Thread {
+                    val resultText = try {
+                        val count = CustomSearchProvider(config).search("test").size
+                        "Test search for \"test\" returned $count result(s)"
+                    } catch (e: Throwable) {
+                        "Test failed: ${e.message ?: e.javaClass.simpleName}"
+                    }
+
+                    runOnUiThread {
+                        isEnabled = true
+                        text = originalText
+                        Toast.makeText(this@MainActivity, resultText, Toast.LENGTH_LONG).show()
+                    }
+                }.start()
+            }
+        }
+
+        val saveButton = Button(this).apply {
+            text = "Save"
+            setOnClickListener {
+                val config = buildConfig()
+
+                if (config.name.isBlank()) {
+                    Toast.makeText(this@MainActivity, "Enter a name", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                if (!config.urlTemplate.contains("{query}")) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Search URL must contain {query}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                OnlineSearchManager.addCustomProvider(this@MainActivity, config)
+                Toast.makeText(this@MainActivity, "Saved \"${config.name}\"", Toast.LENGTH_SHORT).show()
+                showOnlineSearchProviderSettings()
+            }
+        }
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                showOnlineSearchProviderSettings()
+            }
+        }
+
+        root.addView(title)
+        root.addView(hintBlock)
+        root.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 20, 0, 0)
+                addView(testButton)
+                addView(saveButton)
+                addView(backButton)
+            }
+        )
 
         setContentView(ScrollView(this).apply { addView(root) })
     }
