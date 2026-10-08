@@ -1352,6 +1352,35 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 12)
         }
 
+        // Collects every provider checkbox (built-in and custom) so
+        // Select All / Select None below can flip them all at once. Each
+        // checkbox already persists through its own setOnCheckedChangeListener,
+        // which still fires when isChecked is set programmatically, so
+        // these two buttons don't need their own prefs-writing logic.
+        val allProviderCheckboxes = mutableListOf<CheckBox>()
+
+        val selectAllButton = Button(this).apply {
+            text = "Select All"
+            setOnClickListener {
+                for (box in allProviderCheckboxes) box.isChecked = true
+            }
+        }
+
+        val selectNoneButton = Button(this).apply {
+            text = "Select None"
+            setOnClickListener {
+                for (box in allProviderCheckboxes) box.isChecked = false
+            }
+        }
+
+        root.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(selectAllButton)
+                addView(selectNoneButton)
+            }
+        )
+
         for (provider in OnlineSearchManager.BUILTIN_PROVIDERS) {
             val box = CheckBox(this).apply {
                 text = provider.name
@@ -1367,6 +1396,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            allProviderCheckboxes.add(box)
             root.addView(box)
         }
 
@@ -1416,6 +1446,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
+                allProviderCheckboxes.add(box)
                 row.addView(box)
                 row.addView(removeButton)
                 root.addView(row)
