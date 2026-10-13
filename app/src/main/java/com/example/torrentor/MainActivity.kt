@@ -152,6 +152,7 @@ class MainActivity : AppCompatActivity() {
             "green" -> Color.parseColor("#0B3D0B")
             "amoled" -> Color.parseColor("#000000")
             "rose" -> Color.parseColor("#3D0A1E")
+            "ash" -> Color.parseColor("#2A2A28")
             else -> Color.parseColor("#0D47A1")
         }
     }
@@ -168,6 +169,7 @@ class MainActivity : AppCompatActivity() {
             "green" -> Color.parseColor("#2E7D32")
             "amoled" -> Color.parseColor("#121212")
             "rose" -> Color.parseColor("#C2185B")
+            "ash" -> Color.parseColor("#6E6E66")
             else -> Color.parseColor("#42A5F5")
         }
     }
@@ -196,6 +198,7 @@ class MainActivity : AppCompatActivity() {
             "green" -> "Green"
             "amoled" -> "AMOLED"
             "rose" -> "Rose"
+            "ash" -> "Ash"
             else -> "Light Blue"
         }
     }
@@ -212,6 +215,7 @@ class MainActivity : AppCompatActivity() {
             "purple" -> "green"
             "green" -> "rose"
             "rose" -> "amoled"
+            "amoled" -> "ash"
             else -> "blue"
         }
 
@@ -827,6 +831,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+
         val storageSpaceButton = Button(this).apply {
             text = "Storage Space"
             setOnClickListener {
@@ -1441,8 +1446,20 @@ class MainActivity : AppCompatActivity() {
                 val removeButton = Button(this).apply {
                     text = "Remove"
                     setOnClickListener {
-                        OnlineSearchManager.removeCustomProvider(this@MainActivity, provider.name)
-                        showOnlineSearchProviderSettings()
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Remove search provider?")
+                            .setMessage(
+                                "Remove \"${provider.name}\"? This cannot be undone."
+                            )
+                            .setPositiveButton("Remove") { _, _ ->
+                                OnlineSearchManager.removeCustomProvider(
+                                    this@MainActivity,
+                                    provider.name
+                                )
+                                showOnlineSearchProviderSettings()
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
                     }
                 }
 
@@ -2258,16 +2275,56 @@ class MainActivity : AppCompatActivity() {
                         isEnabled = false
                         text = "..."
 
-                        addRssItemToDownloads(feed, item) { error ->
-                            isEnabled = true
+                        // Resolves the item (magnet link, or downloads the
+                        // .torrent file) on a background thread first, then
+                        // hands it to the same Add Magnet/Add Torrent File
+                        // screens used everywhere else in the app, so the
+                        // user picks files/folder before anything is added -
+                        // it is only actually added once they commit there,
+                        // not the moment this button is tapped.
+                        Thread {
+                            var resolved: RssManager.ResolvedItem? = null
+                            var errorReason: String? = null
 
-                            if (error == null) {
-                                text = "Added"
-                                label.text = itemLabel(item, true)
-                            } else {
-                                text = "Retry"
+                            try {
+                                resolved = RssManager.resolveItemForSelection(
+                                    this@MainActivity,
+                                    item
+                                )
+                            } catch (e: Throwable) {
+                                errorReason = e.message ?: e.javaClass.simpleName
                             }
-                        }
+
+                            runOnUiThread {
+                                isEnabled = true
+
+                                val magnet = resolved?.magnet
+                                val torrentPath = resolved?.torrentPath
+
+                                when {
+                                    magnet != null -> {
+                                        text = "Add"
+                                        showMagnetMetadataScreen(magnet) {
+                                            RssManager.markItemAdded(this@MainActivity, feed, item)
+                                        }
+                                    }
+                                    torrentPath != null -> {
+                                        text = "Add"
+                                        showTorrentFileSelection(torrentPath) {
+                                            RssManager.markItemAdded(this@MainActivity, feed, item)
+                                        }
+                                    }
+                                    else -> {
+                                        text = "Retry"
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "Could not add: ${errorReason ?: "unknown error"}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            }
+                        }.start()
                     }
                 }
 
@@ -2527,28 +2584,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun removeRssFeed(url: String) {
         saveRssFeeds(loadRssFeeds().filterNot { it == url })
-    }
-
-    // Adds one item. RssManager does the work (magnet link or .torrent file)
-    // on a background thread and writes the result to the Execution Log.
-    private fun addRssItemToDownloads(
-        feed: String,
-        item: RssManager.RssItem,
-        onResult: (String?) -> Unit = {}
-    ) {
-        Thread {
-            val error = RssManager.addItem(applicationContext, feed, item)
-
-            runOnUiThread {
-                if (error == null) {
-                    Toast.makeText(this, "Added to downloads", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "Could not add: $error", Toast.LENGTH_LONG).show()
-                }
-
-                onResult(error)
-            }
-        }.start()
     }
 
     // "Add all": every item currently listed for the feed, after a question.
@@ -4310,7 +4345,7 @@ class MainActivity : AppCompatActivity() {
         ).show()
     }
 
-    private fun showMagnetMetadataScreen(magnet: String) {
+    private fun showMagnetMetadataScreen(magnet: String, onAdded: (() -> Unit)? = null) {
         val hash = extractHashFromMagnetInput(magnet)
 
         if (isTorrentAlreadyAddedByHash(hash)) {
@@ -4436,6 +4471,7 @@ class MainActivity : AppCompatActivity() {
 
                     saveMagnetOnly(magnet)
                     TorrentNative.resumeTorrent(torrentIndex)
+                    onAdded?.invoke()
 
                     Toast.makeText(
                         this@MainActivity,
@@ -4472,10 +4508,14 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(outerScroll)
 
-        waitForMagnetMetadata(torrentIndex, magnet)
+        waitForMagnetMetadata(torrentIndex, magnet, onAdded)
     }
 
-    private fun waitForMagnetMetadata(torrentIndex: Int, magnet: String) {
+    private fun waitForMagnetMetadata(
+        torrentIndex: Int,
+        magnet: String,
+        onAdded: (() -> Unit)? = null
+    ) {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 val files = try {
@@ -4495,7 +4535,7 @@ class MainActivity : AppCompatActivity() {
                         return
                     }
 
-                    showMagnetFileSelection(torrentIndex, magnet, files)
+                    showMagnetFileSelection(torrentIndex, magnet, files, onAdded)
                 } else {
                     if (!skipMagnetSelection) {
                         handler.postDelayed(this, 2000L)
@@ -4508,7 +4548,8 @@ class MainActivity : AppCompatActivity() {
     private fun showMagnetFileSelection(
         torrentIndex: Int,
         magnet: String,
-        fileData: String
+        fileData: String,
+        onAdded: (() -> Unit)? = null
     ) {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -4684,6 +4725,7 @@ class MainActivity : AppCompatActivity() {
                     TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
                     saveFileSelectionForTorrent(torrentIndex, selected)
                     TorrentNative.resumeTorrent(torrentIndex)
+                    onAdded?.invoke()
 
                     Toast.makeText(
                         this@MainActivity,
@@ -4714,6 +4756,7 @@ class MainActivity : AppCompatActivity() {
                     TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
                     saveFileSelectionForTorrent(torrentIndex, allIndexes)
                     TorrentNative.resumeTorrent(torrentIndex)
+                    onAdded?.invoke()
 
                     Toast.makeText(
                         this@MainActivity,
@@ -4752,7 +4795,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(outerScroll)
     }
 
-    private fun showTorrentFileSelection(filePath: String) {
+    private fun showTorrentFileSelection(filePath: String, onAdded: (() -> Unit)? = null) {
         try {
             val hash = TorrentNative.getTorrentFileHash(filePath)
 
@@ -4937,6 +4980,7 @@ class MainActivity : AppCompatActivity() {
                     intent.putExtra("SAVE_PATH", selectedSaveFolder)
 
                     startTorrentService(intent)
+                    onAdded?.invoke()
                     showMainScreen()
                 }
             }
@@ -4955,6 +4999,7 @@ class MainActivity : AppCompatActivity() {
                     intent.putExtra("TORRENT_PATH", filePath)
                     intent.putExtra("SAVE_PATH", selectedSaveFolder)
                     startTorrentService(intent)
+                    onAdded?.invoke()
                     showMainScreen()
                 }
             }
@@ -5456,6 +5501,51 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Feature: lets a torrent added by magnet link or bare info-hash be
+        // saved as a real .torrent file once its metadata has arrived (the
+        // handle has nothing to export before then - that's the normal,
+        // expected state for a magnet still resolving, not an error).
+        val saveTorrentFileButton = Button(this).apply {
+            text = "Save as .torrent File"
+            setOnClickListener {
+                val hash = getSafeTorrentHashForAction(torrentIndex)
+
+                if (hash.isBlank()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Torrent hash not available yet",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
+                val destFolder = File(savePath, "Saved Torrent Files")
+                destFolder.mkdirs()
+
+                val savedPath = try {
+                    TorrentNative.saveTorrentFile(hash, destFolder.absolutePath)
+                } catch (e: Throwable) {
+                    Log.e("TorrentOrLT", "saveTorrentFile(...) threw", e)
+                    ""
+                }
+
+                if (savedPath.isNotBlank()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Saved to $savedPath",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Couldn't save yet - metadata hasn't finished " +
+                                "downloading for this torrent",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+
         // Feature 5: moves this torrent's already-downloaded files to a
         // new folder. Unlike the add-time pickers, this one acts on a
         // torrent that may already have data on disk, so it always goes
@@ -5531,6 +5621,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(forceReannounce)
         root.addView(forceRecheck)
         root.addView(openFolderButton)
+        root.addView(saveTorrentFileButton)
         root.addView(changeSaveFolderButton)
         root.addView(backButton)
 

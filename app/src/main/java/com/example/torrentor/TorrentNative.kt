@@ -48,6 +48,11 @@ object TorrentNative {
     external fun getTorrentSwarmHealth(index: Int): String
     external fun hasTorrentHash(hash: String): Boolean
     external fun getTorrentFileHash(path: String): String
+    // Writes the torrent's metadata out as a real .torrent file into
+    // destFolder (created if needed) and returns the full saved path, or
+    // "" if the hash wasn't found or the torrent has no metadata yet (a
+    // magnet link still resolving - not an error, just not ready).
+    external fun saveTorrentFile(hash: String, destFolder: String): String
     external fun forceRecheck(index: Int)
     external fun forceReannounce(index: Int)
     external fun getTorrentPieces(index: Int): String

@@ -308,6 +308,88 @@ static lt::torrent_handle findHandleByHash(const std::string& rawHash) {
     return lt::torrent_handle();
 }
 
+// Feature: lets a torrent added by magnet link or bare info-hash be saved
+// out as a real .torrent file, once metadata has actually arrived -
+// handle.torrent_file() is null until then, which is the normal state for
+// a magnet still resolving, not an error. create_torrent(torrent_info
+// const&) rebuilds a torrent_info the app already has into a fresh
+// create_torrent, and generate_buf() bencodes it straight to bytes (no
+// separate bencode()/entry step needed). Identified by info-hash, never
+// list index, per the project's standing rule. Returns "" (never
+// throws/crashes) on any failure - hash not found, no metadata yet, or the
+// file couldn't be written.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_saveTorrentFile(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jstring destFolder) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    std::shared_ptr<const lt::torrent_info> info;
+
+    try {
+        info = handle.torrent_file();
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
+
+    if (!info) {
+        // No metadata yet - a magnet link that hasn't finished resolving.
+        return env->NewStringUTF("");
+    }
+
+    try {
+        lt::create_torrent ct(*info);
+        std::vector<char> buffer = ct.generate_buf();
+
+        std::string folder = toString(env, destFolder);
+        std::string name = info->name();
+
+        if (name.empty()) {
+            name = "torrent";
+        }
+
+        std::string safeName;
+        for (char ch : name) {
+            if (ch == '/' || ch == '\\' || ch == ':' || ch == '*' ||
+                ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|') {
+                safeName += '_';
+            } else {
+                safeName += ch;
+            }
+        }
+
+        std::string path = folder + "/" + safeName + ".torrent";
+
+        FILE* f = fopen(path.c_str(), "wb");
+
+        if (!f) {
+            return env->NewStringUTF("");
+        }
+
+        size_t written = fwrite(buffer.data(), 1, buffer.size(), f);
+        fclose(f);
+
+        if (written != buffer.size()) {
+            return env->NewStringUTF("");
+        }
+
+        return env->NewStringUTF(path.c_str());
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
+}
+
 static std::string buildListenInterfaces(int port) {
     std::string p = std::to_string(port);
     return "0.0.0.0:" + p + ",[::]:" + p;

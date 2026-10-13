@@ -411,6 +411,38 @@ object RssManager {
         }
     }
 
+    // Public mirror of Target below, for a caller (the RSS screen) that
+    // wants to resolve an item first and route it through the normal Add
+    // Magnet/Add Torrent File screens so the user can pick files/folder,
+    // rather than adding it to the engine immediately. Exactly one of
+    // magnet/torrentPath is non-null on success.
+    data class ResolvedItem(val magnet: String?, val torrentPath: String?)
+
+    /**
+     * Resolves one feed item to a magnet link or a downloaded .torrent file
+     * - the same resolution addItem() does below - without adding it to the
+     * engine or marking it seen/added. Blocking (may make an HTTP request),
+     * so call it from a background thread. Throws with a human-readable
+     * reason on failure, same as addItem().
+     */
+    fun resolveItemForSelection(context: Context, item: RssItem): ResolvedItem {
+        val target = resolveTarget(context.applicationContext, item)
+        return ResolvedItem(target.magnet, target.file?.absolutePath)
+    }
+
+    // Call once the item resolved by resolveItemForSelection() above has
+    // actually been handed to the user's chosen file-selection screen and
+    // they committed to downloading it (not merely opening that screen) -
+    // this is what makes "Added" reflect real intent to download, matching
+    // addItem()'s own success path below.
+    fun markItemAdded(context: Context, feed: String, item: RssItem) {
+        val app = context.applicationContext
+        AppLog.init(app)
+        markSeen(app, feed, listOf(item))
+        markAdded(app, feed, item)
+        AppLog.info("RSS: added to downloads: ${item.title}")
+    }
+
     // What an item turned out to be: a magnet link or a saved .torrent file.
     private data class Target(val magnet: String?, val file: File?)
 
