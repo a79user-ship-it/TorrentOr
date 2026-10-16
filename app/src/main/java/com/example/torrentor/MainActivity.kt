@@ -3510,16 +3510,32 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
         }
 
+        // Feature: Back/Forward folder history, browser-style. "Up" only
+        // ever moves one level toward the root, so once you've gone up
+        // past a folder you picked, there was no way back to it short of
+        // walking all the way back down by hand. These two stacks record
+        // where you've been so Back/Forward can jump straight there.
+        val backStack = mutableListOf<File>()
+        val forwardStack = mutableListOf<File>()
+
+        val backButton = Button(this).apply { text = "<" }
+        val forwardButton = Button(this).apply { text = ">" }
+
         fun refreshContents() {
             try {
                 pathText.text = currentDir.absolutePath
                 folderListLayout.removeAllViews()
+
+                backButton.isEnabled = backStack.isNotEmpty()
+                forwardButton.isEnabled = forwardStack.isNotEmpty()
 
                 val parent = currentDir.parentFile
                 if (parent != null) {
                     val upRow = Button(this).apply {
                         text = ".. (Up)"
                         setOnClickListener {
+                            backStack.add(currentDir)
+                            forwardStack.clear()
                             currentDir = parent
                             refreshContents()
                         }
@@ -3547,6 +3563,8 @@ class MainActivity : AppCompatActivity() {
                     val row = Button(this).apply {
                         text = folder.name
                         setOnClickListener {
+                            backStack.add(currentDir)
+                            forwardStack.clear()
                             currentDir = folder
                             refreshContents()
                         }
@@ -3564,6 +3582,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        backButton.setOnClickListener {
+            if (backStack.isNotEmpty()) {
+                forwardStack.add(currentDir)
+                currentDir = backStack.removeAt(backStack.size - 1)
+                refreshContents()
+            }
+        }
+
+        forwardButton.setOnClickListener {
+            if (forwardStack.isNotEmpty()) {
+                backStack.add(currentDir)
+                currentDir = forwardStack.removeAt(forwardStack.size - 1)
+                refreshContents()
+            }
+        }
+
+        val navRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 8)
+            addView(backButton)
+            addView(forwardButton)
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
@@ -3577,28 +3618,45 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        root.addView(navRow)
         root.addView(pathText)
         root.addView(scroll)
 
         refreshContents()
 
-        AlertDialog.Builder(this)
+        // Bug fix: AlertDialog dismisses on any button tap by default,
+        // which used to close this whole picker the moment "New Folder"
+        // was tapped - the user then had to reopen Change Save Folder and
+        // navigate all the way back down to find the folder they just
+        // created. Overriding the neutral button's listener after show()
+        // (instead of passing one straight to setNeutralButton) keeps this
+        // dialog open; Use This Folder / Cancel keep their normal
+        // dismiss-on-tap behavior, which is what's wanted for those two.
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Choose Folder")
             .setView(root)
             .setPositiveButton("Use This Folder") { _, _ ->
                 onPicked(currentDir.absolutePath)
             }
-            .setNeutralButton("New Folder") { _, _ ->
-                showCreateFolderDialog(currentDir) {
-                    refreshContents()
-                }
-            }
+            .setNeutralButton("New Folder", null)
             .setNegativeButton("Cancel", null)
             .create()
-            .show()
+
+        dialog.show()
+
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+            showCreateFolderDialog(currentDir) { newFolder ->
+                // Land inside the folder just created, instead of leaving
+                // the user to find it by hand.
+                backStack.add(currentDir)
+                forwardStack.clear()
+                currentDir = newFolder
+                refreshContents()
+            }
+        }
     }
 
-    private fun showCreateFolderDialog(parentDir: File, onCreated: () -> Unit) {
+    private fun showCreateFolderDialog(parentDir: File, onCreated: (File) -> Unit) {
         val input = EditText(this).apply {
             hint = "Folder name"
         }
@@ -3628,7 +3686,9 @@ class MainActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT
                 ).show()
 
-                onCreated()
+                if (created) {
+                    onCreated(newFolder)
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -5628,6 +5688,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Feature: Delete Torrent, right inside the detail screen - same
+        // Cancel / Delete Torrent Only / Delete Torrent + Files choice as
+        // the list card's existing Remove button (showRemoveDialog), just
+        // worded "Delete" and reachable without going back to the list.
+        val deleteButton = Button(this).apply {
+            text = "Delete Torrent"
+            setOnClickListener {
+                showDeleteDialogFromDetails(torrentIndex)
+            }
+        }
+
         val backButton = Button(this).apply {
             text = "Back"
             setOnClickListener { showMainScreen() }
@@ -5643,6 +5714,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(copyHash)
         root.addView(pauseButton)
         root.addView(resumeButton)
+        root.addView(deleteButton)
         root.addView(sequentialButton)
         root.addView(firstLastButton)
         root.addView(speedLimitLabel)
@@ -7265,6 +7337,42 @@ class MainActivity : AppCompatActivity() {
             }
             .setPositiveButton("Remove + Files") { _, _ ->
                 removeTorrent(true)
+            }
+            .show()
+    }
+
+    // Feature: Delete Torrent button inside the detail screen. Same
+    // underlying action as showRemoveDialog above (REMOVE_TORRENT with an
+    // optional DELETE_FILES flag), just under "Delete" wording and closing
+    // the detail screen back to the list afterward, since the torrent it
+    // was showing no longer exists.
+    private fun showDeleteDialogFromDetails(torrentIndex: Int) {
+        fun deleteTorrent(deleteFiles: Boolean) {
+            val intent = Intent(this, TorrentService::class.java)
+            intent.putExtra("ACTION", "REMOVE_TORRENT")
+            intent.putExtra("TORRENT_INDEX", torrentIndex)
+            intent.putExtra("TORRENT_HASH", getSafeTorrentHashForAction(torrentIndex))
+            intent.putExtra("TORRENT_MAGNET", getSafeTorrentMagnetForAction(torrentIndex))
+            intent.putExtra("DELETE_FILES", deleteFiles)
+            startTorrentService(intent)
+
+            Toast.makeText(
+                this,
+                if (deleteFiles) "Torrent and files deleted" else "Torrent deleted",
+                Toast.LENGTH_SHORT
+            ).show()
+            showMainScreen()
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Delete Torrent?")
+            .setMessage("Choose how you want to delete this torrent.")
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("Delete Torrent Only") { _, _ ->
+                deleteTorrent(false)
+            }
+            .setPositiveButton("Delete + Files") { _, _ ->
+                deleteTorrent(true)
             }
             .show()
     }
