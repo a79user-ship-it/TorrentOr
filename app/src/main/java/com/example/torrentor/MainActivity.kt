@@ -6031,7 +6031,10 @@ class MainActivity : AppCompatActivity() {
         text.append(trackerHost).append("\n")
         text.append("Total size: ").append(totalSize).append("\n")
         text.append("Availability: ").append(availability).append("\n")
-        text.append("Swarm:\n").append(swarmHealth).append("\n")
+        // Bug fix: swarmHealth (getTorrentSwarmHealth) already opens with
+        // its own "Swarm Health" heading, so a "Swarm:" label here just
+        // duplicated it - General used to show both stacked.
+        text.append(swarmHealth).append("\n")
         text.append("Web Seeds: ").append(webSeedCount).append("\n")
         text.append("Private: ").append(privateTorrent).append("\n")
         text.append("Source: ").append(source).append("\n")
