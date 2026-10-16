@@ -1758,6 +1758,155 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileProgress(
 }
 
 
+// Feature: per-file Seeds/Peers, the same idea as the torrent-level
+// Seeds/Peers count on the General tab (st.num_seeds / st.num_peers),
+// just scoped to one file instead of the whole torrent. libtorrent has no
+// per-file counter for this (file_progress() only gives downloaded
+// bytes - see getTorrentFileProgress above), so it's computed here from
+// each currently connected peer's own piece bitfield (peer_info::pieces):
+// a peer counts as a "seed" for this file if it has every piece in the
+// file's piece range, or as a "peer" if it has at least one piece of the
+// file but not all of them. file_storage::file_offset()/piece_length()
+// give the file's first piece, and file_num_pieces() gives how many
+// pieces the file spans (handles a file sharing its first/last piece
+// with a neighboring file correctly, unlike computing the count by hand).
+// Each line also carries the torrent's tracker-reported totalSeeds/
+// totalPeers (st.list_seeds/st.list_peers - the same values the main
+// card's "(Y)" already shows), repeated for every file since libtorrent
+// has no equivalent total scoped to one file, plus uploadingCount - the
+// file-scoped version of the main card's "Uploading to: N peer(s)"
+// (st.num_uploads): peers we have not choked that still lack at least
+// one piece of this file.
+// Returns "" (never throws/crashes) on any failure.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    auto info = handle.torrent_file();
+
+    if (!info) {
+        return env->NewStringUTF("Metadata not ready");
+    }
+
+    std::vector<lt::peer_info> peers;
+
+    try {
+        handle.get_peer_info(peers);
+    } catch (...) {
+        return env->NewStringUTF("Peers not ready");
+    }
+
+    // (added) The parenthetical totals shown alongside each file's
+    // connected seed/peer count - same as the "(Y)" in the main card's
+    // "Seeds X (Y)" - come from the torrent's tracker-reported swarm size
+    // (list_seeds/list_peers). libtorrent has no such total scoped to one
+    // file, so every file row reuses this same torrent-wide pair; it is
+    // not a true per-file swarm size, just the same honest total the main
+    // card already shows.
+    lt::torrent_status st = handle.status();
+    int totalSeeds = st.list_seeds;
+    int totalPeers = st.list_peers;
+
+    std::string output;
+    auto const& files = info->files();
+
+    int fileCount = files.num_files();
+    int pieceLength = files.piece_length();
+
+    for (int f = 0; f < fileCount; ++f) {
+        int numFilePieces = files.file_num_pieces(f);
+
+        int firstPiece = (pieceLength > 0)
+                ? static_cast<int>(files.file_offset(f) / pieceLength)
+                : 0;
+
+        int seedCount = 0;
+        int peerCount = 0;
+        // Feature: "Uploading to X peer(s)" per file - the file-scoped
+        // equivalent of the main card's "Uploading to: N peer(s)"
+        // (st.num_uploads, lines ~2877-2879), which counts peers we have
+        // currently unchoked (peer_info::choked means **we** have choked
+        // that peer, so its absence means we haven't - i.e. we're willing
+        // to upload to them). Scoped to one file by also requiring the
+        // peer to still be missing at least one piece in that file's
+        // range - a peer that already has every piece of this file has
+        // nothing left to request from it, unchoked or not.
+        int uploadingCount = 0;
+
+        if (numFilePieces > 0) {
+            for (auto const& peer : peers) {
+                int bitfieldSize = peer.pieces.size();
+
+                if (bitfieldSize <= 0) {
+                    continue;
+                }
+
+                int haveCount = 0;
+
+                for (int p = firstPiece; p < firstPiece + numFilePieces; ++p) {
+                    if (p < 0 || p >= bitfieldSize) {
+                        continue;
+                    }
+
+                    if (peer.pieces[lt::piece_index_t(p)]) {
+                        haveCount++;
+                    }
+                }
+
+                if (haveCount >= numFilePieces) {
+                    seedCount++;
+                } else if (haveCount > 0) {
+                    peerCount++;
+                }
+
+                bool weHaveChokedThem =
+                        static_cast<bool>(peer.flags & lt::peer_info::choked);
+
+                if (!weHaveChokedThem && haveCount < numFilePieces) {
+                    uploadingCount++;
+                }
+            }
+        }
+
+        output += std::to_string(f);
+        output += "|";
+        output += std::to_string(seedCount);
+        output += "|";
+        output += std::to_string(peerCount);
+        output += "|";
+        output += std::to_string(totalSeeds);
+        output += "|";
+        output += std::to_string(totalPeers);
+        output += "|";
+        output += std::to_string(uploadingCount);
+        output += "\n";
+    }
+
+    if (output.empty()) {
+        output = "No files";
+    }
+
+    return env->NewStringUTF(output.c_str());
+}
+
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentTrackers(

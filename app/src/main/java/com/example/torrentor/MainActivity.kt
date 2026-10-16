@@ -69,6 +69,11 @@ class MainActivity : AppCompatActivity() {
     private var selectMode = false
     private val selectedTorrents = mutableSetOf<Int>()
     private var skipMagnetSelection = false
+    // Bug fix: this and sortMode below used to only live in memory, so the
+    // chosen filter/sort reset to "All"/"None" every time the app was
+    // closed and reopened (a fresh Activity re-initializes these fields to
+    // their declared defaults). Both are now persisted - see
+    // torrentListViewPrefs() - and reloaded once in onCreate().
     private var activeFilter = "All"
     private var searchQuery = ""
 
@@ -120,6 +125,16 @@ class MainActivity : AppCompatActivity() {
     private var filesBuiltForIndex = -1
     private var filesPendingSelection: MutableSet<Int>? = null
     private val filesProgressViews = mutableMapOf<Int, Pair<TextView, ProgressBar>>()
+
+    // Feature: per-file download speed + ETA. libtorrent only reports one
+    // combined download rate for the whole torrent (used for the
+    // torrent-level ETA on the General tab), never a separate rate per
+    // file, so each file's own rate is estimated here instead - from how
+    // many bytes it gained between one refresh tick and the next
+    // (updateActiveDetailsTab() ticks every 3 seconds - see its comment).
+    // Keyed by file index; cleared alongside filesProgressViews so stale
+    // numbers from a previously viewed torrent are never mixed in.
+    private val filesPrevProgressSnapshot = mutableMapOf<Int, Pair<Long, Long>>()
 
     private var networkFeaturesRefreshRunnable: Runnable? = null
     private var isNetworkFeaturesScreenActive = false
@@ -247,6 +262,13 @@ class MainActivity : AppCompatActivity() {
 
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
+
+        // Bug fix: restore the torrent list's Filter and Sort choices from
+        // last time, instead of leaving them at the "All"/"None" defaults
+        // the fields above are declared with (see torrentListViewPrefs()).
+        val listViewPrefs = torrentListViewPrefs()
+        activeFilter = listViewPrefs.getString("filter", "All") ?: "All"
+        sortMode = listViewPrefs.getString("sort", "None") ?: "None"
 
         // Start TorrentService every time the app opens.
         // This reloads saved torrents if Android killed the native session/service.
@@ -887,6 +909,7 @@ class MainActivity : AppCompatActivity() {
                 text = if (activeFilter == name) "[$name]" else name
                 setOnClickListener {
                     activeFilter = name
+                    torrentListViewPrefs().edit().putString("filter", name).apply()
                     selectedTorrents.clear()
                     selectMode = false
                     showMainScreen()
@@ -908,6 +931,7 @@ class MainActivity : AppCompatActivity() {
                     .setTitle("Sort torrents by")
                     .setItems(TORRENT_SORT_MODES) { _, which ->
                         sortMode = TORRENT_SORT_MODES[which]
+                        torrentListViewPrefs().edit().putString("sort", sortMode).apply()
                         showMainScreen()
                     }
                     .show()
@@ -3355,6 +3379,12 @@ class MainActivity : AppCompatActivity() {
     private fun firstLastPriorityPrefs() =
         getSharedPreferences("firstlast_priority", MODE_PRIVATE)
 
+    // Bug fix: backs the torrent list's Filter and Sort choices (see
+    // activeFilter/sortMode above), so they survive the app being closed
+    // and reopened instead of silently resetting to "All"/"None".
+    private fun torrentListViewPrefs() =
+        getSharedPreferences("torrent_list_view", MODE_PRIVATE)
+
     // Feature 1: Speed Control (global limits + per-torrent override,
     // no scheduling) - same prefs files TorrentService reads from.
     // Stored in bytes/second (what the native calls take); the UI
@@ -5082,6 +5112,7 @@ class MainActivity : AppCompatActivity() {
         filesBuiltForIndex = -1
         filesPendingSelection = null
         filesProgressViews.clear()
+        filesPrevProgressSnapshot.clear()
 
         fun clearContent() {
             fileListLayout.removeAllViews()
@@ -6123,6 +6154,66 @@ class MainActivity : AppCompatActivity() {
         return map
     }
 
+    // Feature: per-file Seeds/Peers and "Uploading to" (see
+    // getTorrentFileSwarm in TorrentNative.kt/torrentor.cpp for how these
+    // are actually computed - from connected peers' own piece bitfields
+    // and choke state, since libtorrent has no per-file counter for any
+    // of this). totalSeeds/totalPeers are the same tracker-reported swarm
+    // totals the main card's "Seeds X (Y)" shows - libtorrent has no such
+    // total scoped to one file, so every file in a given torrent carries
+    // the same pair here. uploading is genuinely per-file.
+    private data class FileSwarm(
+        val seeds: Int,
+        val peers: Int,
+        val totalSeeds: Int,
+        val totalPeers: Int,
+        val uploading: Int
+    )
+
+    // Matches the main card's own "Uploading to: N peer(s)" wording
+    // (st.num_uploads) so the per-file line reads the same way.
+    private fun formatUploadingTo(count: Int): String {
+        return "Uploading to " + count + if (count == 1) " peer" else " peers"
+    }
+
+    private fun getTorrentFileSwarmMap(torrentIndex: Int): Map<Int, FileSwarm> {
+        val swarmData = try {
+            TorrentNative.getTorrentFileSwarm(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (
+            swarmData.isBlank() ||
+            swarmData == "Metadata not ready" ||
+            swarmData == "Invalid torrent" ||
+            swarmData == "Peers not ready" ||
+            swarmData == "No files"
+        ) {
+            return emptyMap()
+        }
+
+        val map = mutableMapOf<Int, FileSwarm>()
+
+        for (line in swarmData.lines()) {
+            if (line.isBlank()) continue
+
+            val parts = line.split("|", limit = 6)
+            if (parts.size < 6) continue
+
+            val index = parts[0].toIntOrNull() ?: continue
+            val seeds = parts[1].toIntOrNull() ?: 0
+            val peers = parts[2].toIntOrNull() ?: 0
+            val totalSeeds = parts[3].toIntOrNull() ?: 0
+            val totalPeers = parts[4].toIntOrNull() ?: 0
+            val uploading = parts[5].toIntOrNull() ?: 0
+
+            map[index] = FileSwarm(seeds, peers, totalSeeds, totalPeers, uploading)
+        }
+
+        return map
+    }
+
     private fun showFilesForOpening(
         torrentIndex: Int,
         fileListLayout: LinearLayout,
@@ -6139,6 +6230,7 @@ class MainActivity : AppCompatActivity() {
 
         fileListLayout.removeAllViews()
         filesProgressViews.clear()
+        filesPrevProgressSnapshot.clear()
         filesBuiltForIndex = -1
         filesPendingSelection = null
 
@@ -6159,6 +6251,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val progressMap = getTorrentFileProgressMap(torrentIndex)
+        val swarmMap = getTorrentFileSwarmMap(torrentIndex)
 
         // Feature 5: this torrent's actual folder, for locating its
         // downloaded files below - not always the global default anymore.
@@ -6258,6 +6351,21 @@ class MainActivity : AppCompatActivity() {
             } else {
                 "Progress not ready"
             }
+            val estimate = if (progress != null) {
+                estimateFileEtaAndSpeed(
+                    index,
+                    progress.downloadedBytes,
+                    progress.totalBytes - progress.downloadedBytes
+                )
+            } else {
+                FileEtaEstimate("--", "${formatSize(0)}/s")
+            }
+            val etaText = estimate.etaText
+            val speedText = estimate.speedText
+            val swarm = swarmMap[index]
+            val swarmText = "Seeds ${swarm?.seeds ?: 0} (${swarm?.totalSeeds ?: 0})" +
+                    "  Peers ${swarm?.peers ?: 0} (${swarm?.totalPeers ?: 0})" +
+                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}"
 
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -6281,7 +6389,8 @@ class MainActivity : AppCompatActivity() {
             checkBoxes.add(checkBox)
 
             val progressText = TextView(this).apply {
-                text = "Progress: $percent%  •  $downloadedText"
+                text = "Progress: $percent%  •  $downloadedText  •  " +
+                        "↓ $speedText  •  ETA: $etaText\n$swarmText"
                 setTextColor(Color.WHITE)
                 textSize = 13f
                 setPadding(0, 0, 0, 4)
@@ -6348,12 +6457,26 @@ class MainActivity : AppCompatActivity() {
 
         if (progressMap.isEmpty()) return
 
+        val swarmMap = getTorrentFileSwarmMap(torrentIndex)
+
         for ((index, views) in filesProgressViews) {
             val progress = progressMap[index] ?: continue
 
+            val estimate = estimateFileEtaAndSpeed(
+                index,
+                progress.downloadedBytes,
+                progress.totalBytes - progress.downloadedBytes
+            )
+
+            val swarm = swarmMap[index]
+            val swarmText = "Seeds ${swarm?.seeds ?: 0} (${swarm?.totalSeeds ?: 0})" +
+                    "  Peers ${swarm?.peers ?: 0} (${swarm?.totalPeers ?: 0})" +
+                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}"
+
             views.first.text =
                 "Progress: ${progress.percent}%  •  " +
-                        "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}"
+                        "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}" +
+                        "  •  ↓ ${estimate.speedText}  •  ETA: ${estimate.etaText}\n$swarmText"
 
             views.second.progress = progress.percent
         }
@@ -6824,11 +6947,12 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // detail tabs are heavier: every third round (3 s) -
-                    // except Peers, which the user wants live at 1 s since
-                    // peer connections/speeds change quickly.
+                    // except Peers and Files, which the user wants live at
+                    // 1 s (peer connections/speeds, and the per-file
+                    // progress/speed/ETA/seeds/peers, all change quickly).
                     uiTick++
 
-                    if (currentDetailsTab == "Peers") {
+                    if (currentDetailsTab == "Peers" || currentDetailsTab == "Files") {
                         updateActiveDetailsTab()
                     } else if (uiTick % 3 == 0) {
                         updateActiveDetailsTab()
@@ -7281,6 +7405,71 @@ class MainActivity : AppCompatActivity() {
             kb >= 1 -> String.format("%.2f KB", kb)
             else -> "$bytes B"
         }
+    }
+
+    // Same day/hour/minute rollover as the native formatEta() used for the
+    // torrent-level ETA (torrentor.cpp), kept in Kotlin because this one
+    // only ever gets a Kotlin-side estimate (see estimateFileEtaAndSpeed
+    // below) - there is nothing to ask libtorrent for here.
+    private fun formatEtaSeconds(seconds: Long): String {
+        if (seconds <= 0) return "--"
+
+        val mins = seconds / 60
+        val hrs = mins / 60
+        val days = hrs / 24
+
+        return when {
+            days > 0 -> "${days}d ${hrs % 24}h"
+            hrs > 0 -> "${hrs}h ${mins % 60}m"
+            else -> "${mins}m"
+        }
+    }
+
+    // Feature: per-file download speed + ETA (see filesPrevProgressSnapshot
+    // above for why both are estimated here rather than read from
+    // libtorrent - it has no per-file rate at all, upload or download,
+    // only one combined rate for the whole torrent). Call this once per
+    // file per refresh tick - it both returns the estimate and updates the
+    // snapshot used for the next call, so it must not be called more than
+    // once per tick for the same index or the rate will be thrown off.
+    private data class FileEtaEstimate(val etaText: String, val speedText: String)
+
+    private fun estimateFileEtaAndSpeed(
+        index: Int,
+        downloadedBytes: Long,
+        remainingBytes: Long
+    ): FileEtaEstimate {
+        val now = System.currentTimeMillis()
+        val previous = filesPrevProgressSnapshot[index]
+        filesPrevProgressSnapshot[index] = Pair(downloadedBytes, now)
+
+        if (previous == null) {
+            // First tick seen for this file - no rate to measure yet.
+            return FileEtaEstimate("--", "${formatSize(0)}/s")
+        }
+
+        val (prevBytes, prevTime) = previous
+        val deltaBytes = downloadedBytes - prevBytes
+        val deltaSeconds = (now - prevTime) / 1000.0
+
+        // Not actively downloading right now (paused, stalled, or no
+        // peers for this file specifically) - 0 B/s and "--" rather than
+        // a stale or divide-by-zero number.
+        val bytesPerSecond = if (deltaBytes > 0 && deltaSeconds > 0.0) {
+            deltaBytes / deltaSeconds
+        } else {
+            0.0
+        }
+
+        val speedText = "${formatSize(bytesPerSecond.toLong())}/s"
+
+        val etaText = if (remainingBytes <= 0 || bytesPerSecond <= 0.0) {
+            "--"
+        } else {
+            formatEtaSeconds((remainingBytes / bytesPerSecond).toLong())
+        }
+
+        return FileEtaEstimate(etaText, speedText)
     }
 
     private fun saveMagnetOnly(magnet: String) {

@@ -29,6 +29,19 @@ object TorrentNative {
 
     external fun getTorrentFilesByIndex(index: Int): String
     external fun getTorrentFileProgress(index: Int): String
+    // Per-file Seeds/Peers, the file-scoped equivalent of the torrent-level
+    // Seeds/Peers count. Computed from currently connected peers' own
+    // piece bitfields (libtorrent has no per-file counter for this), so
+    // like the torrent-level count, it reflects only peers this device is
+    // actually connected to right now, not the whole swarm. One line per
+    // file: "index|seeds|peers|totalSeeds|totalPeers|uploading". totalSeeds/
+    // totalPeers are the torrent's tracker-reported swarm size (same
+    // numbers the main card's "Seeds X (Y)" already shows), repeated on
+    // every file line since libtorrent has no per-file equivalent of that
+    // total. uploading is the file-scoped version of the main card's
+    // "Uploading to: N peer(s)" - connected peers we haven't choked that
+    // still lack at least one piece of this file.
+    external fun getTorrentFileSwarm(index: Int): String
     external fun getTorrentTrackers(index: Int): String
     external fun getTorrentTrackerStatus(index: Int): String
     external fun getTorrentWebSeeds(index: Int): String
