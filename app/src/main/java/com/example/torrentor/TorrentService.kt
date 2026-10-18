@@ -76,11 +76,38 @@ class TorrentService : Service() {
 
         restoreSavedTorrents()
         startUpdates()
+
+        // Feature: Web UI. Off by default - only starts here if the user
+        // already turned it on from the Web UI screen, same pattern as
+        // the Connection/speed-limit settings applied just above. Once
+        // it's on, opening its socket - and, for HTTPS, loading the
+        // keystore file and setting up TLS - was happening right here,
+        // synchronously, on the main thread, before this method (and so
+        // the service) finished starting. That's extra startup delay the
+        // restored torrents had to wait behind for no reason, so it now
+        // runs on its own background thread instead.
+        Thread { startSavedWebUiServer() }.start()
     }
 
     override fun onDestroy() {
         releaseUpnpMulticastLock()
+        WebUiServer.stop()
         super.onDestroy()
+    }
+
+    private fun startSavedWebUiServer() {
+        val prefs = WebUiServer.webUiPrefs(applicationContext)
+        val enabled = prefs.getBoolean("enabled", false)
+
+        if (!enabled) return
+
+        val port = prefs.getInt("port", 8080)
+        val useHttps = prefs.getBoolean("https", true)
+        val error = WebUiServer.start(applicationContext, port, useHttps)
+
+        if (error != null) {
+            AppLog.error("Web UI: could not start on port $port: $error")
+        }
     }
 
     // ------------------------------------------------------- Feature 4: Connection
