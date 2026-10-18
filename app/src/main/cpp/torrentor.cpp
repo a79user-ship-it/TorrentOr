@@ -767,6 +767,34 @@ static void updatePortForwardingAlerts() {
 
         logTorrentAlert(alert);
 
+        // Feature: magnet file selection (app + Web UI). addMagnetPaused
+        // deliberately keeps auto_managed on so libtorrent will run the
+        // torrent long enough to fetch its metadata - but that same
+        // auto_managed flag means libtorrent can also start downloading
+        // real file data the instant metadata arrives, before the user
+        // has even seen the file list, let alone pressed Download. The
+        // moment metadata actually arrives, re-pause (for real this
+        // time - no auto_managed) any torrent still waiting on that
+        // confirmation (g_pausedHandles[i] true); resumeTorrent(), called
+        // from the Download button's confirm step, is what starts it
+        // for real.
+        if (auto* metaAlert = lt::alert_cast<lt::metadata_received_alert>(alert)) {
+            lt::torrent_handle metaHandle = metaAlert->handle;
+
+            for (int i = 0; i < static_cast<int>(g_handles.size()); ++i) {
+                if (g_handles[i] == metaHandle) {
+                    if (i < static_cast<int>(g_pausedHandles.size()) && g_pausedHandles[i] &&
+                        metaHandle.is_valid()) {
+                        metaHandle.unset_flags(lt::torrent_flags::auto_managed);
+                        metaHandle.pause();
+                    }
+                    break;
+                }
+            }
+
+            continue;
+        }
+
         if (auto* success = lt::alert_cast<lt::portmap_alert>(alert)) {
             std::string message = success->message();
             std::string method = detectPortForwardingMethod(message);
@@ -1674,6 +1702,38 @@ Java_com_example_torrentor_TorrentNative_getTorrentFilesByIndex(
     }
 
     return env->NewStringUTF(output.c_str());
+}
+
+
+// Feature: Web UI file streaming/download (WebUiServer.kt). Returns this
+// torrent's current save path straight from the live handle (the same
+// torrent_status field already read elsewhere in this file, e.g.
+// list_seeds/list_peers above), so it always matches reality even after
+// a moveTorrentStorage() call - rather than trusting a value cached on
+// the Kotlin side. Empty string on any invalid index/handle.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentSavePath(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    lt::torrent_status st = handle.status();
+    return env->NewStringUTF(st.save_path.c_str());
 }
 
 

@@ -893,6 +893,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val webUiButton = Button(this).apply {
+            text = "Web UI"
+            setOnClickListener {
+                showWebUiScreen()
+            }
+        }
+
         val filterTitle = TextView(this).apply {
             text = "Filter: $activeFilter"
             textSize = 16f
@@ -974,6 +981,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(rssButton)
         root.addView(executionLogButton)
         root.addView(onlineSearchButton)
+        root.addView(webUiButton)
         root.addView(filterTitle)
         root.addView(horizontalScrollFor(filterRowOne))
         root.addView(horizontalScrollFor(filterRowTwo))
@@ -4125,6 +4133,405 @@ class MainActivity : AppCompatActivity() {
     // Feature 1: Speed Control - global limits only, no scheduling.
     // The UI works in KB/s; everything stored in prefs and sent to
     // native is bytes/second, converted at this boundary.
+    // Feature: Web UI - view/control TorrentOr from a browser on the same
+    // Wi-Fi/LAN (see WebUiServer.kt). Off by default; this screen is the
+    // only place that turns it on, and it requires a username + password
+    // before it will start (WebUiServer itself refuses every request
+    // until both are set, so there is never an accidentally-open port).
+    private fun webUiPrefs() = WebUiServer.webUiPrefs(this)
+
+    // Best-effort local IP, for showing "http://<ip>:<port>" once the
+    // server is running - just something to type into another device's
+    // browser, not used for anything the server itself depends on.
+    private fun getLocalIpAddress(): String? {
+        return try {
+            val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
+
+            while (interfaces.hasMoreElements()) {
+                val iface = interfaces.nextElement()
+                if (!iface.isUp || iface.isLoopback) continue
+
+                val addresses = iface.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
+                        return address.hostAddress
+                    }
+                }
+            }
+            null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun showWebUiScreen() {
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopConnectionAutoRefresh()
+
+        val prefs = webUiPrefs()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        val title = TextView(this).apply {
+            text = "Web UI"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val subtitle = TextView(this).apply {
+            text = "View and control TorrentOr from a browser on the same " +
+                    "Wi-Fi - add magnets, upload .torrent files and choose " +
+                    "which files to download, pause/resume/remove torrents. " +
+                    "Off by default; needs a username and password before " +
+                    "it will turn on. If you change anything below while " +
+                    "it's already on, turn it off and back on to apply it."
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val remoteAccessLabel = TextView(this).apply {
+            text = "Controlling it from outside your Wi-Fi"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 4)
+        }
+
+        val remoteAccessText = TextView(this).apply {
+            text = "Use Tailscale (tailscale.com, free) instead of port forwarding - " +
+                    "it works even behind CGNAT, where your ISP doesn't actually give " +
+                    "you a forwardable public IP at all. Install the Tailscale app on " +
+                    "this device and on whichever phone/computer you'll control it " +
+                    "from, and sign in to the same Tailscale account on both. They " +
+                    "then get a direct, encrypted connection to each other with no " +
+                    "public exposure and nothing to configure on your router.\n\n" +
+                    "Open the Tailscale app on THIS device to see its Tailscale IP " +
+                    "(something like 100.x.x.x), then enter it below so this screen " +
+                    "can show you the full remote address, ready to copy.\n\n" +
+                    "The HTTPS option below adds another layer of encryption on top " +
+                    "of whatever carries the connection (Wi-Fi or Tailscale) and is " +
+                    "worth leaving on either way."
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        }
+
+        // Guards against a very easy mistake: "Copy Tailscale Address"
+        // copies the FULL built address (scheme:// + ip + :port) to the
+        // clipboard, and a later paste into this bare-IP field can
+        // easily be that same clipboard content, not a fresh IP. Without
+        // this, the address gets rebuilt by wrapping scheme:// / :port
+        // around whatever's already here, so each such round-trip adds
+        // one more layer ("https://https://ip:8080:8080", and so on).
+        // Stripping any existing scheme/port wrapping first makes
+        // rebuilding the address idempotent no matter what ends up
+        // pasted in. Declared here, before first use below, since
+        // Kotlin local functions aren't hoisted across a nested apply{}.
+        fun sanitizeTailscaleIp(raw: String): String {
+            var value = raw.trim()
+            value = value.replace(Regex("^(https?://)+", RegexOption.IGNORE_CASE), "")
+            value = value.replace(Regex("(:\\d+)+$"), "")
+            return value.trim()
+        }
+
+        val tailscaleIpLabel = TextView(this).apply {
+            text = "This device's Tailscale IP (optional)"
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 4)
+        }
+
+        val tailscaleIpInput = EditText(this).apply {
+            hint = "e.g. 100.x.x.x"
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+            // sanitizeTailscaleIp also cleans up anything already saved
+            // from before this fix existed, so a previously-corrupted
+            // value self-heals the first time this screen is opened.
+            setText(sanitizeTailscaleIp(prefs.getString("tailscale_ip", "") ?: ""))
+        }
+
+        // Shown only once a Tailscale IP is entered above - its own
+        // selectable address + Copy button, the same pattern as the
+        // regular (Wi-Fi) address below.
+        val tailscaleAddressInput = TextView(this).apply {
+            setTextIsSelectable(true)
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 0)
+            visibility = android.view.View.GONE
+        }
+
+        val copyTailscaleAddressButton = Button(this).apply {
+            text = "Copy Tailscale Address"
+            visibility = android.view.View.GONE
+        }
+
+        copyTailscaleAddressButton.setOnClickListener {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("TorrentOr Web UI (Tailscale)", tailscaleAddressInput.text.toString())
+            )
+            Toast.makeText(this, "Address copied", Toast.LENGTH_SHORT).show()
+        }
+
+        val httpsLabel = TextView(this).apply {
+            text = "Use HTTPS"
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val httpsCheckbox = CheckBox(this).apply {
+            text = "Encrypt the connection (recommended)"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("https", true)
+        }
+
+        // Saved as soon as it's changed, not only when "Turn On" is next
+        // pressed - otherwise unchecking this while the server is already
+        // running (or without restarting it right away) never actually
+        // got saved, so the old value came right back the next time the
+        // server started, including after fully closing and reopening
+        // the app.
+        httpsCheckbox.setOnCheckedChangeListener { _, isChecked ->
+            prefs.edit().putBoolean("https", isChecked).apply()
+        }
+
+        val httpsHelpText = TextView(this).apply {
+            text = "Each device generates its own private certificate the first " +
+                    "time this is turned on - the key for it never leaves the " +
+                    "device's secure storage. Since it isn't signed by a public " +
+                    "authority, your browser will show a one-time \"not secure\"/" +
+                    "\"certificate not trusted\" warning the first time it connects - " +
+                    "that's expected, not a sign anything's wrong; choose \"Advanced\" " +
+                    "> \"Proceed\" (wording varies by browser)."
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setPadding(0, 4, 0, 12)
+        }
+
+        val statusText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        }
+
+        // Shows the address as selectable text (tap-and-hold to select/
+        // copy) plus an explicit Copy button, so it can be moved to
+        // another device without retyping it by hand. A plain TextView,
+        // not an EditText - calling setTextIsSelectable(true) on an
+        // EditText quietly makes it focusable/editable again regardless
+        // of isFocusable = false, which is how a typed-in address (e.g.
+        // a Tailscale IP) could get overwritten back to the computed
+        // Wi-Fi one on the next refresh; a TextView has no such
+        // "selectable also means editable" trap.
+        val addressInput = TextView(this).apply {
+            setTextIsSelectable(true)
+            setTextColor(Color.WHITE)
+            visibility = android.view.View.GONE
+        }
+
+        val copyAddressButton = Button(this).apply {
+            text = "Copy Address"
+            visibility = android.view.View.GONE
+        }
+
+        copyAddressButton.setOnClickListener {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("TorrentOr Web UI", addressInput.text.toString()))
+            Toast.makeText(this, "Address copied", Toast.LENGTH_SHORT).show()
+        }
+
+        fun refreshStatus() {
+            if (WebUiServer.isRunning()) {
+                val ip = getLocalIpAddress() ?: "<this device's IP>"
+                val scheme = if (WebUiServer.isHttps()) "https" else "http"
+                val address = "$scheme://$ip:${WebUiServer.currentPort()}"
+
+                statusText.text = if (WebUiServer.isHttps()) {
+                    "Status: ON - open this on another device (expect a one-time " +
+                            "certificate warning - see below):"
+                } else {
+                    "Status: ON - open this on another device on the same Wi-Fi:"
+                }
+
+                addressInput.setText(address)
+                addressInput.visibility = android.view.View.VISIBLE
+                copyAddressButton.visibility = android.view.View.VISIBLE
+
+                val tailscaleIp = sanitizeTailscaleIp(tailscaleIpInput.text.toString())
+
+                if (tailscaleIp.isNotBlank()) {
+                    tailscaleAddressInput.setText(
+                        "$scheme://$tailscaleIp:${WebUiServer.currentPort()}"
+                    )
+                    tailscaleAddressInput.visibility = android.view.View.VISIBLE
+                    copyTailscaleAddressButton.visibility = android.view.View.VISIBLE
+                } else {
+                    tailscaleAddressInput.visibility = android.view.View.GONE
+                    copyTailscaleAddressButton.visibility = android.view.View.GONE
+                }
+            } else {
+                statusText.text = "Status: OFF"
+                addressInput.visibility = android.view.View.GONE
+                copyAddressButton.visibility = android.view.View.GONE
+                tailscaleAddressInput.visibility = android.view.View.GONE
+                copyTailscaleAddressButton.visibility = android.view.View.GONE
+            }
+        }
+
+        tailscaleIpInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+
+            override fun afterTextChanged(s: android.text.Editable?) {
+                prefs.edit().putString("tailscale_ip", sanitizeTailscaleIp(s?.toString() ?: "")).apply()
+                refreshStatus()
+            }
+        })
+
+        val usernameLabel = TextView(this).apply {
+            text = "Username"
+            setTextColor(Color.WHITE)
+            setPadding(0, 8, 0, 4)
+        }
+
+        val usernameInput = EditText(this).apply {
+            setText(prefs.getString("username", "") ?: "")
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+        }
+
+        val passwordLabel = TextView(this).apply {
+            text = "Password"
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val passwordInput = EditText(this).apply {
+            setText(prefs.getString("password", "") ?: "")
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            setHintTextColor(Color.LTGRAY)
+            setTextColor(Color.WHITE)
+        }
+
+        val portLabel = TextView(this).apply {
+            text = "Port"
+            setTextColor(Color.WHITE)
+            setPadding(0, 16, 0, 4)
+        }
+
+        val portInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setText(prefs.getInt("port", 8080).toString())
+            setTextColor(Color.WHITE)
+        }
+
+        val toggleButton = Button(this).apply {
+            setPadding(0, 16, 0, 0)
+        }
+
+        fun refreshToggleButton() {
+            toggleButton.text = if (WebUiServer.isRunning()) "Turn Off" else "Turn On"
+        }
+
+        toggleButton.setOnClickListener {
+            if (WebUiServer.isRunning()) {
+                WebUiServer.stop()
+                prefs.edit().putBoolean("enabled", false).apply()
+                Toast.makeText(this, "Web UI turned off", Toast.LENGTH_SHORT).show()
+                refreshStatus()
+                refreshToggleButton()
+                return@setOnClickListener
+            }
+
+            val username = usernameInput.text.toString().trim()
+            val password = passwordInput.text.toString()
+            val port = portInput.text.toString().toIntOrNull()
+
+            if (username.isBlank() || password.isBlank()) {
+                Toast.makeText(this, "Set a username and password first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            if (port == null || port !in 1024..65535) {
+                Toast.makeText(this, "Enter a port between 1024 and 65535", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            val useHttps = httpsCheckbox.isChecked
+
+            prefs.edit()
+                .putString("username", username)
+                .putString("password", password)
+                .putInt("port", port)
+                .putBoolean("https", useHttps)
+                .apply()
+
+            val error = WebUiServer.start(this, port, useHttps)
+
+            if (error != null) {
+                Toast.makeText(this, "Could not start: $error", Toast.LENGTH_LONG).show()
+            } else {
+                prefs.edit().putBoolean("enabled", true).apply()
+                Toast.makeText(this, "Web UI turned on", Toast.LENGTH_SHORT).show()
+            }
+
+            refreshStatus()
+            refreshToggleButton()
+        }
+
+        refreshStatus()
+        refreshToggleButton()
+
+        val backButton = Button(this).apply {
+            text = "Back"
+            setPadding(0, 16, 0, 0)
+            setOnClickListener { showMainScreen() }
+        }
+
+        root.addView(title)
+        root.addView(subtitle)
+        root.addView(statusText)
+        root.addView(addressInput)
+        root.addView(copyAddressButton)
+        root.addView(usernameLabel)
+        root.addView(usernameInput)
+        root.addView(passwordLabel)
+        root.addView(passwordInput)
+        root.addView(portLabel)
+        root.addView(portInput)
+        root.addView(httpsLabel)
+        root.addView(httpsCheckbox)
+        root.addView(httpsHelpText)
+        root.addView(toggleButton)
+        root.addView(remoteAccessLabel)
+        root.addView(remoteAccessText)
+        root.addView(tailscaleIpLabel)
+        root.addView(tailscaleIpInput)
+        root.addView(tailscaleAddressInput)
+        root.addView(copyTailscaleAddressButton)
+        root.addView(backButton)
+
+        val outerScroll = ScrollView(this).apply {
+            addView(root)
+        }
+
+        setContentView(outerScroll)
+    }
+
     private fun showSpeedLimitsScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1

@@ -26,8 +26,8 @@ android {
 
         // (changed) Raise versionCode with every release you install over an
         // older one. Android refuses an update whose versionCode is lower.
-        versionCode = 38
-        versionName = "1.37"
+        versionCode = 59
+        versionName = "1.57"
 
         ndk {
             abiFilters += listOf(
@@ -86,4 +86,10 @@ dependencies {
     implementation(libs.androidx.activity.ktx)
     implementation(libs.material)
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // (added) Pure-Java, no native code - used only to generate the Web
+    // UI's self-signed HTTPS certificate (WebUiServer.kt). Does not
+    // touch anything else in the app.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }

@@ -28,6 +28,13 @@ object TorrentNative {
     external fun removeAllTorrents(deleteFiles: Boolean)
 
     external fun getTorrentFilesByIndex(index: Int): String
+    // The absolute folder this torrent's files are (or will be) saved
+    // into right now - read straight from the live libtorrent handle
+    // (handle.status().save_path), so it's always accurate even after a
+    // moveTorrentStorage() call. Empty string if the index is invalid.
+    // Used by the Web UI to find a file's real path on disk for
+    // streaming/downloading it (WebUiServer.kt).
+    external fun getTorrentSavePath(index: Int): String
     external fun getTorrentFileProgress(index: Int): String
     // Per-file Seeds/Peers, the file-scoped equivalent of the torrent-level
     // Seeds/Peers count. Computed from currently connected peers' own
