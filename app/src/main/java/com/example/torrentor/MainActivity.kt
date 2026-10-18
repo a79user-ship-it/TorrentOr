@@ -168,6 +168,7 @@ class MainActivity : AppCompatActivity() {
             "amoled" -> Color.parseColor("#000000")
             "rose" -> Color.parseColor("#3D0A1E")
             "ash" -> Color.parseColor("#2A2A28")
+            "darkblue" -> Color.parseColor("#081028")
             else -> Color.parseColor("#0D47A1")
         }
     }
@@ -185,6 +186,7 @@ class MainActivity : AppCompatActivity() {
             "amoled" -> Color.parseColor("#121212")
             "rose" -> Color.parseColor("#C2185B")
             "ash" -> Color.parseColor("#6E6E66")
+            "darkblue" -> Color.parseColor("#16305C")
             else -> Color.parseColor("#42A5F5")
         }
     }
@@ -214,6 +216,7 @@ class MainActivity : AppCompatActivity() {
             "amoled" -> "AMOLED"
             "rose" -> "Rose"
             "ash" -> "Ash"
+            "darkblue" -> "Dark Blue"
             else -> "Light Blue"
         }
     }
@@ -231,6 +234,7 @@ class MainActivity : AppCompatActivity() {
             "green" -> "rose"
             "rose" -> "amoled"
             "amoled" -> "ash"
+            "ash" -> "darkblue"
             else -> "blue"
         }
 
@@ -1159,27 +1163,56 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener {
                         isEnabled = false
                         val originalText = text
-                        text = "Adding..."
+                        text = "..."
 
+                        // Resolves the result (magnet link, or downloads
+                        // the .torrent file) on a background thread first,
+                        // then hands it to the same Add Magnet/Add Torrent
+                        // File screens used everywhere else in the app, so
+                        // the user picks files/folder before anything is
+                        // added - it is only actually added once they
+                        // commit there, not the moment this button is
+                        // tapped.
                         Thread {
-                            val error = OnlineSearchAdder.add(this@MainActivity, result)
+                            var resolved: OnlineSearchAdder.ResolvedItem? = null
+                            var errorReason: String? = null
+
+                            try {
+                                resolved = OnlineSearchAdder.resolveForSelection(
+                                    this@MainActivity,
+                                    result
+                                )
+                            } catch (e: Throwable) {
+                                errorReason = e.message ?: e.javaClass.simpleName
+                            }
 
                             runOnUiThread {
-                                if (error == null) {
-                                    text = "Added"
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "Added to downloads",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                } else {
-                                    isEnabled = true
-                                    text = originalText
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "Could not add: $error",
-                                        Toast.LENGTH_LONG
-                                    ).show()
+                                isEnabled = true
+
+                                val magnet = resolved?.magnet
+                                val torrentPath = resolved?.torrentPath
+
+                                when {
+                                    magnet != null -> {
+                                        text = originalText
+                                        showMagnetMetadataScreen(magnet) {
+                                            text = "Added"
+                                        }
+                                    }
+                                    torrentPath != null -> {
+                                        text = originalText
+                                        showTorrentFileSelection(torrentPath) {
+                                            text = "Added"
+                                        }
+                                    }
+                                    else -> {
+                                        text = originalText
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "Could not add: ${errorReason ?: "unknown error"}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
                                 }
                             }
                         }.start()

@@ -55,6 +55,41 @@ object OnlineSearchAdder {
         return "This result has no magnet link or .torrent file"
     }
 
+    // Public mirror of RssManager.ResolvedItem/resolveItemForSelection, for
+    // a caller (the online search screen) that wants to resolve a result
+    // first and route it through the normal Add Magnet/Add Torrent File
+    // screens so the user can pick files/folder, rather than adding it to
+    // the engine immediately the way add() above does. Exactly one of
+    // magnet/torrentPath is non-null on success.
+    data class ResolvedItem(val magnet: String?, val torrentPath: String?)
+
+    // Resolves one search result to a magnet link or a downloaded
+    // .torrent file - the same resolution add() does above - without
+    // adding it to the engine. Blocking (may make an HTTP request), so
+    // call it from a background thread. Throws with a human-readable
+    // reason on failure, same as add().
+    @Throws(Exception::class)
+    fun resolveForSelection(context: Context, result: TorrentSearchResult): ResolvedItem {
+        val app = context.applicationContext
+
+        if (result.magnetUri.isNotBlank()) {
+            return ResolvedItem(result.magnetUri, null)
+        }
+
+        if (result.torrentUrl.isNotBlank()) {
+            val file = downloadTorrentFile(app, result.torrentUrl, result.name)
+            return ResolvedItem(null, file.absolutePath)
+        }
+
+        if (result.resultPageUrl.isNotBlank()) {
+            val magnet = resolveMagnetFromPage(result.resultPageUrl)
+                ?: throw Exception("Could not find a magnet link on this result's page")
+            return ResolvedItem(magnet, null)
+        }
+
+        throw Exception("This result has no magnet link or .torrent file")
+    }
+
     @Throws(Exception::class)
     private fun resolveMagnetFromPage(pageUrl: String): String? {
         val html = SearchHttp.get(pageUrl)
