@@ -298,7 +298,28 @@ class MainActivity : AppCompatActivity() {
 
         showMainScreen()
         startUiUpdates()
-        handleIncomingIntent(intent)
+
+        // Bug fix: if Android kills the app process in the background
+        // (low memory) while the task that originally opened a magnet/
+        // torrent-file link is still in Recents, reopening the app later
+        // makes Android recreate this Activity using that SAME original
+        // ACTION_VIEW intent - the system never learns about the
+        // setIntent() call below that cleared it the first time, because
+        // that only updates this in-memory Activity instance, not the
+        // system's own record of the task's launching intent. The result
+        // was the file-selection/metadata screen reappearing for a
+        // torrent that was already added, as if the link had just been
+        // tapped again - worse on a device where the app gets killed in
+        // the background more aggressively. savedInstanceState is
+        // Android's own, reliable signal for exactly this situation: it
+        // is null only on a genuinely fresh launch (a real tap on the
+        // link, or a first-ever open), and non-null whenever this is a
+        // recreation after the process died - so only act on the intent
+        // in the first case.
+        if (savedInstanceState == null) {
+            handleIncomingIntent(intent)
+        }
+
         ensureStorageAccess()
         ensureNotificationAccess()
     }
