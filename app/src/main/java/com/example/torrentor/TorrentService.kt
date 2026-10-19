@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -1711,9 +1712,61 @@ class TorrentService : Service() {
 
                     if (justCompleted) {
                         showTorrentCompleteNotification(extractTorrentName(line), hash)
+                        scanCompletedTorrentIntoMediaStore(index, hash)
                     }
                 }
             }
+        }
+    }
+
+    // Feature: register a torrent's downloaded files with the system's
+    // Media Store the moment it finishes, so apps that only browse their
+    // own media library (rather than opening whatever file/URI they're
+    // handed, as VLC and most general players do) can see and play them
+    // too. Read-only scan of files already on disk - doesn't move, copy,
+    // or alter anything, and a failure here never affects the download
+    // itself.
+    private fun scanCompletedTorrentIntoMediaStore(index: Int, hash: String) {
+        try {
+            val saveFolder = getSavedSaveFolder(hash) ?: getGlobalSaveFolder()
+
+            val fileData = try {
+                TorrentNative.getTorrentFilesByIndex(index)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (
+                fileData.isBlank() ||
+                fileData == "Metadata not ready" ||
+                fileData == "Invalid torrent" ||
+                fileData == "No files"
+            ) {
+                return
+            }
+
+            val paths = mutableListOf<String>()
+
+            for (line in fileData.split("\n")) {
+                if (line.isBlank()) continue
+
+                val parts = line.split("|", limit = 3)
+                if (parts.size < 2) continue
+
+                val name = parts[1]
+                val file = File(saveFolder, name)
+
+                if (file.exists() && file.isFile) {
+                    paths.add(file.absolutePath)
+                }
+            }
+
+            if (paths.isNotEmpty()) {
+                MediaScannerConnection.scanFile(this, paths.toTypedArray(), null, null)
+            }
+        } catch (_: Throwable) {
+            // Best-effort only - a scan failure shouldn't affect the
+            // torrent itself in any way.
         }
     }
 
