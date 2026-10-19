@@ -525,6 +525,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Feature: Select All / Select None, so bulk actions (Force Recheck
+        // Selected, Force Reannounce Selected, and the others below) don't
+        // require tapping every torrent's checkbox one at a time. "Select
+        // All" only selects torrents currently visible under the active
+        // filter/search, matching what updateTorrentList() itself shows.
+        val selectAllButton = Button(this).apply {
+            text = "Select All"
+            isEnabled = selectMode
+
+            setOnClickListener {
+                if (!selectMode) return@setOnClickListener
+
+                selectedTorrents.clear()
+                selectedTorrents.addAll(getVisibleTorrentIndexes())
+                updateTorrentList()
+            }
+        }
+
+        val selectNoneButton = Button(this).apply {
+            text = "Select None"
+            isEnabled = selectMode
+
+            setOnClickListener {
+                if (!selectMode) return@setOnClickListener
+
+                selectedTorrents.clear()
+                updateTorrentList()
+            }
+        }
+
         val forceRecheckSelected = Button(this).apply {
             text = "Force Recheck Selected"
             isEnabled = selectMode
@@ -956,6 +986,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(title)
         root.addView(themeButton)
         root.addView(selectModeButton)
+        root.addView(selectAllButton)
+        root.addView(selectNoneButton)
         root.addView(forceRecheckSelected)
         root.addView(forceReannounceSelected)
         root.addView(pauseSelected)
@@ -7733,6 +7765,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Bug fix: "Select All" (in Select Torrents mode) called this function
+    // but it didn't exist anywhere in the file, so the whole screen failed
+    // to compile and none of the Select All / Select None / Force Recheck
+    // Selected / Force Reannounce Selected / Remove Selected buttons ever
+    // made it into a build - the only way to act on more than one torrent
+    // was ticking each checkbox by hand. Mirrors the exact same
+    // filter/search logic updateTorrentList() uses, so "Select All" only
+    // selects torrents actually visible under the active filter right now.
+    private fun getVisibleTorrentIndexes(): Set<Int> {
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Exception) {
+            return emptySet()
+        }
+
+        if (status == "No torrents" || status == "Engine not ready") {
+            return emptySet()
+        }
+
+        val allLines = status.lines().filter { it.isNotBlank() }
+
+        return allLines.withIndex()
+            .filter { item -> torrentMatchesFilter(item.value) }
+            .map { it.index + 1 }
+            .toSet()
+    }
 
     private fun getSafeTorrentHashForAction(torrentIndex: Int): String {
         return try {

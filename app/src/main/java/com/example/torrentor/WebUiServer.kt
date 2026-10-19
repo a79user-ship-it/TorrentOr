@@ -2943,6 +2943,8 @@ object WebUiServer {
        the app itself loops over selectedTorrents. Hidden until Select
        Torrents is turned on. -->
   <div class="row" id="selectActionsRow" style="display:none;flex-wrap:wrap;">
+    <button class="secondary" onclick="selectAllVisibleTorrents()">Select All</button>
+    <button class="secondary" onclick="selectNoneTorrents()">Select None</button>
     <button class="secondary" onclick="batchAction('recheck')">Force Recheck Selected</button>
     <button class="secondary" onclick="batchAction('reannounce')">Force Reannounce Selected</button>
     <button class="secondary" onclick="batchAction('pause')">Pause Selected</button>
@@ -3450,6 +3452,25 @@ async function doRemove(index, deleteFiles) {
 
 function toggleTorrentSelected(index, checked) {
   if (checked) selectedTorrents.add(index); else selectedTorrents.delete(index);
+}
+
+// Feature: Select All / Select None, same as the app's own Select All /
+// Select None buttons. "Select All" only selects torrents actually
+// visible under the active filter/search right now - same list render()
+// builds cards from - not every torrent in the app.
+function selectAllVisibleTorrents() {
+  if (!selectMode) return;
+
+  const visible = sortTorrents(lastTorrents.filter(torrentMatchesFilter));
+  selectedTorrents = new Set(visible.map(function(t) { return t.index; }));
+  render(lastTorrents);
+}
+
+function selectNoneTorrents() {
+  if (!selectMode) return;
+
+  selectedTorrents.clear();
+  render(lastTorrents);
 }
 
 document.getElementById('selectModeBtn').addEventListener('click', function() {
