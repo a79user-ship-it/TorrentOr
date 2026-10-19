@@ -1762,7 +1762,10 @@ class TorrentService : Service() {
             }
 
             if (paths.isNotEmpty()) {
+                Log.d("TorrentOr", "MEDIA SCAN hash=$hash files=${paths.size} paths=$paths")
                 MediaScannerConnection.scanFile(this, paths.toTypedArray(), null, null)
+            } else {
+                Log.d("TorrentOr", "MEDIA SCAN hash=$hash - no existing files found to scan")
             }
         } catch (_: Throwable) {
             // Best-effort only - a scan failure shouldn't affect the
