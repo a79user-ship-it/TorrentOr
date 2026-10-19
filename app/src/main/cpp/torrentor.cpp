@@ -1437,6 +1437,18 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
             } else {
                 state = "Paused";
             }
+        } else if (
+                st.state == lt::torrent_status::checking_files ||
+                st.state == lt::torrent_status::checking_resume_data
+        ) {
+            // Bug fix: a force recheck on a torrent that was downloading
+            // (not paused, not yet seeding) used to fall straight into the
+            // "else" branch below and keep showing a frozen "Downloading"
+            // with its last-known percent, since libtorrent doesn't update
+            // progress while it's re-checking pieces on disk - it looked
+            // like the recheck did nothing. Reporting the real state here
+            // makes it visible again, same as before.
+            state = "Checking files";
         } else if (st.is_seeding) {
             state = "Seeding";
         } else {
