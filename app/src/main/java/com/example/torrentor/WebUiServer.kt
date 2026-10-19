@@ -20,7 +20,11 @@ import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.Security
 import java.security.cert.Certificate
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.KeyManager
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
@@ -409,7 +413,93 @@ object WebUiServer {
                     sendHtml(output, INDEX_HTML)
 
                 method == "GET" && path == "/api/status" ->
-                    sendJson(output, buildStatusJson())
+                    sendJson(output, buildStatusJson(context))
+
+                // Feature: "Global Statistics" - same "global_stats"
+                // prefs TorrentService writes to and MainActivity's own
+                // Statistics screen (buildQBittorrentGlobalStatisticsText)
+                // reads, so it's always the same numbers as the app.
+                method == "GET" && path == "/api/global_statistics" ->
+                    handleGlobalStatistics(context, output)
+
+                // Feature: "Execution Log" - same AppLog entries the
+                // app's own Execution Log screen shows (shared process,
+                // same in-memory/on-disk log), filtered by level.
+                method == "GET" && path == "/api/execution_log" ->
+                    handleExecutionLog(context, parseQueryParam(query, "levels"), output)
+
+                method == "POST" && path == "/api/execution_log/clear" ->
+                    handleExecutionLogClear(output)
+
+                // Feature: Online Search - same OnlineSearchManager/
+                // OnlineSearchAdder the app's own Online Search screen
+                // uses (same providers, same enabled/disabled prefs),
+                // just driven from the Web UI instead of an Activity.
+                method == "POST" && path == "/api/online_search" ->
+                    handleOnlineSearch(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/online_search_resolve" ->
+                    handleOnlineSearchResolve(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: RSS Feeds - same RssManager the app's own RSS
+                // screen uses (same stored feed list, cached items,
+                // auto-download settings and auto-refresh interval).
+                method == "GET" && path == "/api/rss/feeds" ->
+                    handleRssFeeds(context, output)
+
+                method == "POST" && path == "/api/rss/add_feed" ->
+                    handleRssAddFeed(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/rss/remove_feed" ->
+                    handleRssRemoveFeed(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/rss/refresh" ->
+                    handleRssRefresh(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/rss/set_auto" ->
+                    handleRssSetAuto(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "GET" && path == "/api/rss/items" ->
+                    handleRssItems(context, parseQueryParam(query, "feed"), output)
+
+                method == "POST" && path == "/api/rss/resolve_item" ->
+                    handleRssResolveItem(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/rss/mark_added" ->
+                    handleRssMarkAdded(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "GET" && path == "/api/rss/interval" ->
+                    handleRssGetInterval(context, output)
+
+                method == "POST" && path == "/api/rss/interval" ->
+                    handleRssSetInterval(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: Save Folder - same "save_folder_settings" (global
+                // default) and "torrent_save_folders" (per-torrent override)
+                // prefs the app's own Save Folder screen and per-torrent
+                // "Change Save Folder" button use. A per-torrent change
+                // always goes through moveTorrentStorage(), same as the app.
+                method == "GET" && path == "/api/save_folder" ->
+                    handleGetSaveFolderApi(context, output)
+
+                method == "POST" && path == "/api/save_folder" ->
+                    handleSetSaveFolder(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "GET" && path == "/api/torrent_save_folder" ->
+                    handleGetTorrentSaveFolder(context, parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "POST" && path == "/api/torrent_save_folder" ->
+                    handleSetTorrentSaveFolder(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: graphical folder picker for the Save Folder
+                // panels - lists subfolders of a path, and creates a new
+                // one, same plain File browsing as the app's own
+                // showFolderPickerDialog/showCreateFolderDialog.
+                method == "GET" && path == "/api/browse_folder" ->
+                    handleBrowseFolder(context, parseQueryParam(query, "path"), output)
+
+                method == "POST" && path == "/api/create_folder" ->
+                    handleCreateFolder(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
                 method == "POST" && path == "/api/add" ->
                     handleAdd(context, String(bodyBytes, StandardCharsets.UTF_8), output)
@@ -431,10 +521,75 @@ object WebUiServer {
                     handleAddMagnetMetadata(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
                 method == "GET" && (path == "/api/magnet_files" || path == "/api/torrent_files") ->
-                    handleFilesList(parseQueryParam(query, "index")?.toIntOrNull(), output)
+                    handleFilesList(context, parseQueryParam(query, "index")?.toIntOrNull(), output)
 
                 method == "POST" && path == "/api/confirm_magnet" ->
                     handleConfirmMagnet(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: the Web UI's "Peers" tab - the per-peer list
+                // (IP, client software, TCP/uTP, progress, speeds) for
+                // this whole torrent, same as MainActivity's own Peers
+                // screen. Reuses TorrentNative.getTorrentPeers as-is,
+                // which already returns a ready-to-display text block.
+                method == "GET" && path == "/api/torrent_peers" ->
+                    handleTorrentPeers(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                // Feature: "Trackers" and "Web Seeds" tabs - same text
+                // MainActivity's own Trackers/Web Seeds buttons show,
+                // built exactly the same way (same fallback chain).
+                method == "GET" && path == "/api/torrent_trackers" ->
+                    handleTorrentTrackers(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_webseeds" ->
+                    handleTorrentWebSeeds(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                // Feature: "Statistics" and "Comment" tabs - same text
+                // MainActivity's own Statistics/Comment buttons show.
+                method == "GET" && path == "/api/torrent_statistics" ->
+                    handleTorrentStatistics(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_comment" ->
+                    handleTorrentComment(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                // Feature: "General", "Pieces" and "Swarm Health" tabs -
+                // same text MainActivity's own General/Pieces/Swarm
+                // buttons show (General also mirrors showGeneralDetails'
+                // exact field list and sourcing, including the
+                // "torrent_dates" Added/Completed lines).
+                method == "GET" && path == "/api/torrent_general" ->
+                    handleTorrentGeneral(context, parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_pieces" ->
+                    handleTorrentPieces(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_swarmhealth" ->
+                    handleTorrentSwarmHealth(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                // Feature: Force Recheck / Force Reannounce - same native
+                // calls as MainActivity's own buttons. Fire-and-forget,
+                // like the app's own versions (no return value to report).
+                method == "POST" && path.startsWith("/api/force_recheck/") ->
+                    handleForceAction(
+                        "recheck",
+                        path.removePrefix("/api/force_recheck/").toIntOrNull(),
+                        output
+                    )
+
+                method == "POST" && path.startsWith("/api/force_reannounce/") ->
+                    handleForceAction(
+                        "reannounce",
+                        path.removePrefix("/api/force_reannounce/").toIntOrNull(),
+                        output
+                    )
+
+                // Feature: change which files download on a torrent that's
+                // already been added (not just at add-time) - the Web UI
+                // equivalent of MainActivity's "Apply File Selection"
+                // button in its Files tab. Reuses the exact same native
+                // call and the same "file_priorities" prefs file, so a
+                // selection made here is picked up by the app too.
+                method == "POST" && path == "/api/set_file_priorities" ->
+                    handleSetFilePriorities(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
                 // Feature: view/play/download a torrent's files from the
                 // browser. /stream is for inline viewing (a <video>/
@@ -566,7 +721,40 @@ object WebUiServer {
     // the app's own torrent list (see torrentor.cpp), rather than adding
     // a second native function - one source of truth for what a torrent
     // row says.
-    private fun buildStatusJson(): String {
+    // Mirrors MainActivity.unitMultiplier/extractTotalSizeBytes exactly -
+    // used for the Web UI's own "Size (Largest/Smallest First)" sort,
+    // same as the app's.
+    private fun unitMultiplier(unit: String): Double {
+        return when (unit.uppercase()) {
+            "B" -> 1.0
+            "KB" -> 1024.0
+            "MB" -> 1024.0 * 1024.0
+            "GB" -> 1024.0 * 1024.0 * 1024.0
+            "TB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+            else -> 1.0
+        }
+    }
+
+    private fun extractTotalSizeBytes(sizeField: String): Long {
+        val match = Regex(
+            """[\d.]+\s*(?:B|KB|MB|GB|TB)\s*/\s*([\d.]+)\s*(B|KB|MB|GB|TB)"""
+        ).find(sizeField) ?: return 0L
+
+        val value = match.groupValues[1].toDoubleOrNull() ?: return 0L
+        return (value * unitMultiplier(match.groupValues[2])).toLong()
+    }
+
+    // Mirrors MainActivity.getTorrentAddedTimestamp exactly - same
+    // "torrent_dates" prefs, same normalizeHash key - for the Web UI's
+    // own "Date Added" sort.
+    private fun getTorrentAddedTimestamp(context: Context, hash: String): Long {
+        val key = normalizeHash(hash)
+        if (key.isBlank()) return 0L
+        return context.getSharedPreferences("torrent_dates", Context.MODE_PRIVATE)
+            .getLong("added_$key", 0L)
+    }
+
+    private fun buildStatusJson(context: Context): String {
         val raw = try {
             TorrentNative.getDetailedStatus()
         } catch (_: Throwable) {
@@ -623,6 +811,47 @@ object WebUiServer {
                 if (!first) torrents.append(",")
                 first = false
 
+                // totalBytes backs the Web UI's own "Size" sort - same
+                // idea as MainActivity.extractTotalSizeBytes: parse the
+                // total (second) number out of the "x / y" size text.
+                val totalBytes = run {
+                    val match = Regex("([\\d.]+)\\s*(B|KB|MB|GB|TB)\\s*/\\s*([\\d.]+)\\s*(B|KB|MB|GB|TB)")
+                        .find(size)
+                    if (match == null) {
+                        0L
+                    } else {
+                        val amount = match.groupValues[3].toDoubleOrNull() ?: 0.0
+                        val unit = match.groupValues[4]
+                        val multiplier = when (unit) {
+                            "B" -> 1L
+                            "KB" -> 1024L
+                            "MB" -> 1024L * 1024L
+                            "GB" -> 1024L * 1024L * 1024L
+                            "TB" -> 1024L * 1024L * 1024L * 1024L
+                            else -> 1L
+                        }
+                        (amount * multiplier).toLong()
+                    }
+                }
+
+                // addedTimestamp backs the Web UI's own "Date Added"
+                // sort - same "torrent_dates" prefs (by hash) as
+                // MainActivity.getTorrentAddedTimestamp.
+                val addedTimestamp = run {
+                    val hash = try {
+                        TorrentNative.getTorrentHash(index)
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    val key = normalizeHash(hash)
+                    if (key.isBlank()) {
+                        0L
+                    } else {
+                        context.getSharedPreferences("torrent_dates", Context.MODE_PRIVATE)
+                            .getLong("added_$key", 0L)
+                    }
+                }
+
                 torrents.append("{")
                 torrents.append("\"index\":").append(index).append(",")
                 torrents.append("\"name\":").append(jsonString(name)).append(",")
@@ -633,7 +862,9 @@ object WebUiServer {
                 torrents.append("\"size\":").append(jsonString(size)).append(",")
                 torrents.append("\"seeds\":").append(jsonString(seeds)).append(",")
                 torrents.append("\"peers\":").append(jsonString(peers)).append(",")
-                torrents.append("\"eta\":").append(jsonString(eta))
+                torrents.append("\"eta\":").append(jsonString(eta)).append(",")
+                torrents.append("\"addedTimestamp\":").append(addedTimestamp).append(",")
+                torrents.append("\"totalBytes\":").append(totalBytes)
                 torrents.append("}")
 
                 index++
@@ -665,6 +896,564 @@ object WebUiServer {
     }
 
     // ---------------------------------------------------------- actions
+
+    // Feature: "Global Statistics" - mirrors MainActivity's
+    // buildQBittorrentGlobalStatisticsText/formatGiB exactly: reads the
+    // same "global_stats" prefs counters TorrentService accumulates
+    // (all_time_download/all_time_upload), same GiB formatting, same
+    // ratio calculation (0.0 when nothing's been downloaded yet).
+    private fun handleGlobalStatistics(context: Context, output: OutputStream) {
+        val prefs = context.getSharedPreferences("global_stats", Context.MODE_PRIVATE)
+
+        val allTimeDownload = prefs.getLong("all_time_download", 0L)
+        val allTimeUpload = prefs.getLong("all_time_upload", 0L)
+
+        val ratio = if (allTimeDownload > 0L) {
+            allTimeUpload.toDouble() / allTimeDownload.toDouble()
+        } else {
+            0.0
+        }
+
+        fun formatGiB(bytes: Long): String {
+            val gib = bytes.toDouble() / 1024.0 / 1024.0 / 1024.0
+            return String.format("%.2f GiB", gib)
+        }
+
+        val text = StringBuilder()
+            .append("User statistics\n\n")
+            .append("All-time upload:      ").append(formatGiB(allTimeUpload)).append("\n")
+            .append("All-time download:    ").append(formatGiB(allTimeDownload)).append("\n")
+            .append("All-time share ratio: ").append(String.format("%.2f", ratio))
+            .toString()
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    // Feature: "Execution Log" - same AppLog store the app's own
+    // Execution Log screen reads (AppLog.init is idempotent, so this is
+    // safe to call from here too), filtered by level the same way
+    // (shownLevels), formatted with the same AppLog.formatLine. levels
+    // is a comma-separated list like "info,warning,error"; missing or
+    // blank means all three, matching the screen's all-checked default.
+    private fun handleExecutionLog(context: Context, levelsParam: String?, output: OutputStream) {
+        AppLog.init(context.applicationContext)
+        AppLog.pullEngineLog()
+
+        val requested = (levelsParam ?: "info,warning,error")
+            .split(",")
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
+
+        val levels = AppLog.Level.values().filter {
+            requested.isEmpty() || requested.contains(it.name.lowercase())
+        }.toSet()
+
+        val text = AppLog.exportText(levels)
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    private fun handleExecutionLogClear(output: OutputStream) {
+        AppLog.clear()
+        AppLog.info("Execution log cleared")
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    // Feature: Online Search - runs every enabled provider (same
+    // registry/enabled-prefs as the app's own Online Search screen)
+    // through OnlineSearchManager.search, blocking this connection's own
+    // thread until onAllDone fires (each provider already runs on its
+    // own thread with its own timeout inside that function, so this
+    // never blocks longer than that - the extra margin below is just a
+    // safety net against a bug in that logic, not the normal case).
+    private fun handleOnlineSearch(context: Context, body: String, output: OutputStream) {
+        val query = extractJsonStringField(body, "query") ?: ""
+
+        if (query.isBlank()) {
+            sendJson(output, "{\"ok\":true,\"results\":[]}")
+            return
+        }
+
+        val latch = CountDownLatch(1)
+        var results: List<TorrentSearchResult> = emptyList()
+
+        OnlineSearchManager.search(
+            context,
+            query,
+            onProviderDone = {},
+            onAllDone = { found ->
+                results = found
+                latch.countDown()
+            }
+        )
+
+        val timeoutSeconds = try {
+            OnlineSearchManager.loadTimeoutSeconds(context)
+        } catch (_: Throwable) {
+            12
+        }
+
+        latch.await((timeoutSeconds + 15).toLong(), TimeUnit.SECONDS)
+
+        val json = StringBuilder("[")
+        var first = true
+
+        for (r in results) {
+            if (!first) json.append(",")
+            first = false
+
+            json.append("{")
+            json.append("\"name\":").append(jsonString(r.name)).append(",")
+            json.append("\"sourceName\":").append(jsonString(r.sourceName)).append(",")
+            json.append("\"sizeBytes\":").append(r.sizeBytes).append(",")
+            json.append("\"sizeText\":").append(jsonString(r.sizeText)).append(",")
+            json.append("\"seeders\":").append(r.seeders).append(",")
+            json.append("\"leechers\":").append(r.leechers).append(",")
+            json.append("\"publicationDate\":").append(jsonString(r.publicationDate)).append(",")
+            json.append("\"category\":").append(jsonString(r.category)).append(",")
+            json.append("\"infoHash\":").append(jsonString(r.infoHash)).append(",")
+            json.append("\"magnetUri\":").append(jsonString(r.magnetUri)).append(",")
+            json.append("\"torrentUrl\":").append(jsonString(r.torrentUrl)).append(",")
+            json.append("\"resultPageUrl\":").append(jsonString(r.resultPageUrl))
+            json.append("}")
+        }
+
+        json.append("]")
+        sendJson(output, "{\"ok\":true,\"results\":${json}}")
+    }
+
+    // Feature: resolves one online-search result to either a magnet
+    // link or a downloaded .torrent file (OnlineSearchAdder.
+    // resolveForSelection - the same resolution the app's own "Add"
+    // button does), WITHOUT adding it yet, so the browser can route it
+    // through the normal magnet/file-selection flow and let the user
+    // pick files before anything is actually added.
+    private fun handleOnlineSearchResolve(context: Context, body: String, output: OutputStream) {
+        val result = TorrentSearchResult(
+            name = extractJsonStringField(body, "name") ?: "",
+            sourceName = extractJsonStringField(body, "sourceName") ?: "",
+            magnetUri = extractJsonStringField(body, "magnetUri") ?: "",
+            torrentUrl = extractJsonStringField(body, "torrentUrl") ?: "",
+            resultPageUrl = extractJsonStringField(body, "resultPageUrl") ?: ""
+        )
+
+        val resolved = try {
+            OnlineSearchAdder.resolveForSelection(context, result)
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Could not resolve")}}")
+            return
+        }
+
+        val magnet = resolved.magnet
+        val torrentPath = resolved.torrentPath
+
+        if (!magnet.isNullOrBlank()) {
+            sendJson(output, "{\"ok\":true,\"kind\":\"magnet\",\"magnet\":${jsonString(magnet)}}")
+            return
+        }
+
+        if (!torrentPath.isNullOrBlank()) {
+            val fileData = try {
+                TorrentNative.getTorrentFiles(torrentPath)
+            } catch (e: Throwable) {
+                sendJson(output, "{\"ok\":false,\"error\":\"could not read resolved torrent file\"}")
+                return
+            }
+
+            if (fileData.isBlank() || fileData.startsWith("ERROR")) {
+                sendJson(output, "{\"ok\":false,\"error\":\"not a valid .torrent file\"}")
+                return
+            }
+
+            sendJson(
+                output,
+                "{\"ok\":true,\"kind\":\"torrent\",\"path\":${jsonString(torrentPath)},\"files\":${buildFilesJsonArray(fileData)}}"
+            )
+            return
+        }
+
+        sendJson(output, "{\"ok\":false,\"error\":\"This result has no magnet link or .torrent file\"}")
+    }
+
+    // ---------------------------------------------------------------------
+    // Feature: RSS Feeds - same RssManager the app's own RSS screen reads
+    // from and writes to (shared SharedPreferences), so feeds/items/auto-
+    // download settings and the auto-refresh interval stay in sync with
+    // the app no matter which one changed them last.
+
+    private fun handleRssFeeds(context: Context, output: OutputStream) {
+        val feeds = RssManager.loadFeeds(context)
+        val json = StringBuilder("[")
+
+        feeds.forEachIndexed { i, feed ->
+            if (i > 0) json.append(",")
+            val items = RssManager.loadItems(context, feed)
+            json.append("{")
+            json.append("\"feed\":").append(jsonString(feed)).append(",")
+            json.append("\"title\":").append(jsonString(RssManager.feedTitle(context, feed))).append(",")
+            json.append("\"lastRefresh\":").append(RssManager.lastFeedRefreshMillis(context, feed)).append(",")
+            json.append("\"autoDownload\":").append(RssManager.isAutoDownload(context, feed)).append(",")
+            json.append("\"itemCount\":").append(items.size)
+            json.append("}")
+        }
+        json.append("]")
+
+        val minutes = RssManager.loadIntervalMinutes(context)
+        sendJson(
+            output,
+            "{\"ok\":true,\"feeds\":$json,\"refreshing\":${RssManager.isRefreshing()}," +
+                "\"lastRefresh\":${RssManager.lastRefreshMillis(context)}," +
+                "\"intervalMinutes\":$minutes," +
+                "\"intervalLabel\":${jsonString(RssManager.intervalLabel(minutes))}}"
+        )
+    }
+
+    private fun handleRssAddFeed(context: Context, body: String, output: OutputStream) {
+        val url = (extractJsonStringField(body, "url") ?: "").trim()
+
+        if (url.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Enter a feed URL\"}")
+            return
+        }
+
+        val feeds = RssManager.loadFeeds(context)
+
+        if (feeds.contains(url)) {
+            sendJson(output, "{\"ok\":false,\"error\":\"That feed is already added\"}")
+            return
+        }
+
+        RssManager.saveFeeds(context, feeds + url)
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleRssRemoveFeed(context: Context, body: String, output: OutputStream) {
+        val feed = extractJsonStringField(body, "feed") ?: ""
+
+        if (feed.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing feed\"}")
+            return
+        }
+
+        RssManager.saveFeeds(context, RssManager.loadFeeds(context).filter { it != feed })
+        RssManager.removeFeedData(context, feed)
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleRssRefresh(context: Context, body: String, output: OutputStream) {
+        val feed = (extractJsonStringField(body, "feed") ?: "").trim()
+
+        val result = if (feed.isBlank()) {
+            RssManager.refreshAll(context, true)
+        } else {
+            RssManager.refreshFeed(context, feed, true)
+        }
+
+        if (result == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"A refresh is already running\"}")
+            return
+        }
+
+        sendJson(
+            output,
+            "{\"ok\":true,\"feedsOk\":${result.feedsOk},\"feedsFailed\":${result.feedsFailed}," +
+                "\"newItems\":${result.newItems}}"
+        )
+    }
+
+    private fun handleRssSetAuto(context: Context, body: String, output: OutputStream) {
+        val feed = extractJsonStringField(body, "feed") ?: ""
+        // Sent as the string "true"/"false", not a JSON boolean - same
+        // convention the rest of this file uses (e.g. confirm_magnet's
+        // "index") so extractJsonStringField (which only matches quoted
+        // string values) can read it.
+        val enabled = extractJsonStringField(body, "enabled") == "true"
+
+        if (feed.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing feed\"}")
+            return
+        }
+
+        RssManager.setAutoDownload(context, feed, enabled)
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleRssItems(context: Context, feed: String?, output: OutputStream) {
+        if (feed.isNullOrBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing feed\"}")
+            return
+        }
+
+        val items = RssManager.loadItems(context, feed)
+        val added = RssManager.addedKeys(context, feed)
+        val json = StringBuilder("[")
+
+        items.forEachIndexed { i, item ->
+            if (i > 0) json.append(",")
+            json.append("{")
+            json.append("\"title\":").append(jsonString(item.title)).append(",")
+            json.append("\"link\":").append(jsonString(item.link)).append(",")
+            json.append("\"sizeText\":").append(jsonString(item.sizeText)).append(",")
+            json.append("\"page\":").append(jsonString(item.page)).append(",")
+            json.append("\"webPage\":").append(jsonString(RssManager.itemWebPage(item))).append(",")
+            json.append("\"added\":").append(RssManager.isAdded(added, item))
+            json.append("}")
+        }
+        json.append("]")
+
+        sendJson(output, "{\"ok\":true,\"items\":$json}")
+    }
+
+    private fun rssItemFromBody(body: String): RssManager.RssItem {
+        return RssManager.RssItem(
+            title = extractJsonStringField(body, "title") ?: "",
+            link = extractJsonStringField(body, "link") ?: "",
+            sizeText = extractJsonStringField(body, "sizeText") ?: "",
+            page = extractJsonStringField(body, "page") ?: ""
+        )
+    }
+
+    // Mirrors handleOnlineSearchResolve above - resolves an RSS item to a
+    // magnet link or downloaded .torrent file WITHOUT adding it or marking
+    // it seen/added yet (RssManager.resolveItemForSelection), so the Web UI
+    // can route it into the same magnet/file-selection flow as everything
+    // else; markItemAdded below is only called once the user actually
+    // commits to downloading it.
+    private fun handleRssResolveItem(context: Context, body: String, output: OutputStream) {
+        val item = rssItemFromBody(body)
+
+        val resolved = try {
+            RssManager.resolveItemForSelection(context, item)
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Could not resolve")}}")
+            return
+        }
+
+        val magnet = resolved.magnet
+        val torrentPath = resolved.torrentPath
+
+        if (!magnet.isNullOrBlank()) {
+            sendJson(output, "{\"ok\":true,\"kind\":\"magnet\",\"magnet\":${jsonString(magnet)}}")
+            return
+        }
+
+        if (!torrentPath.isNullOrBlank()) {
+            val fileData = try {
+                TorrentNative.getTorrentFiles(torrentPath)
+            } catch (e: Throwable) {
+                sendJson(output, "{\"ok\":false,\"error\":\"could not read resolved torrent file\"}")
+                return
+            }
+
+            if (fileData.isBlank() || fileData.startsWith("ERROR")) {
+                sendJson(output, "{\"ok\":false,\"error\":\"not a valid .torrent file\"}")
+                return
+            }
+
+            sendJson(
+                output,
+                "{\"ok\":true,\"kind\":\"torrent\",\"path\":${jsonString(torrentPath)}," +
+                    "\"files\":${buildFilesJsonArray(fileData)}}"
+            )
+            return
+        }
+
+        sendJson(output, "{\"ok\":false,\"error\":\"This item has no magnet link or .torrent file\"}")
+    }
+
+    private fun handleRssMarkAdded(context: Context, body: String, output: OutputStream) {
+        val feed = extractJsonStringField(body, "feed") ?: ""
+
+        if (feed.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing feed\"}")
+            return
+        }
+
+        RssManager.markItemAdded(context, feed, rssItemFromBody(body))
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleRssGetInterval(context: Context, output: OutputStream) {
+        val minutes = RssManager.loadIntervalMinutes(context)
+        sendJson(
+            output,
+            "{\"ok\":true,\"minutes\":$minutes,\"label\":${jsonString(RssManager.intervalLabel(minutes))}}"
+        )
+    }
+
+    private fun handleRssSetInterval(context: Context, body: String, output: OutputStream) {
+        val minutes = extractJsonStringField(body, "minutes")?.toIntOrNull()
+
+        if (minutes == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad interval\"}")
+            return
+        }
+
+        RssManager.saveIntervalMinutes(context, minutes)
+        sendJson(output, "{\"ok\":true,\"label\":${jsonString(RssManager.intervalLabel(minutes))}}")
+    }
+
+    // ---------------------------------------------------------------------
+    // Feature: Save Folder - same "save_folder_settings" (global default,
+    // already read by getGlobalSaveFolder() above) and "torrent_save_
+    // folders" (per-torrent override) prefs the app's own Save Folder
+    // screen and per-torrent "Change Save Folder" button use, same
+    // per-torrent key shape (normalizeHash matches normalizeHashForDateKey).
+    // A per-torrent change always goes through moveTorrentStorage(), same
+    // as the app - never a plain prefs-only change on an existing torrent.
+
+    private fun torrentSaveFolderPrefs(context: Context) =
+        context.getSharedPreferences("torrent_save_folders", Context.MODE_PRIVATE)
+
+    private fun getSavedSaveFolderForHash(context: Context, hash: String): String? {
+        val key = normalizeHash(hash)
+        if (key.isBlank()) return null
+        return torrentSaveFolderPrefs(context).getString(key, null)
+    }
+
+    private fun handleGetSaveFolderApi(context: Context, output: OutputStream) {
+        sendJson(output, "{\"ok\":true,\"path\":${jsonString(getGlobalSaveFolder(context))}}")
+    }
+
+    private fun handleSetSaveFolder(context: Context, body: String, output: OutputStream) {
+        val path = (extractJsonStringField(body, "path") ?: "").trim()
+
+        if (path.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Enter a folder path\"}")
+            return
+        }
+
+        context.getSharedPreferences("save_folder_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("global_save_path", path)
+            .apply()
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleGetTorrentSaveFolder(context: Context, torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val path = getSavedSaveFolderForHash(context, hash) ?: getGlobalSaveFolder(context)
+        sendJson(output, "{\"ok\":true,\"path\":${jsonString(path)}}")
+    }
+
+    private fun handleSetTorrentSaveFolder(context: Context, body: String, output: OutputStream) {
+        val torrentIndex = extractJsonStringField(body, "index")?.toIntOrNull()
+        val path = (extractJsonStringField(body, "path") ?: "").trim()
+
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        if (path.isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Enter a folder path\"}")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (normalizeHash(hash).isBlank()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Torrent hash not available yet\"}")
+            return
+        }
+
+        val moved = try {
+            TorrentNative.moveTorrentStorage(hash, path)
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (moved) {
+            torrentSaveFolderPrefs(context).edit().putString(normalizeHash(hash), path).apply()
+            sendJson(output, "{\"ok\":true}")
+        } else {
+            sendJson(output, "{\"ok\":false,\"error\":\"Could not change save folder\"}")
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Feature: a graphical folder picker for the Web UI's Save Folder
+    // panels - same plain java.io.File browsing MainActivity's own
+    // showFolderPickerDialog does (no SAF/DocumentFile involved there
+    // either), just driven from a web page instead of an AlertDialog:
+    // list of subfolders to tap into, Up, and New Folder.
+
+    private fun handleBrowseFolder(context: Context, pathParam: String?, output: OutputStream) {
+        var dir = File(pathParam ?: "")
+        if (!dir.isDirectory) {
+            dir = File(getGlobalSaveFolder(context)).let {
+                if (it.isDirectory) it else File("/storage/emulated/0")
+            }
+        }
+
+        val subfolders = try {
+            dir.listFiles { f -> f.isDirectory }
+                ?.sortedBy { it.name.lowercase() }
+                ?.map { it.name }
+                ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+        val json = StringBuilder("[")
+        subfolders.forEachIndexed { i, name ->
+            if (i > 0) json.append(",")
+            json.append(jsonString(name))
+        }
+        json.append("]")
+
+        sendJson(
+            output,
+            "{\"ok\":true,\"path\":${jsonString(dir.absolutePath)}," +
+                "\"parent\":${dir.parentFile?.absolutePath?.let { jsonString(it) } ?: "null"}," +
+                "\"subfolders\":$json}"
+        )
+    }
+
+    private fun handleCreateFolder(context: Context, body: String, output: OutputStream) {
+        val parentPath = extractJsonStringField(body, "parentPath") ?: ""
+        val name = (extractJsonStringField(body, "name") ?: "").trim()
+
+        if (name.isBlank() || name.contains("/") || name.contains("\\")) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Enter a valid folder name\"}")
+            return
+        }
+
+        val parent = File(parentPath)
+        if (!parent.isDirectory) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Parent folder no longer exists\"}")
+            return
+        }
+
+        val newFolder = File(parent, name)
+
+        if (newFolder.exists() && !newFolder.isDirectory) {
+            sendJson(output, "{\"ok\":false,\"error\":\"A file with that name already exists\"}")
+            return
+        }
+
+        if (!newFolder.exists() && !newFolder.mkdirs()) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Could not create that folder\"}")
+            return
+        }
+
+        sendJson(output, "{\"ok\":true,\"path\":${jsonString(newFolder.absolutePath)}}")
+    }
 
     private fun handleAllAction(context: Context, action: String, output: OutputStream) {
         val intent = Intent(context, TorrentService::class.java)
@@ -801,6 +1590,35 @@ object WebUiServer {
             "magnet:?xt=urn:btih:$raw"
         }
 
+        val requestedHash = normalizeHash(extractHashFromMagnetInput(magnet))
+
+        // Bug fix: a magnet from a flaky source (RSS, Online Search) can
+        // sit forever with its metadata fetch never finishing - slow/dead
+        // peers, no seeders yet, etc. That half-added torrent is still
+        // hidden behind pendingMagnetHashes (see addMagnetPaused below),
+        // so hasTorrentHash() sees it as real and every later attempt to
+        // add the SAME item was refused as "Torrent already added" -
+        // forever, with no way to retry, which is what "torrents refuse
+        // to add" from RSS/Online Search traced back to. If this exact
+        // hash is still only pending (never confirmed), reconnect to
+        // that SAME paused torrent instead of refusing the add, so the
+        // Web UI can resume waiting on it.
+        if (requestedHash.isNotBlank() && pendingMagnetHashes.contains(requestedHash)) {
+            val existingIndex = findTorrentIndexByHash(requestedHash)
+
+            if (existingIndex != null) {
+                AppLog.info("Web UI: reconnecting to a pending magnet fetch (torrent $existingIndex)")
+                sendJson(output, "{\"ok\":true,\"index\":$existingIndex,\"magnet\":${jsonString(magnet)}}")
+                return
+            }
+
+            // The hash was marked pending but no such torrent exists any
+            // more (removed from elsewhere, or a transient lookup
+            // failure) - the flag is stale, so drop it and add fresh
+            // below rather than refusing forever.
+            pendingMagnetHashes.remove(requestedHash)
+        }
+
         // Same check MainActivity.showMagnetMetadataScreen does before
         // it ever calls addMagnetPaused - pulls the hash straight out of
         // the magnet text itself (no torrent handle needed yet) and
@@ -810,7 +1628,7 @@ object WebUiServer {
         // - so the real, already-running download stops the instant its
         // paused twin is created, and starts fetching metadata it
         // already has as if from scratch.
-        if (isTorrentAlreadyAddedByHash(extractHashFromMagnetInput(magnet))) {
+        if (isTorrentAlreadyAddedByHash(requestedHash)) {
             sendJson(output, "{\"ok\":false,\"alreadyAdded\":true,\"error\":\"Torrent already added\"}", status = "409 Conflict")
             return
         }
@@ -849,7 +1667,7 @@ object WebUiServer {
     // fetched) and /api/torrent_files (an already fully-added torrent,
     // for browsing/playing/downloading its files) - both just need "is
     // the file list ready, and if so what is it" for one torrent index.
-    private fun handleFilesList(torrentIndex: Int?, output: OutputStream) {
+    private fun handleFilesList(context: Context, torrentIndex: Int?, output: OutputStream) {
         if (torrentIndex == null) {
             sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
             return
@@ -870,17 +1688,371 @@ object WebUiServer {
             return
         }
 
-        sendJson(output, "{\"ok\":true,\"ready\":true,\"files\":${buildFilesJsonArrayWithProgress(torrentIndex, fileData)}}")
+        sendJson(output, "{\"ok\":true,\"ready\":true,\"files\":${buildFilesJsonArrayWithProgress(context, torrentIndex, fileData)}}")
+    }
+
+    // Feature: per-peer list (IP, client software, TCP/uTP, progress,
+    // speeds) for one torrent - MainActivity's own Peers screen in text
+    // form. TorrentNative.getTorrentPeers already returns a ready-to-
+    // display block ("Invalid torrent"/"No peers" included), so this is
+    // just wrapped as JSON rather than reparsed.
+    private fun handleTorrentPeers(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val text = try {
+            TorrentNative.getTorrentPeers(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load peers"
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    // Feature: "Trackers" tab - mirrors MainActivity's trackersButton
+    // exactly: try getTorrentTrackerStatus first (the detailed per-
+    // tracker status block), and only if that throws, fall back to the
+    // plain URL list (getTorrentTrackers) under a "Trackers\n\n" header;
+    // if even that throws, the same "Could not load tracker status".
+    private fun handleTorrentTrackers(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val text = try {
+            TorrentNative.getTorrentTrackerStatus(torrentIndex)
+        } catch (e: Throwable) {
+            try {
+                "Trackers\n\n" + TorrentNative.getTorrentTrackers(torrentIndex)
+            } catch (e2: Throwable) {
+                "Could not load tracker status"
+            }
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    // Feature: "Web Seeds" tab - mirrors MainActivity's webSeedsButton
+    // exactly: getTorrentWebSeeds under a "Web Seeds\n\n" header.
+    private fun handleTorrentWebSeeds(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val webSeeds = try {
+            TorrentNative.getTorrentWebSeeds(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load web seeds"
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString("Web Seeds\n\n" + webSeeds)}}")
+    }
+
+    // Feature: "Statistics" tab - mirrors MainActivity's statisticsButton
+    // exactly: TorrentNative.getTorrentStatistics as-is, no extra header.
+    private fun handleTorrentStatistics(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val stats = try {
+            TorrentNative.getTorrentStatistics(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load statistics"
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(stats)}}")
+    }
+
+    // Feature: "Comment" tab - mirrors MainActivity's commentButton
+    // exactly: "Torrent Comment\n\n" + getTorrentComment.
+    private fun handleTorrentComment(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val comment = try {
+            TorrentNative.getTorrentComment(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load torrent comment"
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString("Torrent Comment\n\n" + comment)}}")
+    }
+
+    // Feature: "Pieces" tab - mirrors MainActivity.showPiecesDetails
+    // exactly: getTorrentPieces, plus getTorrentPieceSize appended when
+    // it isn't blank.
+    private fun handleTorrentPieces(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val pieceInfo = try {
+            TorrentNative.getTorrentPieces(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load pieces"
+        }
+
+        val pieceSize = try {
+            TorrentNative.getTorrentPieceSize(torrentIndex)
+        } catch (e: Throwable) {
+            ""
+        }
+
+        val text = if (pieceSize.isBlank()) pieceInfo else "$pieceInfo\n\n$pieceSize"
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    // Feature: "Swarm Health" tab - mirrors MainActivity's swarmButton
+    // exactly: TorrentNative.getTorrentSwarmHealth as-is (it already
+    // carries its own "Swarm Health" heading).
+    private fun handleTorrentSwarmHealth(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val text = try {
+            TorrentNative.getTorrentSwarmHealth(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load swarm health"
+        }
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
+    }
+
+    // Feature: "General" tab - mirrors MainActivity.showGeneralDetails
+    // field-for-field: same native getters, same "torrent_dates" prefs
+    // lookup for Added/Completed (by hash, same normalizeHash this file
+    // already uses elsewhere - never list index), and the same status-
+    // line parsing (split on " • ") for the fields getDetailedStatus
+    // carries inline rather than through their own getter.
+    private fun handleTorrentGeneral(context: Context, torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val statusLine = run {
+            val status = try {
+                TorrentNative.getDetailedStatus()
+            } catch (e: Throwable) {
+                ""
+            }
+            val lines = status.lines().filter { it.isNotBlank() }
+            if (torrentIndex - 1 in lines.indices) lines[torrentIndex - 1] else ""
+        }
+
+        fun fieldAfterName(fieldIndex: Int): String =
+            statusLine.split(" • ").getOrNull(fieldIndex) ?: "--"
+
+        fun fieldByPrefix(prefix: String): String =
+            statusLine.split(" • ").firstOrNull { it.trim().startsWith(prefix) } ?: "--"
+
+        fun fieldByWord(word: String): String =
+            statusLine.split(" • ").firstOrNull { it.trim().startsWith(word) }
+                ?.removePrefix(word)?.trim() ?: "--"
+
+        fun eta(): String =
+            statusLine.split(" • ").firstOrNull { it.trim().startsWith("ETA:") }
+                ?.removePrefix("ETA:")?.trim() ?: "--"
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (e: Throwable) {
+            "Hash not ready"
+        }
+
+        fun formatTorrentDate(time: Long): String {
+            if (time <= 0L) return "Unknown"
+            return try {
+                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(time))
+            } catch (e: Throwable) {
+                "Unknown"
+            }
+        }
+
+        fun datePrefsValue(prefix: String): String {
+            val key = normalizeHash(hash)
+            if (key.isBlank()) return if (prefix == "completed") "Not completed" else "Unknown"
+            val time = context.getSharedPreferences("torrent_dates", Context.MODE_PRIVATE)
+                .getLong("${prefix}_$key", 0L)
+            if (prefix == "completed" && time <= 0L) return "Not completed"
+            return formatTorrentDate(time)
+        }
+
+        val addedDate = datePrefsValue("added")
+        val completedDate = datePrefsValue("completed")
+
+        val trackerHost = try {
+            TorrentNative.getTorrentTrackerHost(torrentIndex)
+        } catch (e: Throwable) {
+            "Unknown tracker"
+        }
+
+        val totalSize = try {
+            TorrentNative.getTorrentTotalSize(torrentIndex)
+        } catch (e: Throwable) {
+            "Size not ready"
+        }
+
+        val availability = try {
+            TorrentNative.getTorrentAvailability(torrentIndex)
+        } catch (e: Throwable) {
+            "Availability unknown"
+        }
+
+        val swarmHealth = try {
+            TorrentNative.getTorrentSwarmHealth(torrentIndex)
+        } catch (e: Throwable) {
+            "Swarm health unavailable"
+        }
+
+        val webSeedCount = try {
+            TorrentNative.getTorrentWebSeedCount(torrentIndex)
+        } catch (e: Throwable) {
+            "0"
+        }
+
+        val creatorRaw = try {
+            TorrentNative.getTorrentCreator(torrentIndex)
+        } catch (e: Throwable) {
+            "Unknown"
+        }
+
+        val creator = if (creatorRaw.isBlank() || creatorRaw.equals("Unknown", ignoreCase = true)) {
+            "Unknown (not in this torrent's metadata - magnet-added torrents usually can't carry this field, and some tools don't write it either)"
+        } else {
+            creatorRaw
+        }
+
+        val createdDateRaw = try {
+            TorrentNative.getTorrentCreationDate(torrentIndex)
+        } catch (e: Throwable) {
+            "Unknown"
+        }
+
+        val createdDate = if (createdDateRaw.isBlank() || createdDateRaw.equals("Unknown", ignoreCase = true)) {
+            "Unknown (same reason as Creator, above)"
+        } else {
+            createdDateRaw
+        }
+
+        val privateTorrent = try {
+            if (TorrentNative.isPrivateTorrent(torrentIndex)) "Yes" else "No"
+        } catch (e: Throwable) {
+            "Unknown"
+        }
+
+        val source = try {
+            TorrentNative.getTorrentSource(torrentIndex)
+        } catch (e: Throwable) {
+            "Unknown"
+        }
+
+        val encoding = try {
+            TorrentNative.getTorrentEncoding(torrentIndex)
+        } catch (e: Throwable) {
+            "Unknown"
+        }
+
+        val name = statusLine.split(" • ").firstOrNull()?.ifBlank { "Torrent $torrentIndex" } ?: "Torrent $torrentIndex"
+        val state = fieldAfterName(1)
+        val progress = fieldAfterName(2)
+        val download = fieldByPrefix("↓")
+        val upload = fieldByPrefix("↑")
+        val seeds = fieldByWord("Seeds")
+        val peers = fieldByWord("Peers")
+
+        val text = StringBuilder()
+        text.append("General\n\n")
+        text.append("Name:\n").append(name).append("\n\n")
+        text.append("Created with: ").append(creator).append("\n")
+        text.append("Created on: ").append(createdDate).append("\n\n")
+        text.append("Status: ").append(state).append("\n")
+        text.append("Progress: ").append(progress).append("\n")
+        text.append("Download: ").append(download).append("\n")
+        text.append("Upload: ").append(upload).append("\n")
+        text.append("Seeds: ").append(seeds).append("\n")
+        text.append("Peers: ").append(peers).append("\n")
+        text.append("ETA: ").append(eta()).append("\n")
+        text.append("Added: ").append(addedDate).append("\n")
+        text.append("Completed: ").append(completedDate).append("\n")
+        text.append(trackerHost).append("\n")
+        text.append("Total size: ").append(totalSize).append("\n")
+        text.append("Availability: ").append(availability).append("\n")
+        text.append(swarmHealth).append("\n")
+        text.append("Web Seeds: ").append(webSeedCount).append("\n")
+        text.append("Private: ").append(privateTorrent).append("\n")
+        text.append("Source: ").append(source).append("\n")
+        text.append("Encoding: ").append(encoding).append("\n")
+
+        sendJson(output, "{\"ok\":true,\"text\":${jsonString(text.toString())}}")
+    }
+
+    // Feature: Force Recheck / Force Reannounce - same native calls as
+    // MainActivity's own buttons (both fire-and-forget, no return value).
+    private fun handleForceAction(kind: String, torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        try {
+            if (kind == "recheck") {
+                TorrentNative.forceRecheck(torrentIndex)
+            } else {
+                TorrentNative.forceReannounce(torrentIndex)
+            }
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "failed")}}", status = "500 Internal Server Error")
+            return
+        }
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    // Reads the saved "selected_<hash>" CSV from the same "file_priorities"
+    // prefs file MainActivity.saveFileSelectionForTorrent/
+    // getSavedFileSelectionForTorrent use, so a selection made in the app
+    // or the Web UI is picked up by both. Null means "nothing saved yet",
+    // which (matching MainActivity.showFilesForOpening exactly) means
+    // every file defaults to selected.
+    private fun getSavedFileSelectionForTorrent(context: Context, torrentIndex: Int): Set<Int>? {
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val key = normalizeHash(hash)
+        if (key.isBlank()) return null
+
+        val value = context.getSharedPreferences("file_priorities", Context.MODE_PRIVATE)
+            .getString("selected_$key", null) ?: return null
+
+        return value.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
     }
 
     // Same shape as buildFilesJsonArray, plus each file's own download
-    // percent (TorrentNative.getTorrentFileProgress) - for the file
-    // browser's per-file progress bars. A magnet still mid file-
-    // selection (not yet confirmed - see pendingMagnetHashes) has no
-    // real progress yet, so this falls back to 0 for every file rather
-    // than failing the whole list; that's also what getTorrentFileProgress
-    // itself returns for anything it can't read right now.
-    private fun buildFilesJsonArrayWithProgress(torrentIndex: Int, fileData: String): String {
+    // percent (TorrentNative.getTorrentFileProgress), its Seeds/Peers
+    // swarm counts (TorrentNative.getTorrentFileSwarm - same figures
+    // MainActivity's Files tab shows inline per file), and whether it's
+    // currently selected to download (for the Web UI's own "Priority"
+    // tab checkboxes). A magnet still mid file-selection (not yet
+    // confirmed - see pendingMagnetHashes) has no real progress/swarm
+    // data yet, so this falls back to 0 for every file rather than
+    // failing the whole list; that's also what getTorrentFileProgress/
+    // getTorrentFileSwarm themselves return for anything not ready yet.
+    private fun buildFilesJsonArrayWithProgress(context: Context, torrentIndex: Int, fileData: String): String {
         val progressByIndex = mutableMapOf<Int, Int>()
 
         val progressData = try {
@@ -901,6 +2073,32 @@ object WebUiServer {
             progressByIndex[fileIndex] = percent
         }
 
+        data class Swarm(val seeds: Int, val peers: Int, val totalSeeds: Int, val totalPeers: Int)
+        val swarmByIndex = mutableMapOf<Int, Swarm>()
+
+        val swarmData = try {
+            TorrentNative.getTorrentFileSwarm(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        for (line in swarmData.split("\n")) {
+            if (line.isBlank()) continue
+
+            val parts = line.split("|", limit = 6)
+            if (parts.size < 6) continue
+
+            val fileIndex = parts[0].toIntOrNull() ?: continue
+            val seeds = parts[1].toIntOrNull() ?: 0
+            val peers = parts[2].toIntOrNull() ?: 0
+            val totalSeeds = parts[3].toIntOrNull() ?: 0
+            val totalPeers = parts[4].toIntOrNull() ?: 0
+
+            swarmByIndex[fileIndex] = Swarm(seeds, peers, totalSeeds, totalPeers)
+        }
+
+        val savedSelection = getSavedFileSelectionForTorrent(context, torrentIndex)
+
         val filesJson = StringBuilder("[")
         var first = true
 
@@ -914,6 +2112,8 @@ object WebUiServer {
             val name = parts[1]
             val size = parts[2].toLongOrNull() ?: 0L
             val percent = progressByIndex[index] ?: 0
+            val swarm = swarmByIndex[index]
+            val selected = savedSelection?.contains(index) ?: true
 
             if (!first) filesJson.append(",")
             first = false
@@ -922,11 +2122,56 @@ object WebUiServer {
                 .append(",\"name\":").append(jsonString(name))
                 .append(",\"size\":").append(size)
                 .append(",\"percent\":").append(percent)
+                .append(",\"seeds\":").append(swarm?.seeds ?: 0)
+                .append(",\"peers\":").append(swarm?.peers ?: 0)
+                .append(",\"totalSeeds\":").append(swarm?.totalSeeds ?: 0)
+                .append(",\"totalPeers\":").append(swarm?.totalPeers ?: 0)
+                .append(",\"selected\":").append(selected)
                 .append("}")
         }
 
         filesJson.append("]")
         return filesJson.toString()
+    }
+
+    // Feature: lets the user change which files download on a torrent
+    // that's already been added - not just at add-time. Mirrors
+    // MainActivity.applyFilePrioritySelectionNow exactly: sets the file
+    // priorities natively, then saves the selection to the same
+    // "file_priorities" prefs file (by hash, never list index - see the
+    // pendingMagnetHashes comment above for why) so it survives and is
+    // shared with the app's own Files tab.
+    private fun handleSetFilePriorities(context: Context, body: String, output: OutputStream) {
+        val index = extractJsonStringField(body, "index")?.toIntOrNull()
+        val selected = extractJsonStringField(body, "selected") ?: ""
+
+        if (index == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+            return
+        }
+
+        try {
+            TorrentNative.setTorrentFilePriorities(index, selected)
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Could not apply file selection")}}", status = "500 Internal Server Error")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(index)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val key = normalizeHash(hash)
+        if (key.isNotBlank()) {
+            context.getSharedPreferences("file_priorities", Context.MODE_PRIVATE)
+                .edit()
+                .putString("selected_$key", selected)
+                .commit()
+        }
+
+        sendJson(output, "{\"ok\":true}")
     }
 
     // Feature: confirms a magnet's file selection and actually starts
@@ -1209,6 +2454,37 @@ object WebUiServer {
             .lowercase()
     }
 
+    // Finds a torrent's index by its info-hash, used by
+    // handleAddMagnetMetadata to reconnect a repeated add to the SAME
+    // already-paused torrent instead of refusing it outright. Same
+    // per-index getTorrentHash() walk buildStatusJson's loop does,
+    // bounded by the same line count getDetailedStatus() gives it.
+    private fun findTorrentIndexByHash(hash: String): Int? {
+        if (hash.isBlank()) return null
+
+        val raw = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (raw.isBlank() || raw == "No torrents" || raw == "No active torrents") {
+            return null
+        }
+
+        for (index in 1..raw.lines().size) {
+            val candidate = try {
+                normalizeHash(TorrentNative.getTorrentHash(index))
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (candidate == hash) return index
+        }
+
+        return null
+    }
+
     // Mirrors MainActivity.isTorrentAlreadyAddedByHash().
     private fun isTorrentAlreadyAddedByHash(hash: String): Boolean {
         if (hash.isBlank()) {
@@ -1442,10 +2718,44 @@ object WebUiServer {
   .status { font-size: 12px; color: var(--text-dim); margin-top: 24px; text-align: center; }
   #uploadPanel { display: none; }
   #uploadFileList label { display: block; font-size: 14px; padding: 4px 0; }
+
+  /* Feature: every secondary screen (Files, the Add Torrent file
+     picker, and each of the feature panels below) opens as its own
+     full-screen "window" over the main torrent list instead of being
+     inserted inline into the page, which used to push the list further
+     and further down as more panels were opened. Nothing here changes
+     how a panel is shown/hidden (still plain style.display toggling,
+     same JS as before) - it only changes what "shown" looks like. */
+  .overlayPanel {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 30;
+    overflow: auto;
+    padding: 16px;
+    margin: 0;
+    border-radius: 0;
+  }
+  .overlayHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .overlayHeader .name { margin: 0; font-size: 17px; }
 </style>
 </head>
 <body>
   <h1>TorrentOr</h1>
+
+  <!-- Feature: the same modern download/upload speed graph as the app's
+       main screen (SpeedGraphView) - rounded dark panel, grid, two
+       smooth gradient-filled lines - fed by sampling /api/status every
+       second (summing every torrent's speed) rather than a native
+       history API, since the app's own graph works the same way. -->
+  <div id="speedSummary" class="meta" style="margin-bottom:4px;"></div>
+  <canvas id="speedGraphCanvas" width="600" height="110" style="width:100%;height:110px;display:block;margin-bottom:12px;"></canvas>
 
   <div class="row">
     <input type="text" id="magnetInput" placeholder="Paste magnet link or hash">
@@ -1457,7 +2767,7 @@ object WebUiServer {
     <button id="uploadBtn">Upload .torrent</button>
   </div>
 
-  <div class="card" id="uploadPanel">
+  <div class="overlayPanel" id="uploadPanel">
     <div class="name" id="uploadPanelTitle">Select files</div>
     <div class="actions">
       <button class="secondary" onclick="setAllFileChecks(true)">Select All</button>
@@ -1474,6 +2784,183 @@ object WebUiServer {
   <div class="row">
     <button id="pauseAllBtn" class="secondary">Pause All</button>
     <button id="resumeAllBtn" class="secondary">Resume All</button>
+    <button id="selectModeBtn" class="secondary">Select Torrents</button>
+    <button id="globalStatsBtn" class="secondary">Global Statistics</button>
+    <button id="executionLogBtn" class="secondary">Execution Log</button>
+    <button id="onlineSearchBtn" class="secondary">Online Search</button>
+    <button id="rssBtn" class="secondary">RSS Feeds</button>
+    <button id="saveFolderBtn" class="secondary">Save Folder</button>
+  </div>
+
+  <!-- Feature: "Save Folder" - same "save_folder_settings" prefs the
+       app's own Save Folder screen reads/writes. Only the global
+       default lives here; a per-torrent override is set from that
+       torrent's General tab (Change Save Folder), same split as the
+       app. Hidden until the Save Folder button is pressed. -->
+  <div class="overlayPanel" id="saveFolderPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Save Folder</div>
+      <button class="secondary" onclick="closeSaveFolder()">Close</button>
+    </div>
+    <div class="meta">New torrents are saved here by default, unless a different folder is picked for that one torrent.</div>
+    <div class="meta" id="saveFolderCurrent">Loading...</div>
+    <div class="actions">
+      <button id="saveFolderApplyBtn">Change Default Folder</button>
+    </div>
+  </div>
+
+  <!-- Feature: a graphical folder picker, same plain-folder browsing as
+       the app's own "Choose Folder" dialog (Up, tap a subfolder to go
+       in, New Folder, Use This Folder) - shared by the global Save
+       Folder panel above and the per-torrent "Change Save Folder"
+       control on a torrent's General tab. Hidden until opened. -->
+  <div id="folderPickerOverlay" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center;">
+    <div class="card" style="max-width:480px;width:92%;max-height:80vh;display:flex;flex-direction:column;">
+      <div class="name">Choose Folder</div>
+      <div class="row">
+        <button class="secondary" id="folderPickerBackBtn">&larr;</button>
+        <button class="secondary" id="folderPickerForwardBtn">&rarr;</button>
+      </div>
+      <div class="meta" id="folderPickerPath" style="word-break:break-all;"></div>
+      <div id="folderPickerList" style="overflow:auto;flex:1;margin:8px 0;"></div>
+      <div class="row">
+        <input type="text" id="folderPickerNewNameInput" placeholder="New folder name" style="display:none;">
+        <button class="secondary" id="folderPickerNewFolderBtn">New Folder</button>
+      </div>
+      <div class="actions">
+        <button id="folderPickerUseBtn">Use This Folder</button>
+        <button class="secondary" id="folderPickerCancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feature: "RSS Feeds" - same RssManager the app's own RSS screen
+       uses (feed list, cached items, auto-download, auto-refresh
+       interval). Hidden until the RSS Feeds button is pressed. -->
+  <div class="overlayPanel" id="rssPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">RSS Feeds</div>
+      <button class="secondary" onclick="closeRss()">Close</button>
+    </div>
+    <div class="row">
+      <select id="rssIntervalSelect"></select>
+      <button class="secondary" id="rssRefreshAllBtn">Refresh All</button>
+    </div>
+    <div class="meta" id="rssStatus"></div>
+    <div class="row">
+      <input type="text" id="rssFeedUrlInput" placeholder="RSS feed URL">
+      <button id="rssAddFeedBtn">Add Feed</button>
+    </div>
+    <div id="rssFeedList"></div>
+  </div>
+
+  <!-- Feature: search/filter/sort the torrents already in TorrentOr -
+       same idea as the app's own search box + Filter row + Sort button
+       on the main screen (searchQuery/activeFilter/sortMode), applied
+       client-side against the same /api/status fields the cards
+       themselves are built from. This is separate from Online Search
+       below, same distinction the app's own hint text makes. -->
+  <div class="row">
+    <input type="text" id="torrentSearchInput" placeholder="Search torrents already added">
+    <button class="secondary" id="clearTorrentSearchBtn">Clear</button>
+  </div>
+  <div class="row" style="flex-wrap:wrap;">
+    <button class="secondary" data-filter="All" onclick="setActiveFilter('All')">All</button>
+    <button class="secondary" data-filter="Downloading" onclick="setActiveFilter('Downloading')">Downloading</button>
+    <button class="secondary" data-filter="Seeding" onclick="setActiveFilter('Seeding')">Seeding</button>
+    <button class="secondary" data-filter="Paused" onclick="setActiveFilter('Paused')">Paused</button>
+    <button class="secondary" data-filter="Completed" onclick="setActiveFilter('Completed')">Completed</button>
+  </div>
+  <div class="row">
+    <select id="sortModeSelect">
+      <option value="None">Sort: None</option>
+      <option value="Name (A-Z)">Sort: Name (A-Z)</option>
+      <option value="Name (Z-A)">Sort: Name (Z-A)</option>
+      <option value="Size (Largest First)">Sort: Size (Largest First)</option>
+      <option value="Size (Smallest First)">Sort: Size (Smallest First)</option>
+      <option value="Date Added (Newest First)">Sort: Date Added (Newest First)</option>
+      <option value="Date Added (Oldest First)">Sort: Date Added (Oldest First)</option>
+      <option value="Progress (Highest First)">Sort: Progress (Highest First)</option>
+      <option value="Progress (Lowest First)">Sort: Progress (Lowest First)</option>
+      <option value="Status (A-Z)">Sort: Status (A-Z)</option>
+    </select>
+  </div>
+
+  <!-- Feature: "Execution Log" - same AppLog entries (INFO/WARNING/
+       ERROR) the app's own Execution Log screen shows. Hidden until
+       the Execution Log button is pressed. -->
+  <div class="overlayPanel" id="executionLogPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Execution Log</div>
+      <button class="secondary" onclick="closeExecutionLog()">Close</button>
+    </div>
+    <div class="row">
+      <label class="meta"><input type="checkbox" id="logLevelInfo" checked> INFO</label>
+      <label class="meta"><input type="checkbox" id="logLevelWarning" checked> WARNING</label>
+      <label class="meta"><input type="checkbox" id="logLevelError" checked> ERROR</label>
+      <label class="meta"><input type="checkbox" id="logAutoScroll" checked> Auto-scroll</label>
+    </div>
+    <pre id="executionLogText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>
+    <div class="actions">
+      <button class="secondary" onclick="clearExecutionLog()">Clear Log</button>
+      <button class="secondary" onclick="copyExecutionLog()">Copy Log</button>
+    </div>
+  </div>
+
+  <!-- Feature: Online Search - same multi-provider search as the app's
+       own Online Search screen (OnlineSearchManager), separate from the
+       "already added" search above. Hidden until the Online Search
+       button is pressed. -->
+  <div class="overlayPanel" id="onlineSearchPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Online Search</div>
+      <button class="secondary" onclick="closeOnlineSearch()">Close</button>
+    </div>
+    <div class="meta">Searches multiple providers. This is separate from the search box above, which only searches torrents already in TorrentOr.</div>
+    <div class="row">
+      <input type="text" id="onlineSearchInput" placeholder="Search online, e.g. ubuntu 24.04">
+      <button id="onlineSearchGoBtn">Search</button>
+    </div>
+    <div class="row">
+      <select id="onlineSearchSortSelect">
+        <option value="Seeders">Sort: Seeders</option>
+        <option value="Name">Sort: Name</option>
+        <option value="Size">Sort: Size</option>
+        <option value="Leechers">Sort: Leechers</option>
+        <option value="Age">Sort: Age</option>
+      </select>
+      <select id="onlineSearchProviderSelect">
+        <option value="All">Provider: All</option>
+      </select>
+    </div>
+    <div class="meta" id="onlineSearchStatus">Enter a search and tap Search.</div>
+    <div id="onlineSearchResults"></div>
+  </div>
+
+  <!-- Feature: multi-select batch actions - same five operations as the
+       app's own Select Torrents mode (Force Recheck/Reannounce/Pause/
+       Resume/Remove Selected), looping the same single-torrent calls
+       the app itself loops over selectedTorrents. Hidden until Select
+       Torrents is turned on. -->
+  <div class="row" id="selectActionsRow" style="display:none;flex-wrap:wrap;">
+    <button class="secondary" onclick="batchAction('recheck')">Force Recheck Selected</button>
+    <button class="secondary" onclick="batchAction('reannounce')">Force Reannounce Selected</button>
+    <button class="secondary" onclick="batchAction('pause')">Pause Selected</button>
+    <button class="secondary" onclick="batchAction('resume')">Resume Selected</button>
+    <button class="danger" onclick="batchRemove(false)">Remove Selected</button>
+    <button class="danger" onclick="batchRemove(true)">Remove Selected + Files</button>
+  </div>
+
+  <!-- Feature: "Global Statistics" - same all-time upload/download/
+       share ratio the app's own Statistics screen shows (same
+       "global_stats" prefs, written by TorrentService). Hidden until
+       the Global Statistics button is pressed. -->
+  <div class="overlayPanel" id="globalStatsPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Global Statistics</div>
+      <button class="secondary" onclick="closeGlobalStats()">Close</button>
+    </div>
+    <pre id="globalStatsText" style="white-space:pre-wrap;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>
   </div>
 
   <div id="list"></div>
@@ -1482,7 +2969,7 @@ object WebUiServer {
        every 1 second, which would destroy this panel (and interrupt any
        playing video/audio) once a second if it lived inside a torrent's
        card. Only one torrent's files are shown here at a time. -->
-  <div class="card" id="filesPanel" style="display:none;"></div>
+  <div class="overlayPanel" id="filesPanel" style="display:none;"></div>
 
   <div class="status" id="statusLine">Loading...</div>
 
@@ -1568,12 +3055,205 @@ async function refresh() {
     render(torrents);
     document.getElementById('statusLine').textContent =
       torrents.length + ' torrent(s) - updated ' + new Date().toLocaleTimeString();
+
+    sampleGlobalSpeed(torrents);
+
+    if (openFilesIndex !== null && openFilesTab === 'swarmhealth') {
+      sampleSwarmHealth(torrents, openFilesIndex);
+    }
+
+    if (globalStatsOpen) loadGlobalStatistics();
+    if (executionLogOpen) loadExecutionLog();
   } catch (e) {
     // Already reported above, or a transient network hiccup - leave the
     // list as it was rather than flashing it empty.
   }
 
   refreshFilesPanelProgress();
+}
+
+// ---------------------------------------------------------------------
+// Feature: modern speed graph (main screen) - same design as the app's
+// own SpeedGraphView: rounded dark panel, light grid, two smooth
+// gradient-filled lines (teal download / orange upload). The app builds
+// its history by sampling getDetailedStatus every second and summing
+// each torrent's own speed (extractTotalSpeedsFromStatus/
+// speedUnitToKb) - there's no native "speed history" API, so this does
+// the exact same thing against /api/status instead.
+// ---------------------------------------------------------------------
+
+let downloadSpeedHistory = [];
+let uploadSpeedHistory = [];
+const maxSpeedHistoryPoints = 30; // matches the app's own history length
+
+function speedUnitToKb(value, unit) {
+  switch (unit) {
+    case 'B': return value / 1024;
+    case 'KB': return value;
+    case 'MB': return value * 1024;
+    case 'GB': return value * 1024 * 1024;
+    case 'TB': return value * 1024 * 1024 * 1024;
+    default: return 0;
+  }
+}
+
+function parseSpeedToKb(speedStr) {
+  const match = /([\d.]+)\s*(B|KB|MB|GB|TB)\/s/.exec(speedStr || '');
+  if (!match) return 0;
+  return speedUnitToKb(parseFloat(match[1]), match[2]);
+}
+
+function sampleGlobalSpeed(torrents) {
+  let totalDown = 0;
+  let totalUp = 0;
+
+  torrents.forEach(function(t) {
+    totalDown += parseSpeedToKb(t.downSpeed);
+    totalUp += parseSpeedToKb(t.upSpeed);
+  });
+
+  downloadSpeedHistory.push(Math.max(0, Math.round(totalDown)));
+  uploadSpeedHistory.push(Math.max(0, Math.round(totalUp)));
+
+  while (downloadSpeedHistory.length > maxSpeedHistoryPoints) downloadSpeedHistory.shift();
+  while (uploadSpeedHistory.length > maxSpeedHistoryPoints) uploadSpeedHistory.shift();
+
+  const summaryEl = document.getElementById('speedSummary');
+  if (summaryEl) {
+    const latestDown = downloadSpeedHistory[downloadSpeedHistory.length - 1] || 0;
+    const latestUp = uploadSpeedHistory[uploadSpeedHistory.length - 1] || 0;
+    summaryEl.innerHTML =
+      '<span style="color:#4FD1C5;">&darr; ' + latestDown + ' KB/s</span>' +
+      '&nbsp;&nbsp;&nbsp;<span style="color:#F6AD55;">&uarr; ' + latestUp + ' KB/s</span>';
+  }
+
+  drawLineAreaGraph('speedGraphCanvas', downloadSpeedHistory, uploadSpeedHistory);
+}
+
+// Shared drawing routine for both the main speed graph and the per-
+// torrent Swarm Health graph - a direct Canvas port of the app's
+// SpeedGraphView.onDraw: rounded dark panel (#1C1F26), a light grid
+// (#2A2E37), and two gradient-filled lines, the second series drawn
+// first so the (usually larger) first series' line/fill sits on top.
+function drawLineAreaGraph(canvasId, seriesA, seriesB) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+
+  // Match the canvas's drawing buffer to its displayed CSS size so the
+  // graph stays crisp regardless of device pixel density/layout width.
+  const displayWidth = canvas.clientWidth || canvas.width;
+  const displayHeight = canvas.clientHeight || canvas.height;
+  if (canvas.width !== displayWidth) canvas.width = displayWidth;
+  if (canvas.height !== displayHeight) canvas.height = displayHeight;
+
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  if (!ctx || w <= 0 || h <= 0) return;
+
+  ctx.clearRect(0, 0, w, h);
+
+  const cornerRadius = 12;
+  ctx.fillStyle = '#1C1F26';
+  roundRectPath(ctx, 0, 0, w, h, cornerRadius);
+  ctx.fill();
+
+  ctx.strokeStyle = '#2A2E37';
+  ctx.lineWidth = 1;
+  const gridLines = 4;
+  for (let i = 0; i <= gridLines; i++) {
+    const y = Math.round((h * i) / gridLines) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  if (seriesA.length < 2 && seriesB.length < 2) return;
+
+  const maxValue = Math.max(1, ...seriesA, ...seriesB);
+
+  // seriesB (upload / peers) drawn first, seriesA (download / seeds) on top.
+  drawGraphSeries(ctx, seriesB, maxValue, w, h, '#F6AD55');
+  drawGraphSeries(ctx, seriesA, maxValue, w, h, '#4FD1C5');
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawGraphSeries(ctx, values, maxValue, w, h, colorHex) {
+  if (values.length < 2) return;
+
+  const topPadding = h * 0.12;
+  const usableHeight = h - topPadding;
+  const stepX = w / Math.max(1, values.length - 1);
+
+  function yFor(value) {
+    const ratio = value / maxValue;
+    return h - ratio * usableHeight;
+  }
+
+  const r = parseInt(colorHex.substr(1, 2), 16);
+  const g = parseInt(colorHex.substr(3, 2), 16);
+  const b = parseInt(colorHex.substr(5, 2), 16);
+
+  const gradient = ctx.createLinearGradient(0, 0, 0, h);
+  gradient.addColorStop(0, 'rgba(' + r + ',' + g + ',' + b + ',0.5)');
+  gradient.addColorStop(1, 'rgba(' + r + ',' + g + ',' + b + ',0)');
+
+  ctx.beginPath();
+  ctx.moveTo(0, h);
+  values.forEach(function(value, index) {
+    ctx.lineTo(index * stepX, yFor(value));
+  });
+  ctx.lineTo((values.length - 1) * stepX, h);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = colorHex;
+  values.forEach(function(value, index) {
+    const x = index * stepX;
+    const y = yFor(value);
+    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+// Feature: Swarm Health graph (per-torrent Seeds/Peers over the last
+// ~30 seconds) - the app's swarm health screen is text-only, so this is
+// new, drawn with the exact same style as the speed graph above for a
+// consistent look. Sampled from the same /api/status torrents array
+// refresh() already has, rather than a separate fetch.
+let swarmHealthHistory = { seeds: [], peers: [] };
+
+function sampleSwarmHealth(torrents, torrentIndex) {
+  const t = torrents.find(function(x) { return x.index === torrentIndex; });
+  const seeds = t ? (parseInt(t.seeds, 10) || 0) : 0;
+  const peers = t ? (parseInt(t.peers, 10) || 0) : 0;
+
+  swarmHealthHistory.seeds.push(seeds);
+  swarmHealthHistory.peers.push(peers);
+
+  while (swarmHealthHistory.seeds.length > maxSpeedHistoryPoints) swarmHealthHistory.seeds.shift();
+  while (swarmHealthHistory.peers.length > maxSpeedHistoryPoints) swarmHealthHistory.peers.shift();
+
+  drawSwarmHealthGraph();
+}
+
+function drawSwarmHealthGraph() {
+  drawLineAreaGraph('swarmHealthCanvas', swarmHealthHistory.seeds, swarmHealthHistory.peers);
 }
 
 // Keeps the open file browser's per-file percent/progress bars moving
@@ -1584,12 +3264,29 @@ async function refresh() {
 async function refreshFilesPanelProgress() {
   if (openFilesIndex === null) return;
 
+  if (openFilesTab === 'swarmhealth') {
+    // The seeds/peers sample itself is taken in refresh() (it already
+    // has the /api/status torrents array) - this just keeps the text
+    // block below the graph current.
+    loadTextTab(openFilesIndex, openFilesTab);
+    return;
+  }
+
+  if (openFilesTab === 'general' || openFilesTab === 'peers' || openFilesTab === 'pieces' ||
+      openFilesTab === 'trackers' || openFilesTab === 'webseeds' ||
+      openFilesTab === 'statistics' || openFilesTab === 'comment') {
+    loadTextTab(openFilesIndex, openFilesTab);
+    return;
+  }
+
   try {
     const res = await api('/api/torrent_files?index=' + openFilesIndex);
     const data = await res.json();
     if (openFilesIndex === null || !data.ok || !data.ready) return;
 
-    (data.files || []).forEach(function(f) {
+    lastFilesList = data.files || [];
+
+    lastFilesList.forEach(function(f) {
       const rowId = 'frow_' + openFilesIndex + '_' + f.index;
       const percent = Number(f.percent) || 0;
 
@@ -1598,22 +3295,128 @@ async function refreshFilesPanelProgress() {
 
       if (textEl) textEl.textContent = percent + '%';
       if (barEl) barEl.style.width = percent + '%';
+
+      // Priority tab's own Seeds/Peers text, if that tab happens to be
+      // open right now - checkboxes are never touched here, only this
+      // text, so an in-progress selection the user hasn't applied yet
+      // is never disturbed by this 1-second poll.
+      const swarmEl = document.getElementById('pswarm_' + rowId);
+      if (swarmEl) {
+        swarmEl.textContent = 'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
+          '  Peers ' + (Number(f.peers) || 0) + ' (' + (Number(f.totalPeers) || 0) + ')';
+      }
     });
   } catch (e) {
     // Transient hiccup - leave the panel as it was, same as the main list.
   }
 }
 
+// Feature: multi-select ("Select Torrents" mode) - same idea as the
+// app's own selectMode/selectedTorrents: a checkbox per card while the
+// mode is on, and a row of batch buttons (Force Recheck/Reannounce/
+// Pause/Resume/Remove Selected) that loop the same single-torrent
+// calls the app itself loops over selectedTorrents.
+let selectMode = false;
+let selectedTorrents = new Set();
+let lastTorrents = [];
+
+// Feature: search/filter/sort the torrents already in TorrentOr - same
+// idea as the app's own activeFilter/searchQuery/sortMode, applied here
+// against the same fields the cards are built from (state/percent/name/
+// addedTimestamp), mirroring torrentMatchesFilter()/sortTorrentLines().
+let activeFilter = 'All';
+let torrentSearchQuery = '';
+let sortMode = 'None';
+
+function setActiveFilter(filter) {
+  activeFilter = filter;
+  document.querySelectorAll('[data-filter]').forEach(function(btn) {
+    btn.style.outline = (btn.dataset.filter === filter) ? '2px solid #4FD1C5' : 'none';
+  });
+  render(lastTorrents);
+}
+
+// Mirrors torrentMatchesFilter(line): text search first, then status.
+function torrentMatchesFilter(t) {
+  const query = torrentSearchQuery.trim().toLowerCase();
+  if (query && t.name.toLowerCase().indexOf(query) === -1) return false;
+
+  const state = (t.state || '').toLowerCase();
+  const percent = t.percent || 0;
+
+  switch (activeFilter) {
+    case 'Downloading': return state.indexOf('downloading') !== -1;
+    case 'Seeding': return state.indexOf('seeding') !== -1;
+    case 'Paused': return state.indexOf('paused') !== -1;
+    case 'Completed': return percent >= 100 || state.indexOf('seeding') !== -1;
+    default: return true;
+  }
+}
+
+// Mirrors sortTorrentLines(): sorts a copy, never mutates t.index, so
+// every action button still targets the real native index regardless
+// of on-screen order. JS's Array.sort is stable in all current engines,
+// same guarantee the app gets from Kotlin's sortedBy/sortedByDescending.
+function sortTorrents(torrents) {
+  const list = torrents.slice();
+
+  function byName(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); }
+  function bySize(a, b) { return (a.totalBytes || 0) - (b.totalBytes || 0); }
+  function byAdded(a, b) { return (a.addedTimestamp || 0) - (b.addedTimestamp || 0); }
+  function byProgress(a, b) { return (a.percent || 0) - (b.percent || 0); }
+  function byStatus(a, b) { return (a.state || '').toLowerCase().localeCompare((b.state || '').toLowerCase()); }
+
+  switch (sortMode) {
+    case 'Name (A-Z)': return list.sort(byName);
+    case 'Name (Z-A)': return list.sort(function(a, b) { return byName(b, a); });
+    case 'Size (Largest First)': return list.sort(function(a, b) { return bySize(b, a); });
+    case 'Size (Smallest First)': return list.sort(bySize);
+    case 'Date Added (Newest First)': return list.sort(function(a, b) { return byAdded(b, a); });
+    case 'Date Added (Oldest First)': return list.sort(byAdded);
+    case 'Progress (Highest First)': return list.sort(function(a, b) { return byProgress(b, a); });
+    case 'Progress (Lowest First)': return list.sort(byProgress);
+    case 'Status (A-Z)': return list.sort(byStatus);
+    default: return list;
+  }
+}
+
+document.getElementById('torrentSearchInput').addEventListener('input', function(e) {
+  torrentSearchQuery = e.target.value;
+  render(lastTorrents);
+});
+document.getElementById('clearTorrentSearchBtn').addEventListener('click', function() {
+  torrentSearchQuery = '';
+  document.getElementById('torrentSearchInput').value = '';
+  render(lastTorrents);
+});
+document.getElementById('sortModeSelect').addEventListener('change', function(e) {
+  sortMode = e.target.value;
+  render(lastTorrents);
+});
+
 function render(torrents) {
+  lastTorrents = torrents;
   const list = document.getElementById('list');
+  const visible = sortTorrents(torrents.filter(torrentMatchesFilter));
 
   if (torrents.length === 0) {
     list.innerHTML = '<div class="empty">No torrents yet</div>';
     return;
   }
+  if (visible.length === 0) {
+    list.innerHTML = '<div class="empty">No torrents match the current filter/search</div>';
+    return;
+  }
 
-  list.innerHTML = torrents.map(function(t) {
+  list.innerHTML = visible.map(function(t) {
+    const checkbox = selectMode
+      ? '<label class="meta"><input type="checkbox" class="selectCheck" data-index="' + t.index + '"' +
+          (selectedTorrents.has(t.index) ? ' checked' : '') +
+          ' onchange="toggleTorrentSelected(' + t.index + ', this.checked)"> Select</label>'
+      : '';
+
     return '<div class="card">' +
+      checkbox +
       '<div class="name">' + escapeHtml(t.name) + '</div>' +
       '<div class="meta">' + escapeHtml(t.state) + ' &middot; ' + t.percent + '% &middot; &darr; ' +
         escapeHtml(t.downSpeed) + ' &middot; &uarr; ' + escapeHtml(t.upSpeed) + ' &middot; ' + escapeHtml(t.size) + '</div>' +
@@ -1645,10 +3448,878 @@ async function doRemove(index, deleteFiles) {
   refresh();
 }
 
+function toggleTorrentSelected(index, checked) {
+  if (checked) selectedTorrents.add(index); else selectedTorrents.delete(index);
+}
+
+document.getElementById('selectModeBtn').addEventListener('click', function() {
+  selectMode = !selectMode;
+  selectedTorrents.clear();
+  document.getElementById('selectModeBtn').textContent = selectMode ? 'Exit Select Mode' : 'Select Torrents';
+  document.getElementById('selectActionsRow').style.display = selectMode ? 'flex' : 'none';
+  render(lastTorrents);
+});
+
+// Force Recheck / Force Reannounce / Pause / Resume Selected - same
+// sequential loop over the selected indexes (ascending order; unlike
+// Remove, none of these change the list, so order doesn't matter) the
+// app itself does, just calling the Web UI's own single-torrent
+// endpoints instead of the native functions directly.
+async function batchAction(kind) {
+  if (selectedTorrents.size === 0) { alert('No torrents selected'); return; }
+
+  const endpoints = {
+    recheck: '/api/force_recheck/',
+    reannounce: '/api/force_reannounce/',
+    pause: '/api/pause/',
+    resume: '/api/resume/'
+  };
+  const endpoint = endpoints[kind];
+  if (!endpoint) return;
+
+  const indexes = Array.from(selectedTorrents).sort(function(a, b) { return a - b; });
+
+  for (const index of indexes) {
+    try { await api(endpoint + index, { method: 'POST' }); } catch (e) {}
+  }
+
+  selectedTorrents.clear();
+  selectMode = false;
+  document.getElementById('selectModeBtn').textContent = 'Select Torrents';
+  document.getElementById('selectActionsRow').style.display = 'none';
+  refresh();
+}
+
+// Remove Selected - same "Cancel / Remove Torrent Only / Remove +
+// Files" choice as the app's AlertDialog, and the same descending-
+// index removal order the app uses (sortedDescending), since removing
+// a lower index first would shift every index above it still waiting
+// to be removed in this same loop.
+async function batchRemove(deleteFiles) {
+  if (selectedTorrents.size === 0) { alert('No torrents selected'); return; }
+
+  const count = selectedTorrents.size;
+  const message = deleteFiles
+    ? 'Remove ' + count + ' selected torrent(s) AND delete their downloaded files?'
+    : 'Remove ' + count + ' selected torrent(s)? Downloaded files are kept.';
+  if (!confirm(message)) return;
+
+  const indexes = Array.from(selectedTorrents).sort(function(a, b) { return b - a; });
+
+  for (const index of indexes) {
+    try {
+      await api('/api/remove/' + index + (deleteFiles ? '?files=1' : ''), { method: 'POST' });
+    } catch (e) {}
+  }
+
+  selectedTorrents.clear();
+  selectMode = false;
+  document.getElementById('selectModeBtn').textContent = 'Select Torrents';
+  document.getElementById('selectActionsRow').style.display = 'none';
+  refresh();
+}
+
+// Each of Global Statistics/Execution Log/Online Search/Save Folder/RSS
+// Feeds is now a full-screen overlay (see .overlayPanel), so opening
+// one closes any other that's already open first - otherwise two could
+// end up stacked with no way to see or close the one underneath.
+function closeAllFeaturePanels() {
+  closeGlobalStats();
+  closeExecutionLog();
+  closeOnlineSearch();
+  closeSaveFolder();
+  closeRss();
+
+  // Also close the torrent Files/details overlay, same reason - it is
+  // itself a full-screen overlay (see .overlayPanel) that would
+  // otherwise sit stacked underneath whichever of the above opens next.
+  // The file-selection (Add) overlay is left alone here: it is an
+  // active add-in-progress the user may not want silently cancelled,
+  // and opening a feature panel over it, while unusual, does not
+  // corrupt anything.
+  if (openFilesIndex !== null) {
+    openFilesIndex = null;
+    const panel = document.getElementById('filesPanel');
+    panel.style.display = 'none';
+    panel.innerHTML = '';
+    notePanelsMaybeClosed();
+  }
+}
+
+// Feature: "Global Statistics" panel - same all-time upload/download/
+// share ratio text as the app's own Statistics screen, refreshed every
+// second alongside everything else while the panel is open.
+let globalStatsOpen = false;
+
+document.getElementById('globalStatsBtn').addEventListener('click', function() {
+  if (globalStatsOpen) closeGlobalStats(); else openGlobalStats();
+});
+
+function openGlobalStats() {
+  closeAllFeaturePanels();
+  globalStatsOpen = true;
+  document.getElementById('globalStatsPanel').style.display = 'block';
+  loadGlobalStatistics();
+}
+
+function closeGlobalStats() {
+  globalStatsOpen = false;
+  document.getElementById('globalStatsPanel').style.display = 'none';
+}
+
+async function loadGlobalStatistics() {
+  if (!globalStatsOpen) return;
+  try {
+    const res = await api('/api/global_statistics');
+    const data = await res.json();
+    const el = document.getElementById('globalStatsText');
+    if (el) el.textContent = (data.ok ? data.text : 'Could not load statistics') || 'No statistics yet';
+  } catch (e) {
+    const el = document.getElementById('globalStatsText');
+    if (el) el.textContent = 'Could not load statistics';
+  }
+}
+
+// ---------------------------------------------------------------------
+// Feature: "Execution Log" - same AppLog entries (INFO/WARNING/ERROR)
+// the app's own Execution Log screen shows, with the same level
+// checkboxes, Clear Log and Copy Log. Refreshed every second alongside
+// everything else while the panel is open, same as Global Statistics.
+let executionLogOpen = false;
+
+document.getElementById('executionLogBtn').addEventListener('click', function() {
+  if (executionLogOpen) closeExecutionLog(); else openExecutionLog();
+});
+
+function openExecutionLog() {
+  closeAllFeaturePanels();
+  executionLogOpen = true;
+  document.getElementById('executionLogPanel').style.display = 'block';
+  loadExecutionLog();
+}
+
+function closeExecutionLog() {
+  executionLogOpen = false;
+  document.getElementById('executionLogPanel').style.display = 'none';
+}
+
+['logLevelInfo', 'logLevelWarning', 'logLevelError'].forEach(function(id) {
+  document.getElementById(id).addEventListener('change', function() {
+    if (executionLogOpen) loadExecutionLog();
+  });
+});
+
+async function loadExecutionLog() {
+  if (!executionLogOpen) return;
+
+  const levels = [];
+  if (document.getElementById('logLevelInfo').checked) levels.push('info');
+  if (document.getElementById('logLevelWarning').checked) levels.push('warning');
+  if (document.getElementById('logLevelError').checked) levels.push('error');
+
+  const el = document.getElementById('executionLogText');
+  try {
+    const res = await api('/api/execution_log?levels=' + encodeURIComponent(levels.join(',')));
+    const data = await res.json();
+    if (el) {
+      el.textContent = (data.ok ? data.text : '') || 'No log entries yet';
+      if (document.getElementById('logAutoScroll').checked) el.scrollTop = el.scrollHeight;
+    }
+  } catch (e) {
+    if (el) el.textContent = 'Could not load execution log';
+  }
+}
+
+async function clearExecutionLog() {
+  if (!confirm('Clear the execution log?')) return;
+  try { await api('/api/execution_log/clear', { method: 'POST' }); } catch (e) {}
+  loadExecutionLog();
+}
+
+async function copyExecutionLog() {
+  const el = document.getElementById('executionLogText');
+  const text = el ? el.textContent : '';
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    alert('Could not copy - your browser may not allow clipboard access here');
+  }
+}
+
+// ---------------------------------------------------------------------
+// Feature: "Online Search" - same multi-provider search as the app's
+// own Online Search screen (OnlineSearchManager), with the same sort
+// modes, provider filter, and Add flow that resolves a result (without
+// adding it yet) and routes it into the SAME magnet/file-selection
+// flow as every other add path in this Web UI.
+let onlineSearchResults = [];
+let onlineSearchOpen = false;
+
+document.getElementById('onlineSearchBtn').addEventListener('click', function() {
+  if (onlineSearchOpen) closeOnlineSearch(); else openOnlineSearch();
+});
+
+function openOnlineSearch() {
+  closeAllFeaturePanels();
+  onlineSearchOpen = true;
+  document.getElementById('onlineSearchPanel').style.display = 'block';
+}
+
+function closeOnlineSearch() {
+  onlineSearchOpen = false;
+  document.getElementById('onlineSearchPanel').style.display = 'none';
+}
+
+document.getElementById('onlineSearchGoBtn').addEventListener('click', runOnlineSearch);
+document.getElementById('onlineSearchInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') runOnlineSearch();
+});
+document.getElementById('onlineSearchSortSelect').addEventListener('change', renderOnlineSearchResults);
+document.getElementById('onlineSearchProviderSelect').addEventListener('change', renderOnlineSearchResults);
+
+async function runOnlineSearch() {
+  const query = document.getElementById('onlineSearchInput').value.trim();
+  const statusEl = document.getElementById('onlineSearchStatus');
+  if (!query) { statusEl.textContent = 'Enter a search and tap Search.'; return; }
+
+  statusEl.textContent = 'Searching...';
+  document.getElementById('onlineSearchResults').innerHTML = '';
+
+  try {
+    const res = await api('/api/online_search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query })
+    });
+    const data = await res.json();
+    onlineSearchResults = (data.ok ? data.results : []) || [];
+
+    const providerSelect = document.getElementById('onlineSearchProviderSelect');
+    const current = providerSelect.value;
+    const providers = Array.from(new Set(onlineSearchResults.map(function(r) { return r.sourceName; }))).sort();
+    providerSelect.innerHTML = '<option value="All">Provider: All</option>' +
+      providers.map(function(p) { return '<option value="' + escapeHtml(p) + '">Provider: ' + escapeHtml(p) + '</option>'; }).join('');
+    providerSelect.value = providers.indexOf(current) !== -1 ? current : 'All';
+
+    statusEl.textContent = onlineSearchResults.length + ' result(s) for "' + query + '"';
+    renderOnlineSearchResults();
+  } catch (e) {
+    statusEl.textContent = 'Search failed';
+  }
+}
+
+// Mirrors the app's applySortAndFilter(): provider filter first, then
+// one of Name/Size/Leechers/Age/Seeders (default Seeders).
+function renderOnlineSearchResults() {
+  const providerFilter = document.getElementById('onlineSearchProviderSelect').value;
+  const sort = document.getElementById('onlineSearchSortSelect').value;
+
+  let list = onlineSearchResults.slice();
+  if (providerFilter !== 'All') list = list.filter(function(r) { return r.sourceName === providerFilter; });
+
+  switch (sort) {
+    case 'Name':
+      list.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
+      break;
+    case 'Size':
+      list.sort(function(a, b) { return (b.sizeBytes || 0) - (a.sizeBytes || 0); });
+      break;
+    case 'Leechers':
+      list.sort(function(a, b) { return (b.leechers || -1) - (a.leechers || -1); });
+      break;
+    case 'Age':
+      list.sort(function(a, b) { return (b.publicationDate || '').localeCompare(a.publicationDate || ''); });
+      break;
+    default: // Seeders
+      list.sort(function(a, b) { return (b.seeders || -1) - (a.seeders || -1); });
+  }
+
+  const container = document.getElementById('onlineSearchResults');
+  if (list.length === 0) {
+    container.innerHTML = '<div class="empty">No results</div>';
+    return;
+  }
+
+  container.innerHTML = list.map(function(r, i) {
+    const bits = [];
+    if (r.sizeText) bits.push(escapeHtml(r.sizeText));
+    if (r.seeders >= 0) bits.push('Seeds ' + r.seeders);
+    if (r.leechers >= 0) bits.push('Peers ' + r.leechers);
+    if (r.sourceName) bits.push(escapeHtml(r.sourceName));
+    if (r.publicationDate) bits.push(escapeHtml(r.publicationDate));
+
+    const canAdd = !!(r.magnetUri || r.torrentUrl || r.resultPageUrl);
+
+    return '<div class="card">' +
+      '<div class="name">' + escapeHtml(r.name) + '</div>' +
+      '<div class="meta">' + bits.join(' &middot; ') + '</div>' +
+      '<div class="actions">' +
+        '<button' + (canAdd ? '' : ' disabled') + ' onclick="onlineSearchAdd(' + i + ')">Add</button>' +
+        (r.resultPageUrl ? '<button class="secondary" onclick="openOnlineSearchResultPage(' + i + ')">Open Page</button>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  // Stash the filtered/sorted list so onlineSearchAdd(i) can look up the
+  // same result the user is looking at, regardless of provider filter
+  // or sort order.
+  window.__onlineSearchVisible = list;
+}
+
+// Looked up by index rather than inlining the URL into an onclick
+// attribute - the URL can itself contain a double quote (or just needs
+// JSON.stringify, which emits one), which would otherwise terminate
+// the onclick="..." attribute early and corrupt that card's HTML (and
+// push every button after it out of place too).
+function openOnlineSearchResultPage(i) {
+  const result = (window.__onlineSearchVisible || [])[i];
+  if (!result || !result.resultPageUrl) return;
+  window.open(result.resultPageUrl, '_blank');
+}
+
+async function onlineSearchAdd(i) {
+  const result = (window.__onlineSearchVisible || [])[i];
+  if (!result) return;
+
+  try {
+    const res = await api('/api/online_search_resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: result.name,
+        sourceName: result.sourceName,
+        magnetUri: result.magnetUri,
+        torrentUrl: result.torrentUrl,
+        resultPageUrl: result.resultPageUrl
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      alert('Could not add: ' + (data.error || 'unknown error'));
+      return;
+    }
+
+    if (data.kind === 'magnet') {
+      await addMagnetByValue(data.magnet);
+    } else if (data.kind === 'torrent') {
+      openUploadFilesForPath(data.path, data.files || []);
+    }
+  } catch (e) {
+    alert('Could not add result');
+  }
+}
+
+// ---------------------------------------------------------------------
+// Feature: "Save Folder" - same "save_folder_settings" prefs the app's
+// own Save Folder screen reads/writes. Changing it only affects new
+// torrents, same as the app (a per-torrent override is set from that
+// torrent's General tab instead - see changeTorrentSaveFolder below).
+let saveFolderOpen = false;
+let saveFolderCurrentPath = '';
+
+document.getElementById('saveFolderBtn').addEventListener('click', function() {
+  if (saveFolderOpen) closeSaveFolder(); else openSaveFolder();
+});
+
+function openSaveFolder() {
+  closeAllFeaturePanels();
+  saveFolderOpen = true;
+  document.getElementById('saveFolderPanel').style.display = 'block';
+  loadSaveFolder();
+}
+
+function closeSaveFolder() {
+  saveFolderOpen = false;
+  document.getElementById('saveFolderPanel').style.display = 'none';
+}
+
+async function loadSaveFolder() {
+  const el = document.getElementById('saveFolderCurrent');
+  try {
+    const res = await api('/api/save_folder');
+    const data = await res.json();
+    saveFolderCurrentPath = data.ok ? data.path : '';
+    el.textContent = 'Current default folder: ' + saveFolderCurrentPath;
+  } catch (e) {
+    el.textContent = 'Could not load the current folder';
+  }
+}
+
+document.getElementById('saveFolderApplyBtn').addEventListener('click', function() {
+  openFolderPicker(saveFolderCurrentPath, async function(path) {
+    try {
+      const res = await api('/api/save_folder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: path })
+      });
+      const data = await res.json();
+      if (!data.ok) { alert('Could not update: ' + (data.error || 'unknown error')); return; }
+      alert('Default save folder updated. This only affects new torrents.');
+      loadSaveFolder();
+    } catch (e) {
+      alert('Could not update the save folder');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------
+// Feature: a graphical folder picker - same plain folder browsing as
+// the app's own "Choose Folder" dialog (Up row, tap a subfolder to go
+// in, Back/Forward history, New Folder), shared by the global Save
+// Folder panel above and the per-torrent "Change Save Folder" control.
+let folderPickerCurrentPath = '';
+let folderPickerOnPicked = null;
+let folderPickerBackStack = [];
+let folderPickerForwardStack = [];
+// Rows are looked up by index rather than inlining the folder path into
+// the onclick="..." attribute - a path can contain characters (and
+// JSON.stringify always adds its own quotes) that would terminate the
+// attribute early and corrupt the picker's HTML, the same bug fixed in
+// Online Search's "Open Page" button and the RSS item list.
+let folderPickerRowPaths = [];
+
+function openFolderPicker(startPath, onPicked) {
+  folderPickerOnPicked = onPicked;
+  folderPickerBackStack = [];
+  folderPickerForwardStack = [];
+  document.getElementById('folderPickerOverlay').style.display = 'flex';
+  document.getElementById('folderPickerNewNameInput').style.display = 'none';
+  navigateFolderPicker(startPath || '');
+}
+
+function closeFolderPicker() {
+  document.getElementById('folderPickerOverlay').style.display = 'none';
+  folderPickerOnPicked = null;
+}
+
+async function navigateFolderPicker(path) {
+  try {
+    const res = await api('/api/browse_folder?path=' + encodeURIComponent(path));
+    const data = await res.json();
+    if (!data.ok) return;
+
+    folderPickerCurrentPath = data.path;
+    document.getElementById('folderPickerPath').textContent = data.path;
+
+    const list = document.getElementById('folderPickerList');
+    const rows = [];
+    folderPickerRowPaths = [];
+
+    if (data.parent) {
+      folderPickerRowPaths.push(data.parent);
+      rows.push('<button class="secondary" style="display:block;width:100%;margin-bottom:4px;" onclick="folderPickerGoToIndex(' + (folderPickerRowPaths.length - 1) + ')">.. (Up)</button>');
+    }
+
+    if ((data.subfolders || []).length === 0) {
+      rows.push('<div class="meta">No subfolders here</div>');
+    } else {
+      data.subfolders.forEach(function(name) {
+        const childPath = data.path.replace(/\/+$/, '') + '/' + name;
+        folderPickerRowPaths.push(childPath);
+        rows.push('<button class="secondary" style="display:block;width:100%;margin-bottom:4px;text-align:left;" onclick="folderPickerGoToIndex(' + (folderPickerRowPaths.length - 1) + ')">' + escapeHtml(name) + '</button>');
+      });
+    }
+
+    list.innerHTML = rows.join('');
+
+    document.getElementById('folderPickerBackBtn').disabled = folderPickerBackStack.length === 0;
+    document.getElementById('folderPickerForwardBtn').disabled = folderPickerForwardStack.length === 0;
+  } catch (e) {}
+}
+
+function folderPickerGoToIndex(i) {
+  const path = folderPickerRowPaths[i];
+  if (path === undefined) return;
+  folderPickerBackStack.push(folderPickerCurrentPath);
+  folderPickerForwardStack = [];
+  navigateFolderPicker(path);
+}
+
+// Still used by the New Folder flow, which has the freshly-created
+// path straight from the server response rather than from a rendered
+// row, so there is no HTML attribute involved to corrupt.
+function folderPickerGoTo(path) {
+  folderPickerBackStack.push(folderPickerCurrentPath);
+  folderPickerForwardStack = [];
+  navigateFolderPicker(path);
+}
+
+document.getElementById('folderPickerBackBtn').addEventListener('click', function() {
+  if (folderPickerBackStack.length === 0) return;
+  folderPickerForwardStack.push(folderPickerCurrentPath);
+  navigateFolderPicker(folderPickerBackStack.pop());
+});
+
+document.getElementById('folderPickerForwardBtn').addEventListener('click', function() {
+  if (folderPickerForwardStack.length === 0) return;
+  folderPickerBackStack.push(folderPickerCurrentPath);
+  navigateFolderPicker(folderPickerForwardStack.pop());
+});
+
+document.getElementById('folderPickerNewFolderBtn').addEventListener('click', async function() {
+  const input = document.getElementById('folderPickerNewNameInput');
+
+  if (input.style.display === 'none') {
+    input.style.display = '';
+    input.value = '';
+    input.focus();
+    return;
+  }
+
+  const name = input.value.trim();
+  if (!name) return;
+
+  try {
+    const res = await api('/api/create_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parentPath: folderPickerCurrentPath, name: name })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert('Could not create folder: ' + (data.error || 'unknown error')); return; }
+    input.style.display = 'none';
+    folderPickerGoTo(data.path);
+  } catch (e) {
+    alert('Could not create folder');
+  }
+});
+
+document.getElementById('folderPickerUseBtn').addEventListener('click', function() {
+  const onPicked = folderPickerOnPicked;
+  const path = folderPickerCurrentPath;
+  closeFolderPicker();
+  if (onPicked) onPicked(path);
+});
+
+document.getElementById('folderPickerCancelBtn').addEventListener('click', closeFolderPicker);
+
+// ---------------------------------------------------------------------
+// Feature: RSS Feeds - same RssManager the app's own RSS screen uses
+// (feed list, cached items, auto-download, auto-refresh interval), so
+// anything done here shows up in the app too and vice versa.
+let rssOpen = false;
+let rssFeeds = [];
+let rssOpenItemsFeed = null;
+let rssItemsByFeed = {};
+
+const RSS_INTERVAL_OPTIONS = [0, 5, 15, 30, 60, 180, 360, 720, 1440];
+const RSS_INTERVAL_LABELS = {
+  0: 'Off', 5: 'Every 5 minutes', 15: 'Every 15 minutes', 30: 'Every 30 minutes',
+  60: 'Every hour', 180: 'Every 3 hours', 360: 'Every 6 hours', 720: 'Every 12 hours', 1440: 'Every day'
+};
+
+(function initRssIntervalSelect() {
+  const select = document.getElementById('rssIntervalSelect');
+  select.innerHTML = RSS_INTERVAL_OPTIONS.map(function(m) {
+    return '<option value="' + m + '">' + RSS_INTERVAL_LABELS[m] + '</option>';
+  }).join('');
+})();
+
+document.getElementById('rssBtn').addEventListener('click', function() {
+  if (rssOpen) closeRss(); else openRss();
+});
+
+function openRss() {
+  closeAllFeaturePanels();
+  rssOpen = true;
+  document.getElementById('rssPanel').style.display = 'block';
+  loadRssFeeds();
+}
+
+function closeRss() {
+  rssOpen = false;
+  document.getElementById('rssPanel').style.display = 'none';
+}
+
+document.getElementById('rssIntervalSelect').addEventListener('change', async function(e) {
+  try {
+    await api('/api/rss/interval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ minutes: String(e.target.value) })
+    });
+  } catch (e) {}
+});
+
+document.getElementById('rssRefreshAllBtn').addEventListener('click', async function() {
+  document.getElementById('rssStatus').textContent = 'Refreshing...';
+  try {
+    const res = await api('/api/rss/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: '' })
+    });
+    const data = await res.json();
+    document.getElementById('rssStatus').textContent = data.ok
+      ? (data.feedsOk + ' feed(s) ok, ' + data.feedsFailed + ' failed, ' + data.newItems + ' new item(s)')
+      : (data.error || 'Refresh failed');
+  } catch (e) {
+    document.getElementById('rssStatus').textContent = 'Refresh failed';
+  }
+  loadRssFeeds();
+});
+
+document.getElementById('rssAddFeedBtn').addEventListener('click', async function() {
+  const input = document.getElementById('rssFeedUrlInput');
+  const url = input.value.trim();
+  if (!url) return;
+
+  try {
+    const res = await api('/api/rss/add_feed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert('Could not add feed: ' + (data.error || 'unknown error')); return; }
+    input.value = '';
+    loadRssFeeds();
+  } catch (e) {
+    alert('Could not add feed');
+  }
+});
+
+async function loadRssFeeds() {
+  if (!rssOpen) return;
+  try {
+    const res = await api('/api/rss/feeds');
+    const data = await res.json();
+    if (!data.ok) return;
+
+    rssFeeds = data.feeds || [];
+    document.getElementById('rssIntervalSelect').value = String(data.intervalMinutes);
+    document.getElementById('rssStatus').textContent = data.refreshing
+      ? 'Refreshing...'
+      : (rssFeeds.length === 0 ? 'No feeds yet' : '');
+
+    renderRssFeeds();
+  } catch (e) {}
+}
+
+function renderRssFeeds() {
+  const container = document.getElementById('rssFeedList');
+
+  container.innerHTML = rssFeeds.map(function(f, i) {
+    const last = f.lastRefresh ? new Date(f.lastRefresh).toLocaleString() : 'never';
+    const itemsBlock = (rssOpenItemsFeed === f.feed) ? renderRssItems(i) : '';
+
+    return '<div class="card">' +
+      '<div class="name">' + escapeHtml(f.title) + '</div>' +
+      '<div class="meta">' + f.itemCount + ' item(s) &middot; last refreshed ' + escapeHtml(last) + '</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" onclick="rssRefreshFeed(' + i + ')">Refresh</button>' +
+        '<button class="secondary" onclick="rssToggleItems(' + i + ')">' + (rssOpenItemsFeed === f.feed ? 'Hide Items' : 'View Items') + '</button>' +
+        '<label class="meta"><input type="checkbox" ' + (f.autoDownload ? 'checked' : '') +
+          ' onchange="rssSetAuto(' + i + ', this.checked)"> Auto-download</label>' +
+        '<button class="danger" onclick="rssRemoveFeed(' + i + ')">Remove</button>' +
+      '</div>' +
+      itemsBlock +
+    '</div>';
+  }).join('');
+}
+
+// Takes the feed's INDEX in rssFeeds, not the feed URL itself - the URL
+// can contain characters (and JSON.stringify always adds surrounding
+// double quotes) that would terminate the onclick="..." attribute early
+// and corrupt the card's HTML, the same bug fixed in Online Search's
+// "Open Page" button. A plain number in the attribute has no such risk.
+function renderRssItems(feedIndex) {
+  const feed = rssFeeds[feedIndex].feed;
+  const items = rssItemsByFeed[feed];
+  if (!items) return '<div class="meta">Loading items...</div>';
+  if (items.length === 0) return '<div class="meta">No items yet</div>';
+
+  return '<div class="actions" style="margin-top:4px;"><button class="secondary" onclick="rssAddAll(' +
+      feedIndex + ')">Add All</button></div>' +
+    items.map(function(item, i) {
+      const bits = [];
+      if (item.sizeText) bits.push(escapeHtml(item.sizeText));
+
+      return '<div class="card">' +
+        '<div class="name">' + escapeHtml(item.title) + (item.added ? ' (Added)' : '') + '</div>' +
+        (bits.length ? '<div class="meta">' + bits.join(' &middot; ') + '</div>' : '') +
+        '<div class="actions">' +
+          '<button onclick="rssAddItem(' + feedIndex + ', ' + i + ')">Add</button>' +
+          (item.webPage ? '<button class="secondary" onclick="rssOpenItemPage(' + feedIndex + ', ' + i + ')">Open Page</button>' : '') +
+        '</div>' +
+      '</div>';
+    }).join('');
+}
+
+async function rssToggleItems(i) {
+  const feed = rssFeeds[i].feed;
+
+  if (rssOpenItemsFeed === feed) {
+    rssOpenItemsFeed = null;
+    renderRssFeeds();
+    return;
+  }
+
+  rssOpenItemsFeed = feed;
+  delete rssItemsByFeed[feed];
+  renderRssFeeds();
+
+  try {
+    const res = await api('/api/rss/items?feed=' + encodeURIComponent(feed));
+    const data = await res.json();
+    rssItemsByFeed[feed] = data.ok ? (data.items || []) : [];
+  } catch (e) {
+    rssItemsByFeed[feed] = [];
+  }
+
+  if (rssOpenItemsFeed === feed) renderRssFeeds();
+}
+
+async function rssRefreshFeed(i) {
+  const feed = rssFeeds[i].feed;
+  try {
+    await api('/api/rss/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: feed })
+    });
+  } catch (e) {}
+
+  if (rssOpenItemsFeed === feed) delete rssItemsByFeed[feed];
+  loadRssFeeds();
+  if (rssOpenItemsFeed === feed) rssToggleItemsReload(feed);
+}
+
+async function rssToggleItemsReload(feed) {
+  try {
+    const res = await api('/api/rss/items?feed=' + encodeURIComponent(feed));
+    const data = await res.json();
+    rssItemsByFeed[feed] = data.ok ? (data.items || []) : [];
+  } catch (e) {}
+  renderRssFeeds();
+}
+
+async function rssSetAuto(i, checked) {
+  const feed = rssFeeds[i].feed;
+  try {
+    await api('/api/rss/set_auto', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: feed, enabled: checked ? 'true' : 'false' })
+    });
+  } catch (e) {}
+  loadRssFeeds();
+}
+
+async function rssRemoveFeed(i) {
+  const feed = rssFeeds[i].feed;
+  if (!confirm('Remove this feed? Its cached items and settings are removed too.')) return;
+
+  try {
+    await api('/api/rss/remove_feed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: feed })
+    });
+  } catch (e) {}
+
+  if (rssOpenItemsFeed === feed) rssOpenItemsFeed = null;
+  delete rssItemsByFeed[feed];
+  loadRssFeeds();
+}
+
+// Resolves an RSS item (without adding it yet) and routes it into the
+// SAME magnet/file-selection flow as the manual Add box and Online
+// Search Add button, exactly like RssManager.resolveItemForSelection is
+// used in the app - nothing is handed to the engine until the user
+// commits to downloading it, at which point rssMarkAdded below is
+// called so "Added" reflects real intent, same as the app.
+async function rssAddItem(feedIndex, i) {
+  const feed = rssFeeds[feedIndex].feed;
+  const item = (rssItemsByFeed[feed] || [])[i];
+  if (!item) return;
+
+  try {
+    const res = await api('/api/rss/resolve_item', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: feed, title: item.title, link: item.link, sizeText: item.sizeText, page: item.page })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert('Could not add: ' + (data.error || 'unknown error')); return; }
+
+    // Only marked "Added" once the user actually submits the file-
+    // selection panel (pendingSubmitCallback, consumed by submitUpload),
+    // not the moment the panel opens - mirrors the app only calling
+    // RssManager.markItemAdded from inside that screen's own success path.
+    pendingSubmitCallback = function() { rssMarkAdded(feed, item); };
+
+    if (data.kind === 'magnet') {
+      const added = await addMagnetByValue(data.magnet);
+      if (!added) pendingSubmitCallback = null;
+    } else if (data.kind === 'torrent') {
+      openUploadFilesForPath(data.path, data.files || []);
+    }
+  } catch (e) {
+    alert('Could not add item');
+  }
+}
+
+async function rssMarkAdded(feed, item) {
+  try {
+    await api('/api/rss/mark_added', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed: feed, title: item.title, link: item.link, sizeText: item.sizeText, page: item.page })
+    });
+  } catch (e) {}
+  rssToggleItemsReload(feed);
+}
+
+async function rssAddAll(feedIndex) {
+  const feed = rssFeeds[feedIndex].feed;
+  const items = (rssItemsByFeed[feed] || []).filter(function(it) { return !it.added; });
+  if (items.length === 0) { alert('Nothing new to add'); return; }
+  if (!confirm('Add all ' + items.length + ' item(s) of this feed?')) return;
+
+  for (const item of items) {
+    try {
+      const res = await api('/api/rss/resolve_item', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feed: feed, title: item.title, link: item.link, sizeText: item.sizeText, page: item.page })
+      });
+      const data = await res.json();
+      if (data.ok && data.kind === 'magnet') {
+        await addMagnetByValue(data.magnet);
+        await submitUpload(false);
+        await rssMarkAdded(feed, item);
+      } else if (data.ok && data.kind === 'torrent') {
+        openUploadFilesForPath(data.path, data.files || []);
+        await submitUpload(false);
+        await rssMarkAdded(feed, item);
+      }
+    } catch (e) {}
+  }
+}
+
+function rssOpenItemPage(feedIndex, i) {
+  const feed = rssFeeds[feedIndex].feed;
+  const item = (rssItemsByFeed[feed] || [])[i];
+  if (!item || !item.webPage) return;
+  window.open(item.webPage, '_blank');
+}
+
 document.getElementById('addBtn').addEventListener('click', async function() {
   const input = document.getElementById('magnetInput');
   const magnet = input.value.trim();
   if (!magnet) return;
+  const ok = await addMagnetByValue(magnet);
+  if (ok) input.value = '';
+});
+
+// Shared by the manual "Add" box above and the Online Search "Add"
+// button below - both just need to hand a magnet URI to the SAME
+// metadata-fetch + file-selection flow (add_magnet_metadata, then
+// pollMagnetFiles/renderUploadFiles), never add directly.
+async function addMagnetByValue(magnet) {
+  if (!magnet) return false;
 
   try {
     const res = await api('/api/add_magnet_metadata', {
@@ -1659,10 +4330,9 @@ document.getElementById('addBtn').addEventListener('click', async function() {
     const data = await res.json();
     if (!data.ok) {
       alert(data.alreadyAdded ? 'Torrent already added' : 'Could not add: ' + (data.error || 'unknown error'));
-      return;
+      return false;
     }
 
-    input.value = '';
     pendingMode = 'magnet';
     pendingMagnetIndex = data.index;
     pendingMagnetValue = data.magnet;
@@ -1673,8 +4343,24 @@ document.getElementById('addBtn').addEventListener('click', async function() {
     notePanelOpened();
 
     pollMagnetFiles();
-  } catch (e) {}
-});
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Shared by the file-upload box above and the Online Search "Add"
+// button below for a result that resolves to a .torrent file instead
+// of a magnet - both already have a server-side path + file list, so
+// this just opens the same file-selection panel they use.
+function openUploadFilesForPath(path, files) {
+  pendingMode = 'torrent';
+  pendingUploadPath = path;
+  document.getElementById('uploadPanelTitle').textContent = 'Select files';
+  renderUploadFiles(files || []);
+  document.getElementById('uploadPanel').style.display = 'block';
+  notePanelOpened();
+}
 
 let pendingMode = null; // 'torrent' | 'magnet'
 let pendingUploadPath = null;
@@ -1771,9 +4457,20 @@ async function submitUpload(selectedOnly) {
     });
   }
 
+  // Lets a caller (RSS's Add button) know the user actually committed to
+  // downloading this, as opposed to just opening the file-selection
+  // panel - mirrors the app only calling RssManager.markItemAdded from
+  // inside the file-selection screen's own success callback, not the
+  // moment the screen opens.
+  const callback = pendingSubmitCallback;
+  pendingSubmitCallback = null;
+
   resetUploadState();
   refresh();
+  if (callback) callback();
 }
+
+let pendingSubmitCallback = null;
 
 // Silent cleanup after a successful submit - unlike cancelUpload(), this
 // never removes a paused magnet torrent, since submitUpload() either
@@ -1798,11 +4495,14 @@ async function cancelUpload() {
   if (pendingMode === 'magnet' && pendingMagnetIndex) {
     try { await api('/api/remove/' + pendingMagnetIndex, { method: 'POST' }); } catch (e) {}
   }
+  pendingSubmitCallback = null;
   resetUploadState();
   refresh();
 }
 
 let openFilesIndex = null;
+let openFilesTab = 'files'; // 'files' | 'priority' | 'general' | 'peers' | 'swarmhealth' | 'pieces' | 'trackers' | 'webseeds' | 'statistics' | 'comment'
+let lastFilesList = [];
 
 async function toggleFiles(index) {
   const panel = document.getElementById('filesPanel');
@@ -1815,7 +4515,11 @@ async function toggleFiles(index) {
     return;
   }
 
+  closeAllFeaturePanels();
+
   openFilesIndex = index;
+  openFilesTab = 'files';
+  lastFilesList = [];
   panel.style.display = 'block';
   panel.innerHTML = '<div class="name">Files</div><div class="empty">Loading...</div>';
   notePanelOpened();
@@ -1833,14 +4537,237 @@ async function toggleFiles(index) {
       return;
     }
 
-    const files = data.files || [];
-    const rows = files.map(function(f) { return renderFileRow(index, f); }).join('');
-
-    panel.innerHTML = '<div class="name">Files</div>' + rows +
-      '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
+    lastFilesList = data.files || [];
+    renderFilesPanel();
   } catch (e) {
     panel.innerHTML = '<div class="name">Files</div><div class="empty">Could not load files.</div>';
   }
+}
+
+// Feature: tab switcher inside the file browser - "Files" (browse/play/
+// view/download, unchanged) and "Priority" (choose which files should
+// download, even after this torrent was already added, plus each file's
+// Seeds/Peers - the Web UI equivalent of MainActivity's "Apply File
+// Selection" button and its per-file swarm line). Switching tabs always
+// re-renders the panel, which closes any open video/audio/text/image
+// viewer - same as closing the whole panel would.
+function switchFilesTab(tab) {
+  openFilesTab = tab;
+  renderFilesPanel();
+}
+
+function renderFilesPanel() {
+  const panel = document.getElementById('filesPanel');
+  const index = openFilesIndex;
+  if (index === null) return;
+
+  const tabs = '<div class="actions" style="margin-bottom:8px;flex-wrap:wrap;">' +
+    '<button class="' + (openFilesTab === 'general' ? '' : 'secondary') + '" onclick="switchFilesTab(\'general\')">General</button>' +
+    '<button class="' + (openFilesTab === 'files' ? '' : 'secondary') + '" onclick="switchFilesTab(\'files\')">Files</button>' +
+    '<button class="' + (openFilesTab === 'priority' ? '' : 'secondary') + '" onclick="switchFilesTab(\'priority\')">Priority &amp; Peers</button>' +
+    '<button class="' + (openFilesTab === 'peers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'peers\')">Peers</button>' +
+    '<button class="' + (openFilesTab === 'swarmhealth' ? '' : 'secondary') + '" onclick="switchFilesTab(\'swarmhealth\')">Swarm Health</button>' +
+    '<button class="' + (openFilesTab === 'pieces' ? '' : 'secondary') + '" onclick="switchFilesTab(\'pieces\')">Pieces</button>' +
+    '<button class="' + (openFilesTab === 'trackers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'trackers\')">Trackers</button>' +
+    '<button class="' + (openFilesTab === 'webseeds' ? '' : 'secondary') + '" onclick="switchFilesTab(\'webseeds\')">Web Seeds</button>' +
+    '<button class="' + (openFilesTab === 'statistics' ? '' : 'secondary') + '" onclick="switchFilesTab(\'statistics\')">Statistics</button>' +
+    '<button class="' + (openFilesTab === 'comment' ? '' : 'secondary') + '" onclick="switchFilesTab(\'comment\')">Comment</button>' +
+  '</div>';
+
+  // Plain-text tabs - same shape as the app's own General/Peers/Swarm/
+  // Pieces/Trackers/Web Seeds/Statistics/Comment screens: one endpoint
+  // per tab, result shown as-is in a <pre>.
+  const textTabEndpoints = {
+    general: '/api/torrent_general',
+    peers: '/api/torrent_peers',
+    swarmhealth: '/api/torrent_swarmhealth',
+    pieces: '/api/torrent_pieces',
+    trackers: '/api/torrent_trackers',
+    webseeds: '/api/torrent_webseeds',
+    statistics: '/api/torrent_statistics',
+    comment: '/api/torrent_comment'
+  };
+
+  let body;
+  if (openFilesTab === 'priority') {
+    const rows = lastFilesList.map(function(f) { return renderPriorityRow(index, f); }).join('');
+    body = rows +
+      '<div class="actions" style="margin-top:8px;">' +
+        '<button class="secondary" onclick="setAllPriorityChecks(true)">Select All</button>' +
+        '<button class="secondary" onclick="setAllPriorityChecks(false)">Select None</button>' +
+        '<button onclick="applyFilePriorities(' + index + ')">Apply</button>' +
+      '</div>';
+  } else if (openFilesTab === 'swarmhealth') {
+    // Feature: a small live Seeds/Peers graph above the swarm health
+    // text - the app has no such graph (swarm health is text-only
+    // there), built in the same visual style as the app's own
+    // download/upload SpeedGraphView (rounded dark panel, grid, two
+    // smooth gradient-filled lines) so it reads as part of the same app.
+    body = '<canvas id="swarmHealthCanvas" width="600" height="140" style="width:100%;height:140px;display:block;margin-bottom:8px;"></canvas>' +
+      '<pre id="tabText" style="white-space:pre-wrap;max-height:300px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
+  } else if (textTabEndpoints[openFilesTab]) {
+    body = '<pre id="tabText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
+  } else {
+    body = lastFilesList.map(function(f) { return renderFileRow(index, f); }).join('');
+  }
+
+  const forceButtons = (openFilesTab === 'general')
+    ? '<div class="actions" style="margin-top:8px;">' +
+        '<button class="secondary" onclick="forceAction(' + index + ', \'recheck\')">Force Recheck</button>' +
+        '<button class="secondary" onclick="forceAction(' + index + ', \'reannounce\')">Force Reannounce</button>' +
+      '</div>'
+    : '';
+
+  // Feature: per-torrent "Change Save Folder" - same moveTorrentStorage()
+  // call the app's own General/Details screen button makes, since this
+  // torrent may already have data on disk (never a plain prefs-only
+  // change). Lives on the General tab, same place the app puts it.
+  const saveFolderRow = (openFilesTab === 'general')
+    ? '<div class="meta" style="margin-top:8px;" id="torrentSaveFolderText">Loading current folder...</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" onclick="changeTorrentSaveFolder(' + index + ')">Change Save Folder</button>' +
+      '</div>'
+    : '';
+
+  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow +
+    '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
+
+  if (openFilesTab === 'swarmhealth') {
+    swarmHealthHistory = { seeds: [], peers: [] };
+    drawSwarmHealthGraph();
+  }
+
+  if (openFilesTab === 'general') loadTorrentSaveFolder(index);
+
+  if (textTabEndpoints[openFilesTab]) loadTextTab(index, openFilesTab);
+}
+
+// Feature: Force Recheck / Force Reannounce - same native calls as
+// MainActivity's own buttons. Fire-and-forget (no result to show beyond
+// the General tab's own Status field changing), so this just re-loads
+// General afterwards, same as the app calling showGeneralTab().
+async function forceAction(index, kind) {
+  try {
+    await api('/api/force_' + kind + '/' + index, { method: 'POST' });
+  } catch (e) {}
+
+  if (openFilesIndex === index) {
+    openFilesTab = 'general';
+    renderFilesPanel();
+  }
+}
+
+// Feature: per-torrent "Change Save Folder" - shows the folder this
+// torrent is currently saved to (its own override if one was set,
+// otherwise the global default - same as getSavedSaveFolderForHash() ?:
+// getGlobalSaveFolder() in the app) and moves it on request, picked
+// graphically through the same folder browser as the global Save
+// Folder panel (openFolderPicker).
+let torrentSaveFolderCurrentPath = '';
+
+async function loadTorrentSaveFolder(index) {
+  const el = document.getElementById('torrentSaveFolderText');
+  if (!el) return;
+  try {
+    const res = await api('/api/torrent_save_folder?index=' + index);
+    const data = await res.json();
+    if (data.ok) {
+      torrentSaveFolderCurrentPath = data.path;
+      el.textContent = 'Save Folder: ' + data.path;
+    }
+  } catch (e) {}
+}
+
+function changeTorrentSaveFolder(index) {
+  openFolderPicker(torrentSaveFolderCurrentPath, function(path) {
+    applyTorrentSaveFolder(index, path);
+  });
+}
+
+async function applyTorrentSaveFolder(index, path) {
+  try {
+    const res = await api('/api/torrent_save_folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: String(index), path: path })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert('Could not change save folder: ' + (data.error || 'unknown error')); return; }
+    torrentSaveFolderCurrentPath = path;
+    const el = document.getElementById('torrentSaveFolderText');
+    if (el) el.textContent = 'Save Folder: ' + path;
+    alert('Moving files to ' + path + ' - this may take a moment for large torrents. Check the Execution Log for when it\'s done.');
+  } catch (e) {
+    alert('Could not change save folder');
+  }
+}
+
+// Fetches one of the plain-text tabs (Peers/Trackers/Web Seeds) and
+// shows it as-is in the #tabText <pre> - same text MainActivity's own
+// equivalent screens show, not reparsed into a table.
+async function loadTextTab(index, tab) {
+  const endpoints = {
+    general: '/api/torrent_general',
+    peers: '/api/torrent_peers',
+    swarmhealth: '/api/torrent_swarmhealth',
+    pieces: '/api/torrent_pieces',
+    trackers: '/api/torrent_trackers',
+    webseeds: '/api/torrent_webseeds',
+    statistics: '/api/torrent_statistics',
+    comment: '/api/torrent_comment'
+  };
+  const endpoint = endpoints[tab];
+  if (!endpoint) return;
+
+  try {
+    const res = await api(endpoint + '?index=' + index);
+    const data = await res.json();
+    const el = document.getElementById('tabText');
+    if (!el || openFilesIndex !== index || openFilesTab !== tab) return;
+    el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
+  } catch (e) {
+    const el = document.getElementById('tabText');
+    if (el && openFilesIndex === index && openFilesTab === tab) el.textContent = 'Could not load';
+  }
+}
+
+function setAllPriorityChecks(checked) {
+  document.querySelectorAll('.priorityCheck').forEach(function(c) {
+    c.checked = checked;
+  });
+}
+
+async function applyFilePriorities(torrentIndex) {
+  const checks = document.querySelectorAll('.priorityCheck');
+  const checkedIndexes = Array.from(checks)
+    .filter(function(c) { return c.checked; })
+    .map(function(c) { return c.dataset.index; });
+
+  if (checkedIndexes.length === 0 &&
+      !confirm('This will pause downloading all files in this torrent. Continue?')) {
+    return;
+  }
+
+  try {
+    await api('/api/set_file_priorities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: String(torrentIndex), selected: checkedIndexes.join(',') })
+    });
+  } catch (e) {}
+
+  // Re-fetch so progress/percent reflects the new selection right away,
+  // then stay on the Priority tab showing the just-applied state.
+  try {
+    const res = await api('/api/torrent_files?index=' + torrentIndex);
+    const data = await res.json();
+    if (openFilesIndex === torrentIndex && data.ok && data.ready) {
+      lastFilesList = data.files || [];
+    }
+  } catch (e) {}
+
+  if (openFilesIndex === torrentIndex) renderFilesPanel();
+  refresh();
 }
 
 function fileKind(name) {
@@ -1911,6 +4838,29 @@ function renderFileRow(torrentIndex, f) {
       '<button class="secondary" onclick="window.location.href=\'' + downloadUrl + '\'">Download</button>' +
     '</div>' +
     '<div id="' + rowId + '"></div>' +
+  '</div>';
+}
+
+// Priority tab row: a checkbox (checked = will download, unchecked =
+// skip - same binary choice MainActivity.setTorrentFilePriorities
+// supports, there's no tiered Low/Normal/High at the native level) plus
+// this file's Seeds/Peers, same figures the app's own Files tab shows
+// inline. Defaults to f.selected, which the server derives from the
+// saved "file_priorities" prefs (or "everything selected" if nothing
+// was ever saved for this torrent) - never from list index.
+function renderPriorityRow(torrentIndex, f) {
+  const rowId = 'frow_' + torrentIndex + '_' + f.index;
+  const checked = f.selected !== false;
+
+  return '<div class="card" style="margin:8px 0;" data-file-index="' + f.index + '">' +
+    '<label class="meta">' +
+      '<input type="checkbox" class="priorityCheck" data-index="' + f.index + '"' + (checked ? ' checked' : '') + '> ' +
+      fileTypeIcon(f.name) + ' ' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')' +
+    '</label>' +
+    '<div class="meta" id="pswarm_' + rowId + '">' +
+      'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
+      '  Peers ' + (Number(f.peers) || 0) + ' (' + (Number(f.totalPeers) || 0) + ')' +
+    '</div>' +
   '</div>';
 }
 
