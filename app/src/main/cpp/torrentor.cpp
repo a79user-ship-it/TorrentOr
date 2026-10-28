@@ -2172,6 +2172,34 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
         output += std::to_string(peer.up_speed / 1024);
         output += " KB/s";
 
+        // Feature: upload-diagnostic flags per peer - lets you tell
+        // "connected but they don't want anything from us" (remote_interested
+        // false - nothing to fix, they're just not interested right now)
+        // apart from "we're the ones holding back" (remote_choked true - our
+        // own choking algorithm hasn't given them a slot yet). Note the
+        // libtorrent naming is from the peer's point of view: "choked"
+        // (unused here) means THEY have choked US, which is a download
+        // concern, not an upload one - "remote_choked" is the one that
+        // means we've choked them.
+        bool theyAreInterested =
+                static_cast<bool>(peer.flags & lt::peer_info::remote_interested);
+
+        bool weAreChokingThem =
+                static_cast<bool>(peer.flags & lt::peer_info::remote_choked);
+
+        bool optimisticUnchoke =
+                static_cast<bool>(peer.flags & lt::peer_info::optimistic_unchoke);
+
+        output += "\nInterested in us: ";
+        output += theyAreInterested ? "Yes" : "No";
+
+        output += "  We're choking them: ";
+        output += weAreChokingThem ? "Yes" : "No";
+
+        if (optimisticUnchoke) {
+            output += "\n(Optimistic unchoke slot)";
+        }
+
         output += "\n\n";
     }
 
