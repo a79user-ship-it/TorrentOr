@@ -481,6 +481,30 @@ class MainActivity : AppCompatActivity() {
 
         try {
             val filePath = copyTorrentToFiles(uriText)
+
+            // Bug fix: unlike the magnet branch above, this path never
+            // checked whether the .torrent file's hash was already added
+            // before showing the file-selection screen. That's the real
+            // reason "already added" torrents kept re-showing file
+            // selection on reopen - the savedInstanceState guard in
+            // onCreate() only stops a stale intent from being processed
+            // again after the process was simply killed in the background,
+            // but it can't tell that case apart from a genuinely fresh tap
+            // on a .torrent file when Android relaunches the app after an
+            // APK update (no saved instance state either way) - so it's
+            // the already-added check itself that was missing here, not
+            // the guard around it.
+            val hash = try {
+                TorrentNative.getTorrentFileHash(filePath)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (isTorrentAlreadyAddedByHash(hash)) {
+                showAlreadyAddedMessage()
+                return
+            }
+
             showTorrentFileSelection(filePath)
 
             Toast.makeText(this, "Torrent file opened in TorrentOr", Toast.LENGTH_SHORT).show()
