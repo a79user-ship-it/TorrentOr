@@ -103,7 +103,8 @@ class MainActivity : AppCompatActivity() {
         "Date Added (Oldest First)",
         "Progress (Highest First)",
         "Progress (Lowest First)",
-        "Status (A-Z)"
+        "Status (A-Z)",
+        "Status (Z-A)"
     )
 
     // Online Search remembers what you typed, the results found, and the
@@ -7759,9 +7760,40 @@ class MainActivity : AppCompatActivity() {
             buttonRow.addView(resume)
             buttonRow.addView(remove)
 
+            // Feature: Force Recheck / Force Reannounce right on the main
+            // card, instead of only inside Select Torrents mode or the
+            // torrent's own General tab - a second row, same as
+            // pause/resume/remove above, so five buttons don't get
+            // squeezed into one line.
+            val buttonRow2 = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+
+            val forceRecheck = Button(this).apply {
+                text = "Force Recheck"
+                setOnClickListener {
+                    TorrentNative.forceRecheck(torrentIndex)
+                    Toast.makeText(this@MainActivity, "Force recheck started", Toast.LENGTH_SHORT).show()
+                    updateTorrentList()
+                }
+            }
+
+            val forceReannounce = Button(this).apply {
+                text = "Force Reannounce"
+                setOnClickListener {
+                    TorrentNative.forceReannounce(torrentIndex)
+                    Toast.makeText(this@MainActivity, "Reannounce sent", Toast.LENGTH_SHORT).show()
+                    updateTorrentList()
+                }
+            }
+
+            buttonRow2.addView(forceRecheck)
+            buttonRow2.addView(forceReannounce)
+
             card.addView(label)
             card.addView(progressBar)
             card.addView(buttonRow)
+            card.addView(buttonRow2)
 
             listLayout.addView(card)
         }
@@ -8000,6 +8032,9 @@ class MainActivity : AppCompatActivity() {
 
             "Status (A-Z)" ->
                 lines.sortedBy { extractStatusForSort(it.value).lowercase() }
+
+            "Status (Z-A)" ->
+                lines.sortedByDescending { extractStatusForSort(it.value).lowercase() }
 
             else -> lines
         }
@@ -8284,15 +8319,23 @@ class MainActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    private fun buildStorageSpaceText(): String {
+    // Feature: the Free Space figure (and the warning line below it) turns
+    // red the moment free space reaches the configured Low Space Warning
+    // Threshold, instead of only the plain-text "⚠ LOW SPACE WARNING" line
+    // that was already there - a value that's impossible to miss at a
+    // glance rather than one more line of text to read. Returns a
+    // SpannableStringBuilder instead of a plain String so the red can be
+    // applied to just that figure; TextView.text accepts either.
+    private fun buildStorageSpaceText(): android.text.SpannableStringBuilder {
         // Feature 5: individual torrents can now live in different custom
         // folders (see the Save Folder screen and the per-torrent picker on
         // each add screen) - this still monitors the global default
         // folder's volume, a reasonable approximation since custom folders
         // usually end up on the same storage partition.
         val monitoredPath = getGlobalSaveFolder()
+        val builder = android.text.SpannableStringBuilder()
 
-        return try {
+        try {
             val stat = StatFs(monitoredPath)
 
             val total = stat.totalBytes
@@ -8305,23 +8348,51 @@ class MainActivity : AppCompatActivity() {
             }
 
             val thresholdMb = getLowSpaceThresholdMb()
-            val lowSpaceLine = if (free < getLowSpaceThresholdBytes()) {
-                "\n⚠ LOW SPACE WARNING - free space is below the " +
-                        "$thresholdMb MB threshold"
-            } else {
-                ""
+            val isLow = free < getLowSpaceThresholdBytes()
+
+            builder.append("Save Path:\n$monitoredPath\n\n")
+            builder.append("Free Space: ")
+            appendStorageSpan(builder, formatSize(free), isLow)
+            builder.append("\n")
+            builder.append("Used Space: ${formatSize(used)}\n")
+            builder.append("Total Space: ${formatSize(total)}\n")
+            builder.append("Used: ${String.format("%.1f", usedPercent)}%\n")
+            builder.append("Low Space Warning Threshold: $thresholdMb MB")
+
+            if (isLow) {
+                builder.append("\n")
+                appendStorageSpan(
+                    builder,
+                    "⚠ LOW SPACE WARNING - free space is below the " +
+                            "$thresholdMb MB threshold",
+                    true
+                )
             }
 
-            "Save Path:\n$monitoredPath\n\n" +
-                    "Free Space: ${formatSize(free)}\n" +
-                    "Used Space: ${formatSize(used)}\n" +
-                    "Total Space: ${formatSize(total)}\n" +
-                    "Used: ${String.format("%.1f", usedPercent)}%\n" +
-                    "Low Space Warning Threshold: $thresholdMb MB" +
-                    lowSpaceLine +
-                    "\n\nAuto-refresh: Every 3 seconds"
+            builder.append("\n\nAuto-refresh: Every 3 seconds")
         } catch (e: Throwable) {
-            "Could not read storage space\n\n$monitoredPath"
+            builder.clear()
+            builder.append("Could not read storage space\n\n$monitoredPath")
+        }
+
+        return builder
+    }
+
+    private fun appendStorageSpan(
+        builder: android.text.SpannableStringBuilder,
+        text: String,
+        red: Boolean
+    ) {
+        val start = builder.length
+        builder.append(text)
+
+        if (red) {
+            builder.setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor("#FF5252")),
+                start,
+                builder.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
         }
     }
 

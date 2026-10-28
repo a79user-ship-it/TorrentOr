@@ -2883,6 +2883,7 @@ object WebUiServer {
       <option value="Progress (Highest First)">Sort: Progress (Highest First)</option>
       <option value="Progress (Lowest First)">Sort: Progress (Lowest First)</option>
       <option value="Status (A-Z)">Sort: Status (A-Z)</option>
+      <option value="Status (Z-A)">Sort: Status (Z-A)</option>
     </select>
   </div>
 
@@ -3378,6 +3379,7 @@ function sortTorrents(torrents) {
     case 'Progress (Highest First)': return list.sort(function(a, b) { return byProgress(b, a); });
     case 'Progress (Lowest First)': return list.sort(byProgress);
     case 'Status (A-Z)': return list.sort(byStatus);
+    case 'Status (Z-A)': return list.sort(function(a, b) { return byStatus(b, a); });
     default: return list;
   }
 }
@@ -3429,6 +3431,14 @@ function render(torrents) {
         '<button onclick="doAction(\'pause\', ' + t.index + ')">Pause</button>' +
         '<button onclick="doAction(\'resume\', ' + t.index + ')">Resume</button>' +
         '<button class="secondary" onclick="toggleFiles(' + t.index + ')">Files</button>' +
+        // Feature: Force Recheck / Force Reannounce right on this card,
+        // matching the app's own main torrent card - reuses the exact
+        // same server endpoints (/api/force_recheck/<index> and
+        // /api/force_reannounce/<index>) the bulk "Select Torrents"
+        // actions already call, just for this one torrent's index
+        // instead of looping over a selected set.
+        '<button class="secondary" onclick="doAction(\'force_recheck\', ' + t.index + ')">Force Recheck</button>' +
+        '<button class="secondary" onclick="doAction(\'force_reannounce\', ' + t.index + ')">Force Reannounce</button>' +
         '<button class="danger" onclick="doRemove(' + t.index + ', false)">Remove</button>' +
         '<button class="danger" onclick="doRemove(' + t.index + ', true)">Remove + Files</button>' +
       '</div>' +
