@@ -3876,6 +3876,19 @@ class MainActivity : AppCompatActivity() {
         return kept.toString()
     }
 
+    // Bug fix support: pulls the real, currently-listening port back out of
+    // buildConnectionStatusText()'s "Listening port: X" line, so the port
+    // input field can show the live random port instead of the saved fixed
+    // one while random-port mode is on. Returns null if that line isn't
+    // there yet (native status briefly unavailable) rather than guessing.
+    private fun extractLiveListenPort(statusText: String): Int? {
+        val line = statusText.lineSequence()
+            .firstOrNull { it.startsWith("Listening port:") }
+            ?: return null
+
+        return line.removePrefix("Listening port:").trim().toIntOrNull()
+    }
+
     private fun showConnectionSettingsScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -3923,8 +3936,6 @@ class MainActivity : AppCompatActivity() {
         fun refreshStatus() {
             statusText.text = buildConnectionStatusText()
         }
-
-        startConnectionAutoRefresh(statusText)
 
         // Applies and persists every toggle together (never just the one
         // that changed), so the saved state and the live session can never
@@ -4061,9 +4072,26 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 24, 0, 8)
         }
 
+        // Bug fix: this field used to always show the saved FIXED port
+        // ("listen_port"), even while random-port mode was on - so after
+        // turning random mode on, it kept showing the old fixed value
+        // (often 6881) forever, making it look like randomizing the port
+        // did nothing, when the engine was actually listening on a
+        // different port the whole time (visible only in the status text
+        // above). Now, while random mode is on, this field shows that same
+        // live port instead - parsed from the same "Listening port: X"
+        // line buildConnectionStatusText() already produces - and falls
+        // back to a plain note if that line isn't available yet.
         val portInput = EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(savedPort.toString())
+            setText(
+                if (randomPortOnStart) {
+                    extractLiveListenPort(statusText.text.toString())?.toString()
+                        ?: "Random - see status above"
+                } else {
+                    savedPort.toString()
+                }
+            )
             setTextColor(Color.WHITE)
             isEnabled = !randomPortOnStart
         }
@@ -4076,6 +4104,15 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, isChecked ->
                 randomPortOnStart = isChecked
                 portInput.isEnabled = !isChecked
+
+                portInput.setText(
+                    if (isChecked) {
+                        extractLiveListenPort(statusText.text.toString())?.toString()
+                            ?: "Random - see status above"
+                    } else {
+                        savedPort.toString()
+                    }
+                )
 
                 prefs.edit()
                     .putBoolean("random_port_on_start", isChecked)
@@ -4116,9 +4153,23 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 8, 0, 16)
         }
 
+        // Keeps the port field in sync with whatever randomPortOnStart is
+        // doing right now, same fallback text as the initial setText above.
+        fun syncPortInputToLivePort() {
+            if (randomPortOnStart) {
+                portInput.setText(
+                    extractLiveListenPort(statusText.text.toString())?.toString()
+                        ?: "Random - see status above"
+                )
+            }
+        }
+
         val refreshButton = Button(this).apply {
             text = "Refresh"
-            setOnClickListener { refreshStatus() }
+            setOnClickListener {
+                refreshStatus()
+                syncPortInputToLivePort()
+            }
         }
 
         val backButton = Button(this).apply {
@@ -4128,6 +4179,8 @@ class MainActivity : AppCompatActivity() {
                 showMainScreen()
             }
         }
+
+        startConnectionAutoRefresh(statusText) { syncPortInputToLivePort() }
 
         root.addView(title)
         root.addView(statusText)
@@ -4149,7 +4202,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(outerScroll)
     }
 
-    private fun startConnectionAutoRefresh(statusText: TextView) {
+    private fun startConnectionAutoRefresh(statusText: TextView, onTick: (() -> Unit)? = null) {
         stopConnectionAutoRefresh()
 
         isConnectionScreenActive = true
@@ -4162,6 +4215,7 @@ class MainActivity : AppCompatActivity() {
 
                 try {
                     statusText.text = buildConnectionStatusText()
+                    onTick?.invoke()
                 } catch (_: Throwable) {
                     // Keep the screen alive even if native status is temporarily unavailable.
                 }
@@ -7578,7 +7632,7 @@ class MainActivity : AppCompatActivity() {
 
         val upStart = text.length - upPart.length
         builder.setSpan(
-            android.text.style.ForegroundColorSpan(Color.parseColor("#F6AD55")),
+            android.text.style.ForegroundColorSpan(Color.parseColor("#B794F6")),
             upStart,
             text.length,
             android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE

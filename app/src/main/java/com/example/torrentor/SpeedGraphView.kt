@@ -32,7 +32,7 @@ class SpeedGraphView @JvmOverloads constructor(
     private var uploadValues: List<Int> = emptyList()
 
     private val downloadColor = Color.parseColor("#4FD1C5") // teal
-    private val uploadColor = Color.parseColor("#F6AD55")   // warm orange
+    private val uploadColor = Color.parseColor("#B794F6")   // soft purple
 
     private val panelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#1C1F26")
