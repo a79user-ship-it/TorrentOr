@@ -2645,79 +2645,145 @@ object WebUiServer {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TorrentOr</title>
 <style>
-  /* Dark navy "eye comfort" theme: a deep, low-brightness blue-black
-     backdrop instead of a bright/saturated blue, softer off-white text
-     instead of pure white, and muted (not neon) accent colors - easier
-     to look at for long stretches, especially at night. Colors are kept
-     as custom properties so the whole palette can be swapped in one
-     place later if wanted. */
+  /* Modern dark theme: neutral graphite surfaces (same family as the speed
+     graph panel), teal as the main accent and purple as the secondary one
+     (the same two colors the download/upload graph uses), soft borders and
+     shadows instead of flat blocks, rounded cards, and gentle hover/focus
+     transitions. Every color is a custom property, so the whole palette
+     can still be swapped in one place. Style only - no markup or script
+     depends on anything in here. */
   :root {
     color-scheme: dark;
-    --bg: #0A1420;
-    --surface: #132339;
-    --surface-alt: #0E1C2C;
-    --accent: #3D6FA5;
-    --accent-dim: #1C3350;
-    --danger: #8C3A3A;
-    --text: #DCE6F0;
-    --text-dim: rgba(220, 230, 240, 0.72);
-    --fill: #4F86B8;
-    --track: rgba(0, 0, 0, 0.35);
+    --bg: #0D1016;
+    --bg-glow: rgba(79, 209, 197, 0.07);
+    --surface: #171B23;
+    --surface-alt: #11151C;
+    --border: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --accent: #4FD1C5;
+    --accent-soft: rgba(79, 209, 197, 0.14);
+    --accent-soft-hover: rgba(79, 209, 197, 0.24);
+    --accent-2: #B794F6;
+    --accent-dim: rgba(255, 255, 255, 0.07);
+    --danger: #F2777A;
+    --danger-soft: rgba(242, 119, 122, 0.14);
+    --danger-soft-hover: rgba(242, 119, 122, 0.24);
+    --text: #E6EAF0;
+    --text-dim: rgba(230, 234, 240, 0.62);
+    --fill: #4FD1C5;
+    --track: rgba(255, 255, 255, 0.07);
+    --radius: 16px;
+    --shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
   }
   * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0;
-    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    background: var(--bg);
+    margin: 0 auto;
+    max-width: 1100px;
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    background:
+      radial-gradient(900px 420px at 85% -10%, var(--bg-glow), transparent 70%),
+      var(--bg);
+    background-attachment: fixed;
     color: var(--text);
-    padding: 16px;
+    padding: 20px 16px 40px;
+    -webkit-font-smoothing: antialiased;
   }
-  h1 { font-size: 22px; margin: 0 0 16px; }
+  h1 {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 18px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    display: inline-block;
+  }
   .row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
-  input[type=text] {
+  input[type=text], input[type=number], input[type=password], select, textarea {
     flex: 1;
     min-width: 200px;
-    padding: 10px;
-    border-radius: 8px;
-    border: 1px solid var(--accent-dim);
+    padding: 11px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
     background: var(--surface-alt);
     color: var(--text);
     font-size: 14px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
+  select { flex: 0 1 auto; min-width: 0; cursor: pointer; }
+  input[type=text]:focus, input[type=number]:focus, input[type=password]:focus,
+  select:focus, textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  input::placeholder { color: var(--text-dim); }
   input[type=file] { color: var(--text); flex: 1; min-width: 200px; }
+  input[type=checkbox] { accent-color: var(--accent); }
   button {
-    padding: 10px 14px;
-    border-radius: 8px;
-    border: none;
-    background: var(--accent);
-    color: var(--text);
+    padding: 10px 15px;
+    border-radius: 12px;
+    border: 1px solid transparent;
+    background: var(--accent-soft);
+    color: var(--accent);
     font-size: 14px;
+    font-weight: 600;
+    font-family: inherit;
     cursor: pointer;
+    transition: background 0.15s, transform 0.1s, border-color 0.15s;
   }
-  button:active { opacity: 0.8; }
-  button.danger { background: var(--danger); }
-  button.secondary { background: var(--accent-dim); }
+  button:hover { background: var(--accent-soft-hover); }
+  button:active { transform: scale(0.97); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.secondary {
+    background: var(--accent-dim);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  button.secondary:hover { background: rgba(255, 255, 255, 0.12); border-color: var(--border-strong); }
+  button.danger { background: var(--danger-soft); color: var(--danger); }
+  button.danger:hover { background: var(--danger-soft-hover); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
   .card {
     background: var(--surface);
-    border-radius: 14px;
-    padding: 14px;
-    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow);
+    transition: border-color 0.15s;
   }
-  .name { font-weight: 600; font-size: 15px; margin-bottom: 4px; word-break: break-word; color: var(--text); }
+  .card:hover { border-color: var(--border-strong); }
+  .name { font-weight: 600; font-size: 15px; margin-bottom: 6px; word-break: break-word; color: var(--text); }
   .meta { font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
   .bar {
-    height: 8px;
-    border-radius: 4px;
+    height: 7px;
+    border-radius: 999px;
     background: var(--track);
     overflow: hidden;
-    margin-bottom: 10px;
+    margin: 10px 0 12px;
   }
-  .fill { height: 100%; background: var(--fill); }
+  .fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 0.4s ease;
+  }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  .empty { color: var(--text-dim); padding: 24px 0; text-align: center; }
+  .actions button { padding: 8px 12px; font-size: 13px; }
+  .empty { color: var(--text-dim); padding: 32px 0; text-align: center; }
   .status { font-size: 12px; color: var(--text-dim); margin-top: 24px; text-align: center; }
   #uploadPanel { display: none; }
   #uploadFileList label { display: block; font-size: 14px; padding: 4px 0; }
+  pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: transparent; }
 
   /* Feature: every secondary screen (Files, the Add Torrent file
      picker, and each of the feature panels below) opens as its own
@@ -2729,21 +2795,25 @@ object WebUiServer {
   .overlayPanel {
     position: fixed;
     inset: 0;
-    background: var(--bg);
+    background:
+      radial-gradient(900px 420px at 85% -10%, var(--bg-glow), transparent 70%),
+      var(--bg);
     z-index: 30;
     overflow: auto;
-    padding: 16px;
+    padding: 20px 16px;
     margin: 0;
     border-radius: 0;
+    border: none;
+    box-shadow: none;
   }
   .overlayHeader {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
-  .overlayHeader .name { margin: 0; font-size: 17px; }
+  .overlayHeader .name { margin: 0; font-size: 18px; }
 </style>
 </head>
 <body>

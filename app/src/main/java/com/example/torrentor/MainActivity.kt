@@ -4129,34 +4129,49 @@ class MainActivity : AppCompatActivity() {
                 randomPortOnStart = isChecked
                 portInput.isEnabled = !isChecked
 
-                portInput.setText(
-                    if (isChecked) {
-                        extractLiveListenPort(statusText.text.toString())?.toString()
-                            ?: "Random - see status above"
-                    } else {
-                        savedPort.toString()
-                    }
-                )
-
                 prefs.edit()
                     .putBoolean("random_port_on_start", isChecked)
                     .apply()
 
-                Toast.makeText(
-                    this@MainActivity,
-                    if (isChecked) {
-                        "A new random port will be used next time TorrentOr starts"
-                    } else {
-                        "A fixed port will be used next time TorrentOr starts"
-                    },
-                    Toast.LENGTH_LONG
-                ).show()
+                if (isChecked) {
+                    portInput.setText(
+                        extractLiveListenPort(statusText.text.toString())?.toString()
+                            ?: "Random - see status above"
+                    )
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        "A new random port will be used next time TorrentOr starts",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    // Bug fix: turning random mode off used to only save
+                    // the flag, so the engine kept listening on the random
+                    // port until the next restart. It now switches to the
+                    // saved fixed port right away. Read fresh from prefs
+                    // (not the screen-open snapshot in savedPort).
+                    val fixedPort = prefs.getInt("listen_port", 6881)
+                    portInput.setText(fixedPort.toString())
+                    applyAndPersist("Fixed port $fixedPort applied")
+                }
             }
         }
 
         val applyPortButton = Button(this).apply {
             text = "Apply Port Now"
             setOnClickListener {
+                // Bug fix: while random mode is on, the port field shows
+                // the live random port (read-only display), so saving it
+                // here turned that random port into the "fixed" one.
+                if (randomPortOnStart) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Turn off the random port option first",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@setOnClickListener
+                }
+
                 val typed = portInput.text.toString().trim().toIntOrNull()
 
                 if (typed == null || typed <= 0 || typed > 65535) {
