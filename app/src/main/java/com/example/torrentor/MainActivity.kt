@@ -4987,16 +4987,87 @@ class MainActivity : AppCompatActivity() {
             .lowercase()
     }
 
+    // Bug fix: TorrentNative.hasTorrentHash(...) only looks at the LIVE
+    // libtorrent session's currently-loaded torrents. Right at app start
+    // (a fresh process after a background kill, or reopening right after
+    // an APK update) that check runs here in the Activity while
+    // TorrentService.restoreSavedTorrents() is still working through
+    // re-adding every previously-saved torrent back into the session on
+    // its own thread - so for a brief window, a torrent that is genuinely
+    // already added can still report "not added yet" simply because it
+    // hasn't been re-loaded into the session at that exact moment. That
+    // race is what kept letting the file-selection screen reappear even
+    // after the v1.87 fix added the hash check itself. This now also
+    // checks the same persisted "torrent_store" entries
+    // TorrentService.getSavedEntries()/saveFileEntry()/saveMagnetEntry()
+    // write to - which exist the instant a torrent is first added, not
+    // only once it's back in the live session - so either signal being
+    // true means "already added".
     private fun isTorrentAlreadyAddedByHash(hash: String): Boolean {
         if (hash.isBlank()) {
             return false
         }
 
-        return try {
+        val liveSessionHasIt = try {
             TorrentNative.hasTorrentHash(hash)
         } catch (_: Throwable) {
             false
         }
+
+        return liveSessionHasIt || isHashInPersistedTorrentStore(hash)
+    }
+
+    private fun normalizeHashForKey(hash: String): String {
+        return hash
+            .trim()
+            .lowercase()
+            .replace(Regex("[^a-z0-9]"), "")
+    }
+
+    private fun isHashInPersistedTorrentStore(hash: String): Boolean {
+        val target = normalizeHashForKey(hash)
+        if (target.isBlank()) {
+            return false
+        }
+
+        val entries = try {
+            getSharedPreferences("torrent_store", MODE_PRIVATE)
+                .getString("entries", "")
+                ?.split("\n")
+                ?.filter { it.isNotBlank() }
+                ?: emptyList()
+        } catch (_: Throwable) {
+            return false
+        }
+
+        for (entry in entries) {
+            val parts = entry.split("||", limit = 4)
+
+            val matches = when (parts.getOrNull(0)) {
+                "MAGNET" -> {
+                    val magnet = parts.getOrNull(1) ?: ""
+                    normalizeHashForKey(extractHashFromMagnetInput(magnet)) == target
+                }
+
+                "FILE" -> {
+                    // Entries saved with the hash already in them (the
+                    // common case) are checked directly, with no file I/O.
+                    // Older-format entries without a stored hash are
+                    // skipped here rather than hashing the file again -
+                    // TorrentService's own equivalent check (used once the
+                    // session is actually ready) already covers those.
+                    parts.size >= 4 && normalizeHashForKey(parts.getOrNull(1) ?: "") == target
+                }
+
+                else -> false
+            }
+
+            if (matches) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun showAlreadyAddedMessage() {
