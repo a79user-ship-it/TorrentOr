@@ -1,24 +1,32 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Base.Theme.BitFlow" parent="Theme.Material3.DayNight.NoActionBar">
+<resources>
+    <style name="Base.Theme.BitFlow" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@color/bitflow_light</item>
+        <item name="android:navigationBarColor">@color/bitflow_white</item>
+        <item name="android:windowBackground">@color/bitflow_light</item>
         <item name="android:buttonStyle">@style/Widget.BitFlow.Button</item>
-        <item name="colorPrimary">@color/torrentor_teal</item>
-        <item name="colorSecondary">@color/torrentor_orange</item>
-        <item name="colorAccent">@color/torrentor_teal</item>
-        <item name="android:colorAccent">@color/torrentor_teal</item>
-        <item name="colorControlActivated">@color/torrentor_teal</item>
+        <item name="colorPrimary">@color/bitflow_primary</item>
+        <item name="colorPrimaryVariant">@color/bitflow_primary_dark</item>
+        <item name="colorSecondary">@color/bitflow_secondary</item>
+        <item name="colorAccent">@color/bitflow_primary</item>
+        <item name="android:colorAccent">@color/bitflow_primary</item>
+        <item name="colorControlActivated">@color/bitflow_primary</item>
+        <item name="android:textColorPrimary">@color/bitflow_dark</item>
+        <item name="android:textColorSecondary">#FF6C757D</item>
     </style>
 
     <style name="Theme.BitFlow" parent="Base.Theme.BitFlow" />
 
     <style name="Widget.BitFlow.Button" parent="android:Widget.Material.Button">
         <item name="android:background">@drawable/torrentor_button_background</item>
-        <item name="android:textColor">@color/torrentor_teal</item>
+        <item name="android:textColor">@color/bitflow_primary</item>
         <item name="android:textAllCaps">false</item>
-        <item name="android:paddingTop">6dp</item>
-        <item name="android:paddingBottom">6dp</item>
-        <item name="android:paddingStart">10dp</item>
-        <item name="android:paddingEnd">10dp</item>
-        <item name="android:minHeight">0dp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">8dp</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:minHeight">44dp</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:stateListAnimator">@null</item>
     </style>
