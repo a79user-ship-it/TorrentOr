@@ -14,7 +14,7 @@ val keystoreProps = Properties().apply {
 
 android {
     namespace = "com.example.torrentor"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.kumaran.bitflow"
