@@ -4,13 +4,23 @@ project(torrentor)
 
 add_library(torrentor SHARED torrentor.cpp)
 
-# Tell C++ where libtorrent headers are
+# CI/local build paths are supplied by environment variables.
+set(LIBTORRENT_INCLUDE_DIR "$ENV{LIBTORRENT_INCLUDE_DIR}")
+set(BOOST_INCLUDE_DIR "$ENV{BOOST_INCLUDE_DIR}")
+
+if(NOT LIBTORRENT_INCLUDE_DIR)
+    set(LIBTORRENT_INCLUDE_DIR "/usr/include")
+endif()
+
+if(NOT BOOST_INCLUDE_DIR)
+    set(BOOST_INCLUDE_DIR "/usr/include")
+endif()
+
 target_include_directories(torrentor PRIVATE
-        C:/Users/Administrator/Downloads/libtorrent/include
-        C:/Users/Administrator/Downloads/boost_1_91_0/boost_1_91_0
+        ${LIBTORRENT_INCLUDE_DIR}
+        ${BOOST_INCLUDE_DIR}
 )
 
-# Import compiled libtorrent .so
 add_library(libtorrent SHARED IMPORTED)
 
 set_target_properties(libtorrent PROPERTIES

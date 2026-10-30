@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- BitFlow corporate flat design palette -->
+    <color name="bitflow_primary">#FF007BFF</color>
+    <color name="bitflow_primary_dark">#FF0056B3</color>
+    <color name="bitflow_secondary">#FF17A2B8</color>
+    <color name="bitflow_success">#FF28A745</color>
+    <color name="bitflow_warning">#FFFFC107</color>
+    <color name="bitflow_danger">#FFDC3545</color>
+    <color name="bitflow_dark">#FF343A40</color>
+    <color name="bitflow_light">#FFF8F9FA</color>
+    <color name="bitflow_white">#FFFFFFFF</color>
+    <color name="bitflow_border">#FFE1E5EA</color>
+
+    <!-- Compatibility aliases for existing native/programmatic UI code. -->
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-
-    <!-- Feature: modern look - the app's accent colors, matching the teal/
-         orange already used by the speed graph and the ↓/↑ speed readout,
-         so buttons read as part of the same visual identity. -->
-    <color name="torrentor_teal">#FF4FD1C5</color>
-    <color name="torrentor_orange">#FFF6AD55</color>
-    <color name="torrentor_teal_tonal">#294FD1C5</color>
-    <color name="torrentor_ripple">#334FD1C5</color>
+    <color name="torrentor_teal">@color/bitflow_primary</color>
+    <color name="torrentor_orange">@color/bitflow_secondary</color>
+    <color name="torrentor_teal_tonal">#14007BFF</color>
+    <color name="torrentor_ripple">#33007BFF</color>
 </resources>

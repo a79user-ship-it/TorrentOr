@@ -3,84 +3,54 @@
     package="com.example.torrentor">
 
     <uses-permission android:name="android.permission.INTERNET" />
-
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- (added) Needed on Android 13+ to show the "download complete" notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- (added, Feature 4) Lets the Connection screen detect mobile data, so it can
-         show "not available on mobile data" instead of letting UPnP/NAT-PMP loop on
-         a failure that can never succeed over a carrier connection. Normal permission,
-         no runtime prompt. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- (added, Feature 4) Needed to hold a WifiManager.MulticastLock while UPnP is
-         enabled, so SSDP multicast responses from the router can actually reach the
-         app on networks/devices that otherwise filter them. Normal permission, no
-         runtime prompt. Held only while UPnP is on and the service is running. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"
         android:dataExtractionRules="@xml/data_extraction_rules"
-        android:icon="@drawable/torrentor_logo"
-        android:roundIcon="@drawable/torrentor_logo"
+        android:icon="@drawable/bitflow_logo"
+        android:roundIcon="@drawable/bitflow_logo"
         android:label="@string/app_name"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
-        android:theme="@style/Theme.TorrentOr">
+        android:theme="@style/Theme.BitFlow">
 
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask">
-
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
-
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-
                 <data android:scheme="magnet" />
             </intent-filter>
-
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
-
                 <category android:name="android.intent.category.DEFAULT" />
-
                 <data android:mimeType="application/x-bittorrent" />
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
-
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
-
                 <category android:name="android.intent.category.DEFAULT" />
-
                 <data android:scheme="file" />
                 <data android:scheme="content" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-
         </activity>
 
         <service
@@ -93,24 +63,18 @@
             android:authorities="${applicationId}.provider"
             android:exported="false"
             android:grantUriPermissions="true">
-
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
-
         </provider>
 
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true">
-
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
-
         </receiver>
-
     </application>
-
 </manifest>
