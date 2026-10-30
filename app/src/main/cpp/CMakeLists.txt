@@ -4,8 +4,7 @@ project(torrentor)
 
 add_library(torrentor SHARED torrentor.cpp)
 
-# The original project used machine-specific Windows paths. Keep the
-# include directories configurable so GitHub Actions and local builds work.
+# CI/local build paths are supplied by environment variables.
 set(LIBTORRENT_INCLUDE_DIR "$ENV{LIBTORRENT_INCLUDE_DIR}")
 set(BOOST_INCLUDE_DIR "$ENV{BOOST_INCLUDE_DIR}")
 
@@ -22,7 +21,6 @@ target_include_directories(torrentor PRIVATE
         ${BOOST_INCLUDE_DIR}
 )
 
-# Import the Android libtorrent binary shipped with the project.
 add_library(libtorrent SHARED IMPORTED)
 
 set_target_properties(libtorrent PROPERTIES
