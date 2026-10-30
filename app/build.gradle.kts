@@ -5,11 +5,8 @@ plugins {
     id("com.android.application")
 }
 
-// (added) Release signing details are read from keystore.properties in the
-// project root. That file holds passwords, so it must not go into git.
 val keystoreProps = Properties().apply {
     val propsFile = rootProject.file("keystore.properties")
-
     if (propsFile.exists()) {
         FileInputStream(propsFile).use { load(it) }
     }
@@ -20,38 +17,27 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.example.torrentor"
+        applicationId = "com.kumaran.bitflow"
         minSdk = 24
         targetSdk = 36
-
-        // (changed) Raise versionCode with every release you install over an
-        // older one. Android refuses an update whose versionCode is lower.
-        versionCode = 92
-        versionName = "1.90"
+        versionCode = 1
+        versionName = "1.0.0"
 
         ndk {
-            abiFilters += listOf(
-                "arm64-v8a",
-                "armeabi-v7a"
-            )
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
 
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                abiFilters(
-                    "arm64-v8a",
-                    "armeabi-v7a"
-                )
+                abiFilters("arm64-v8a", "armeabi-v7a")
             }
         }
     }
 
-    // (added) The key used to sign the release APK.
     signingConfigs {
         create("release") {
             val storePath = keystoreProps.getProperty("storeFile")
-
             if (storePath != null) {
                 storeFile = file(storePath)
                 storePassword = keystoreProps.getProperty("storePassword")
@@ -61,12 +47,9 @@ android {
         }
     }
 
-    // (added) Minify stays off: the app calls native code by name (JNI), and
-    // shrinking would rename those classes.
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
-
             if (keystoreProps.getProperty("storeFile") != null) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -86,10 +69,6 @@ dependencies {
     implementation(libs.androidx.activity.ktx)
     implementation(libs.material)
     implementation("androidx.documentfile:documentfile:1.0.1")
-
-    // (added) Pure-Java, no native code - used only to generate the Web
-    // UI's self-signed HTTPS certificate (WebUiServer.kt). Does not
-    // touch anything else in the app.
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
 }
