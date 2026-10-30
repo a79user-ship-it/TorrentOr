@@ -38,7 +38,17 @@ jobs:
       - name: Install Android build tools
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          sdkmanager "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+
+      - name: Prepare libtorrent and Boost headers
+        run: |
+          git clone --depth 1 --branch v2.0.13 https://github.com/arvidn/libtorrent.git "$RUNNER_TEMP/libtorrent"
+          curl -L --fail --retry 3 -o "$RUNNER_TEMP/boost.tar.gz" https://archives.boost.io/release/1.91.0/source/boost_1_91_0.tar.gz
+          tar -xzf "$RUNNER_TEMP/boost.tar.gz" -C "$RUNNER_TEMP"
+          echo "LIBTORRENT_INCLUDE_DIR=$RUNNER_TEMP/libtorrent/include" >> "$GITHUB_ENV"
+          echo "BOOST_INCLUDE_DIR=$RUNNER_TEMP/boost_1_91_0" >> "$GITHUB_ENV"
+          test -f "$RUNNER_TEMP/libtorrent/include/libtorrent/session.hpp"
+          test -f "$RUNNER_TEMP/boost_1_91_0/boost/asio.hpp"
 
       - name: Verify Git LFS native libraries
         run: |
