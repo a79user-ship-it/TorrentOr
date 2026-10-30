@@ -391,9 +391,9 @@ class MainActivity : AppCompatActivity() {
             AlertDialog.Builder(this)
                 .setTitle("Allow storage access")
                 .setMessage(
-                    "TorrentOr saves downloads to your Download folder. " +
+                    "BitFlow saves downloads to your Download folder. " +
                             "On the next screen, turn on \"Allow access to manage all files\" " +
-                            "for TorrentOr, then come back to the app."
+                            "for BitFlow, then come back to the app."
                 )
                 .setCancelable(false)
                 .setPositiveButton("Open settings") { _, _ ->
@@ -507,7 +507,7 @@ class MainActivity : AppCompatActivity() {
 
             showTorrentFileSelection(filePath)
 
-            Toast.makeText(this, "Torrent file opened in TorrentOr", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Torrent file opened in BitFlow", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             e.printStackTrace()
             Toast.makeText(this, "Could not open torrent file", Toast.LENGTH_SHORT).show()
@@ -545,474 +545,194 @@ class MainActivity : AppCompatActivity() {
         currentDetailsContentText = null
         currentDetailsFileListLayout = null
 
+        val density = resources.displayMetrics.density
+        fun dp(value: Int): Int = (value * density).toInt()
+        val blue = Color.parseColor("#007BFF")
+        val dark = Color.parseColor("#343A40")
+        val muted = Color.parseColor("#6C757D")
+        val light = Color.parseColor("#F8F9FA")
+        val white = Color.WHITE
+        val border = Color.parseColor("#E1E5EA")
+
+        fun panelBackground(): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                setColor(white)
+                setStroke(dp(1), border)
+            }
+
+        fun fieldBackground(): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                setColor(white)
+                setStroke(dp(1), border)
+            }
+
+        fun styleButton(button: Button, primary: Boolean = false) {
+            button.isAllCaps = false
+            button.minHeight = dp(44)
+            button.setPadding(dp(14), dp(8), dp(14), dp(8))
+            button.textSize = 14f
+            button.background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(4).toFloat()
+                if (primary) setColor(blue) else { setColor(white); setStroke(dp(1), blue) }
+            }
+            button.setTextColor(if (primary) white else blue)
+        }
+
+        fun heading(text: String, size: Float = 18f): TextView = TextView(this).apply {
+            this.text = text
+            textSize = size
+            setTextColor(dark)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(8), 0, dp(8))
+        }
+
+        fun body(text: String): TextView = TextView(this).apply {
+            this.text = text
+            textSize = 13f
+            setTextColor(muted)
+            setPadding(0, 0, 0, dp(8))
+        }
+
+        fun spacer(height: Int = 8): Space = Space(this).apply {
+            layoutParams = LinearLayout.LayoutParams(1, dp(height))
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-            setBackgroundColor(bgColor())
+            setPadding(dp(20), dp(18), dp(20), dp(24))
+            setBackgroundColor(light)
         }
 
-        val title = TextView(this).apply {
-            text = getString(R.string.app_name)
-            textSize = 26f
-            setTextColor(Color.WHITE)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
         }
-
-        val themeButton = Button(this).apply {
-            text = "Switch Theme: ${currentThemeName()}"
-            setOnClickListener { switchTheme() }
+        val logo = ImageView(this).apply {
+            setImageResource(R.drawable.bitflow_logo)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            layoutParams = LinearLayout.LayoutParams(dp(46), dp(46)).apply { rightMargin = dp(12) }
         }
+        val headerText = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        headerText.addView(TextView(this).apply {
+            text = "BitFlow"
+            textSize = 25f
+            setTextColor(dark)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        headerText.addView(TextView(this).apply {
+            text = "Torrent Downloader"
+            textSize = 13f
+            setTextColor(muted)
+        })
+        header.addView(logo)
+        header.addView(headerText)
+        root.addView(header)
+        root.addView(spacer(14))
 
-        val selectModeButton = Button(this).apply {
-            text = if (selectMode) "Exit Select Mode" else "Select Torrents"
-            setOnClickListener {
-                selectMode = !selectMode
-                selectedTorrents.clear()
-                showMainScreen()
-            }
+        val quickCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = panelBackground()
         }
-
-        // Feature: Select All / Select None, so bulk actions (Force Recheck
-        // Selected, Force Reannounce Selected, and the others below) don't
-        // require tapping every torrent's checkbox one at a time. "Select
-        // All" only selects torrents currently visible under the active
-        // filter/search, matching what updateTorrentList() itself shows.
-        val selectAllButton = Button(this).apply {
-            text = "Select All"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (!selectMode) return@setOnClickListener
-
-                selectedTorrents.clear()
-                selectedTorrents.addAll(getVisibleTorrentIndexes())
-                updateTorrentList()
-            }
-        }
-
-        val selectNoneButton = Button(this).apply {
-            text = "Select None"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (!selectMode) return@setOnClickListener
-
-                selectedTorrents.clear()
-                updateTorrentList()
-            }
-        }
-
-        val forceRecheckSelected = Button(this).apply {
-            text = "Force Recheck Selected"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (selectedTorrents.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                for (index in selectedTorrents.sorted()) {
-                    TorrentNative.forceRecheck(index)
-                }
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Force recheck started for ${selectedTorrents.size} torrent(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
-
-                selectedTorrents.clear()
-                selectMode = false
-                showMainScreen()
-            }
-
-        }
-
-        val forceReannounceSelected = Button(this).apply {
-            text = "Force Reannounce Selected"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (selectedTorrents.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                for (index in selectedTorrents.sorted()) {
-                    TorrentNative.forceReannounce(index)
-                }
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Reannounce sent for ${selectedTorrents.size} torrent(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
-
-                selectedTorrents.clear()
-                selectMode = false
-                showMainScreen()
-            }
-        }
-
-        val pauseSelected = Button(this).apply {
-            text = "Pause Selected"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (selectedTorrents.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                for (index in selectedTorrents.sorted()) {
-                    sendTorrentAction("PAUSE_TORRENT", index)
-                }
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Paused ${selectedTorrents.size} torrent(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
-
-                selectedTorrents.clear()
-                selectMode = false
-                showMainScreen()
-            }
-        }
-
-        val resumeSelected = Button(this).apply {
-            text = "Resume Selected"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (selectedTorrents.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                for (index in selectedTorrents.sorted()) {
-                    sendTorrentAction("RESUME_TORRENT", index)
-                }
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Resumed ${selectedTorrents.size} torrent(s)",
-                    Toast.LENGTH_SHORT
-                ).show()
-
-                selectedTorrents.clear()
-                selectMode = false
-                showMainScreen()
-            }
-        }
-
-        val removeSelected = Button(this).apply {
-            text = "Remove Selected"
-            isEnabled = selectMode
-
-            setOnClickListener {
-                if (selectedTorrents.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
-                    return@setOnClickListener
-                }
-
-                val count = selectedTorrents.size
-
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Remove Selected Torrents?")
-                    .setMessage("Choose how you want to remove $count selected torrent(s).")
-                    .setNegativeButton("Cancel", null)
-                    .setNeutralButton("Remove Torrent Only") { _, _ ->
-                        for (index in selectedTorrents.sortedDescending()) {
-                            sendTorrentAction(
-                                action = "REMOVE_TORRENT",
-                                torrentIndex = index,
-                                deleteFiles = false
-                            )
-                        }
-
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Removed $count torrent(s)",
-                            Toast.LENGTH_SHORT
-                        ).show()
-
-                        selectedTorrents.clear()
-                        selectMode = false
-                        showMainScreen()
-                    }
-                    .setPositiveButton("Remove + Files") { _, _ ->
-                        for (index in selectedTorrents.sortedDescending()) {
-                            sendTorrentAction(
-                                action = "REMOVE_TORRENT",
-                                torrentIndex = index,
-                                deleteFiles = true
-                            )
-                        }
-
-                        Toast.makeText(
-                            this@MainActivity,
-                            "Removed $count torrent(s) and files",
-                            Toast.LENGTH_SHORT
-                        ).show()
-
-                        selectedTorrents.clear()
-                        selectMode = false
-                        showMainScreen()
-                    }
-                    .show()
-            }
-        }
-
+        quickCard.addView(heading("Add a download", 17f))
+        quickCard.addView(body("Paste a magnet link or choose a .torrent file."))
         val magnetInput = EditText(this).apply {
-            hint = "Paste magnet link or hash"
-            setHintTextColor(Color.LTGRAY)
-            setTextColor(Color.WHITE)
+            hint = "Magnet link or info hash"
+            textSize = 14f
+            setTextColor(dark)
+            setHintTextColor(muted)
+            setSingleLine(true)
+            setPadding(dp(12), 0, dp(12), 0)
+            background = fieldBackground()
         }
-
+        quickCard.addView(magnetInput, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(10) })
+        val addRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val addMagnet = Button(this).apply {
-            text = "Add Magnet / Hash"
+            text = "Add Magnet"
+            styleButton(this, true)
             setOnClickListener {
                 var magnet = magnetInput.text.toString().trim()
-
                 if (magnet.isEmpty()) {
-                    Toast.makeText(this@MainActivity, "Enter magnet or hash", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Enter a magnet link or hash", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-
-                if (!magnet.startsWith("magnet:")) {
-                    magnet = "magnet:?xt=urn:btih:$magnet"
-                }
-
+                if (!magnet.startsWith("magnet:")) magnet = "magnet:?xt=urn:btih:$magnet"
                 val hash = extractHashFromMagnetInput(magnet)
-
                 if (isTorrentAlreadyAddedByHash(hash)) {
                     showAlreadyAddedMessage()
                     return@setOnClickListener
                 }
-
                 magnetInput.setText("")
                 showMagnetMetadataScreen(magnet)
             }
         }
-
         val selectFile = Button(this).apply {
-            text = "Select Torrent File"
+            text = "Choose .torrent"
+            styleButton(this)
             setOnClickListener { pickTorrent.launch("*/*") }
         }
+        addRow.addView(addMagnet, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(8) })
+        addRow.addView(selectFile, LinearLayout.LayoutParams(0, dp(48), 1f))
+        quickCard.addView(addRow)
+        root.addView(quickCard)
+        root.addView(spacer(12))
 
         val searchBox = EditText(this).apply {
-            hint = "Search torrents..."
-            setHintTextColor(Color.LTGRAY)
-            setTextColor(Color.WHITE)
+            hint = "Search your torrents"
+            textSize = 14f
+            setTextColor(dark)
+            setHintTextColor(muted)
+            setSingleLine(true)
             setText(searchQuery)
             setSelection(text.length)
-
+            setPadding(dp(14), 0, dp(14), 0)
+            background = fieldBackground()
             addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(
-                    s: CharSequence?,
-                    start: Int,
-                    count: Int,
-                    after: Int
-                ) {
-                    // Not needed
-                }
-
-                override fun onTextChanged(
-                    s: CharSequence?,
-                    start: Int,
-                    before: Int,
-                    count: Int
-                ) {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                     searchQuery = s?.toString() ?: ""
                     updateTorrentList()
                 }
-
-                override fun afterTextChanged(s: Editable?) {
-                    // Not needed
-                }
+                override fun afterTextChanged(s: Editable?) {}
             })
         }
+        root.addView(searchBox, LinearLayout.LayoutParams(-1, dp(48)))
+        root.addView(spacer(12))
 
-        val clearSearch = Button(this).apply {
-            text = "Clear Search"
-            setOnClickListener {
-                searchQuery = ""
-                searchBox.setText("")
-                updateTorrentList()
-            }
+        val speedCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = panelBackground()
         }
-
+        speedCard.addView(heading("Transfer activity", 17f))
         speedGraphText = TextView(this).apply {
             text = buildSpeedSummaryText()
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            setPadding(16, 16, 16, 8)
-            setBackgroundColor(Color.rgb(20, 20, 20))
+            textSize = 13f
+            setTextColor(muted)
+            setPadding(0, 0, 0, dp(10))
         }
-
+        speedCard.addView(speedGraphText)
         speedGraphView = SpeedGraphView(this).apply {
-            // The view paints its own rounded dark panel in onDraw(), so no
-            // background/padding here - that would show as a mismatched
-            // square edge behind the rounded corners. Bottom margin only,
-            // to separate it from whatever comes next in the layout.
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                360
-            ).apply {
-                setMargins(0, 0, 0, 16)
-            }
+            layoutParams = LinearLayout.LayoutParams(-1, dp(190))
             setData(downloadSpeedHistory, uploadSpeedHistory)
         }
+        speedCard.addView(speedGraphView)
+        root.addView(speedCard)
+        root.addView(spacer(12))
 
-        val pauseAll = Button(this).apply {
-            text = "Pause All"
-            setOnClickListener {
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("ACTION", "PAUSE_ALL")
-                startTorrentService(intent)
-            }
-        }
-
-        val resumeAll = Button(this).apply {
-            text = "Resume All"
-            setOnClickListener {
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("ACTION", "RESUME_ALL")
-                startTorrentService(intent)
-            }
-        }
-
-        val clearSaved = Button(this).apply {
-            text = "Clean Deleted Torrents"
-            setOnClickListener {
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("ACTION", "CLEAN_DELETED_SAVED_TORRENTS")
-                startTorrentService(intent)
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Old deleted torrents cleaned",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-
-        val globalStatistics = Button(this).apply {
-            text = "Statistics"
-            setOnClickListener {
-                showGlobalStatisticsScreen()
-            }
-        }
-
-        val portForwardingStatus = Button(this).apply {
-            text = "Port Forwarding Status"
-            setOnClickListener {
-                showPortForwardingStatusScreen()
-            }
-        }
-
-        val networkFeatures = Button(this).apply {
-            text = "Network Features"
-            setOnClickListener {
-                showNetworkFeaturesScreen()
-            }
-        }
-
-        val connectionSettingsButton = Button(this).apply {
-            text = "Connection"
-            setOnClickListener {
-                showConnectionSettingsScreen()
-            }
-        }
-
-        val speedLimitsButton = Button(this).apply {
-            text = "Speed Limits"
-            setOnClickListener {
-                showSpeedLimitsScreen()
-            }
-        }
-
-
-        val storageSpaceButton = Button(this).apply {
-            text = "Storage Space"
-            setOnClickListener {
-                showStorageSpaceScreen()
-            }
-        }
-
-        val saveFolderButton = Button(this).apply {
-            text = "Save Folder"
-            setOnClickListener {
-                showSaveFolderScreen()
-            }
-        }
-
-        val rssButton = Button(this).apply {
-            text = "RSS Feeds"
-            setOnClickListener {
-                showRssScreen()
-            }
-        }
-
-        val executionLogButton = Button(this).apply {
-            text = "Execution Log"
-            setOnClickListener {
-                showExecutionLogScreen()
-            }
-        }
-
-        val onlineSearchButton = Button(this).apply {
-            text = "Online Search"
-            setOnClickListener {
-                showOnlineSearchScreen()
-            }
-        }
-
-        val webUiButton = Button(this).apply {
-            text = "Web UI"
-            setOnClickListener {
-                showWebUiScreen()
-            }
-        }
-
-        val filterTitle = TextView(this).apply {
-            text = "Filter: $activeFilter"
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            setPadding(0, 16, 0, 4)
-        }
-
-        val filterRowOne = LinearLayout(this).apply {
+        val torrentHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
         }
-
-        val filterRowTwo = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-
-        fun makeFilterButton(name: String): Button {
-            return Button(this).apply {
-                text = if (activeFilter == name) "[$name]" else name
-                setOnClickListener {
-                    activeFilter = name
-                    torrentListViewPrefs().edit().putString("filter", name).apply()
-                    selectedTorrents.clear()
-                    selectMode = false
-                    showMainScreen()
-                }
-            }
-        }
-
-        filterRowOne.addView(makeFilterButton("All"))
-        filterRowOne.addView(makeFilterButton("Downloading"))
-        filterRowOne.addView(makeFilterButton("Seeding"))
-
-        filterRowTwo.addView(makeFilterButton("Paused"))
-        filterRowTwo.addView(makeFilterButton("Completed"))
-
+        torrentHeader.addView(heading("Downloads", 19f), LinearLayout.LayoutParams(0, -2, 1f))
         val sortButton = Button(this).apply {
             text = "Sort: $sortMode"
+            styleButton(this)
             setOnClickListener {
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("Sort torrents by")
@@ -1024,52 +744,120 @@ class MainActivity : AppCompatActivity() {
                     .show()
             }
         }
+        torrentHeader.addView(sortButton, LinearLayout.LayoutParams(-2, dp(44)))
+        root.addView(torrentHeader)
+
+        val filterRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun makeFilterButton(name: String): Button = Button(this).apply {
+            text = name
+            styleButton(this, activeFilter == name)
+            layoutParams = LinearLayout.LayoutParams(-2, dp(42)).apply { rightMargin = dp(6) }
+            setOnClickListener {
+                activeFilter = name
+                torrentListViewPrefs().edit().putString("filter", name).apply()
+                selectedTorrents.clear()
+                selectMode = false
+                showMainScreen()
+            }
+        }
+        filterRow.addView(makeFilterButton("All"))
+        filterRow.addView(makeFilterButton("Downloading"))
+        filterRow.addView(makeFilterButton("Seeding"))
+        filterRow.addView(makeFilterButton("Paused"))
+        filterRow.addView(makeFilterButton("Completed"))
+        root.addView(horizontalScrollFor(filterRow))
+        root.addView(spacer(8))
+
+        val selectRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val selectModeButton = Button(this).apply {
+            text = if (selectMode) "Exit Select Mode" else "Select Torrents"
+            styleButton(this, selectMode)
+            setOnClickListener {
+                selectMode = !selectMode
+                selectedTorrents.clear()
+                showMainScreen()
+            }
+        }
+        selectRow.addView(selectModeButton, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(6) })
+        val selectAllButton = Button(this).apply {
+            text = "Select All"
+            styleButton(this)
+            isEnabled = selectMode
+            setOnClickListener {
+                if (!selectMode) return@setOnClickListener
+                selectedTorrents.clear()
+                selectedTorrents.addAll(getVisibleTorrentIndexes())
+                updateTorrentList()
+            }
+        }
+        selectRow.addView(selectAllButton, LinearLayout.LayoutParams(0, dp(44), 1f))
+        root.addView(selectRow)
+
+        if (selectMode) {
+            val bulkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fun bulkButton(label: String, action: () -> Unit): Button = Button(this).apply {
+                text = label
+                styleButton(this)
+                setOnClickListener(action)
+            }
+            bulkRow.addView(bulkButton("Pause") {
+                if (selectedTorrents.isEmpty()) Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                else { selectedTorrents.sorted().forEach { sendTorrentAction("PAUSE_TORRENT", it) }; selectedTorrents.clear(); selectMode = false; showMainScreen() }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(6) })
+            bulkRow.addView(bulkButton("Resume") {
+                if (selectedTorrents.isEmpty()) Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                else { selectedTorrents.sorted().forEach { sendTorrentAction("RESUME_TORRENT", it) }; selectedTorrents.clear(); selectMode = false; showMainScreen() }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f).apply { rightMargin = dp(6) })
+            bulkRow.addView(bulkButton("Recheck") {
+                if (selectedTorrents.isEmpty()) Toast.makeText(this@MainActivity, "No torrents selected", Toast.LENGTH_SHORT).show()
+                else { selectedTorrents.sorted().forEach { TorrentNative.forceRecheck(it) }; selectedTorrents.clear(); selectMode = false; showMainScreen() }
+            }, LinearLayout.LayoutParams(0, dp(44), 1f))
+            root.addView(bulkRow)
+        }
 
         listLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(8), 0, 0)
         }
-
-        root.addView(title)
-        root.addView(themeButton)
-        root.addView(selectModeButton)
-        root.addView(selectAllButton)
-        root.addView(selectNoneButton)
-        root.addView(forceRecheckSelected)
-        root.addView(forceReannounceSelected)
-        root.addView(pauseSelected)
-        root.addView(resumeSelected)
-        root.addView(removeSelected)
-        root.addView(magnetInput)
-        root.addView(addMagnet)
-        root.addView(selectFile)
-        root.addView(searchBox)
-        root.addView(clearSearch)
-        root.addView(speedGraphText)
-        root.addView(speedGraphView)
-        root.addView(pauseAll)
-        root.addView(resumeAll)
-        root.addView(clearSaved)
-        root.addView(globalStatistics)
-        root.addView(portForwardingStatus)
-        root.addView(networkFeatures)
-        root.addView(connectionSettingsButton)
-        root.addView(speedLimitsButton)
-        root.addView(storageSpaceButton)
-        root.addView(saveFolderButton)
-        root.addView(rssButton)
-        root.addView(executionLogButton)
-        root.addView(onlineSearchButton)
-        root.addView(webUiButton)
-        root.addView(filterTitle)
-        root.addView(horizontalScrollFor(filterRowOne))
-        root.addView(horizontalScrollFor(filterRowTwo))
-        root.addView(sortButton)
         root.addView(listLayout)
+
+        val toolsCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            background = panelBackground()
+        }
+        toolsCard.addView(heading("Management", 17f))
+        toolsCard.addView(body("Network, storage, search and advanced torrent controls."))
+        fun addToolRow(leftText: String, leftAction: () -> Unit, rightText: String, rightAction: () -> Unit) {
+            val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            val left = Button(this@MainActivity).apply { text = leftText; styleButton(this); setOnClickListener { leftAction() } }
+            val right = Button(this@MainActivity).apply { text = rightText; styleButton(this); setOnClickListener { rightAction() } }
+            row.addView(left, LinearLayout.LayoutParams(0, dp(46), 1f).apply { rightMargin = dp(8) })
+            row.addView(right, LinearLayout.LayoutParams(0, dp(46), 1f))
+            toolsCard.addView(row)
+            toolsCard.addView(spacer(8))
+        }
+        addToolRow("Pause All", {
+            startTorrentService(Intent(this, TorrentService::class.java).apply { putExtra("ACTION", "PAUSE_ALL") })
+        }, "Resume All", {
+            startTorrentService(Intent(this, TorrentService::class.java).apply { putExtra("ACTION", "RESUME_ALL") })
+        })
+        addToolRow("Statistics", { showGlobalStatisticsScreen() }, "Connection", { showConnectionSettingsScreen() })
+        addToolRow("Speed Limits", { showSpeedLimitsScreen() }, "Storage Space", { showStorageSpaceScreen() })
+        addToolRow("Save Folder", { showSaveFolderScreen() }, "Network Features", { showNetworkFeaturesScreen() })
+        addToolRow("RSS Feeds", { showRssScreen() }, "Online Search", { showOnlineSearchScreen() })
+        addToolRow("Execution Log", { showExecutionLogScreen() }, "Web UI", { showWebUiScreen() })
+        addToolRow("Port Forwarding", { showPortForwardingStatusScreen() }, "Clean Deleted", {
+            startTorrentService(Intent(this, TorrentService::class.java).apply { putExtra("ACTION", "CLEAN_DELETED_SAVED_TORRENTS") })
+            Toast.makeText(this, "Deleted torrent records cleaned", Toast.LENGTH_SHORT).show()
+        })
+        root.addView(spacer(12))
+        root.addView(toolsCard)
 
         val outerScroll = ScrollView(this).apply {
             addView(root)
+            setFillViewport(true)
         }
-
         setContentView(outerScroll)
         isOnMainScreen = true
         updateTorrentList()
