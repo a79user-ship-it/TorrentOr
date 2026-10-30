@@ -47,6 +47,11 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
+      - name: Verify native library
+        run: |
+          test -s app/src/main/jniLibs/arm64-v8a/libtorrent-rasterbar.so
+          test -s app/src/main/jniLibs/armeabi-v7a/libtorrent-rasterbar.so
+
       - name: Build debug APK
         env:
           LIBTORRENT_INCLUDE_DIR: /usr/include
