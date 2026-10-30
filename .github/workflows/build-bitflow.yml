@@ -28,35 +28,30 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Android SDK
+      - name: Set up Android SDK command-line tools
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 12266719
+          packages: platform-tools
           accept-android-sdk-licenses: true
 
       - name: Install Android build tools
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-37" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          sdkmanager "platforms;android-37" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
 
-      - name: Install native headers
+      - name: Verify Git LFS native libraries
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libtorrent-rasterbar-dev libboost-dev
+          file app/src/main/jniLibs/arm64-v8a/libtorrent-rasterbar.so
+          file app/src/main/jniLibs/armeabi-v7a/libtorrent-rasterbar.so
+          test -s app/src/main/jniLibs/arm64-v8a/libtorrent-rasterbar.so
+          test -s app/src/main/jniLibs/armeabi-v7a/libtorrent-rasterbar.so
 
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
-      - name: Verify native library
-        run: |
-          test -s app/src/main/jniLibs/arm64-v8a/libtorrent-rasterbar.so
-          test -s app/src/main/jniLibs/armeabi-v7a/libtorrent-rasterbar.so
-
       - name: Build debug APK
-        env:
-          LIBTORRENT_INCLUDE_DIR: /usr/include
-          BOOST_INCLUDE_DIR: /usr/include
-        run: ./gradlew --no-daemon assembleDebug
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
