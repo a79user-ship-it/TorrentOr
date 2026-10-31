@@ -432,15 +432,6 @@ object WebUiServer {
                 method == "POST" && path == "/api/storage_threshold" ->
                     handleSetStorageThreshold(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
-                // Feature: "Speed Limits" tab - same "global_speed_limits"
-                // prefs and same TorrentNative.applyGlobalSpeedLimits call
-                // as the app's own Speed Limits screen (global limits only).
-                method == "GET" && path == "/api/speed_limits" ->
-                    handleGetSpeedLimits(context, output)
-
-                method == "POST" && path == "/api/speed_limits" ->
-                    handleSetSpeedLimits(context, String(bodyBytes, StandardCharsets.UTF_8), output)
-
                 // Feature: "Execution Log" - same AppLog entries the
                 // app's own Execution Log screen shows (shared process,
                 // same in-memory/on-disk log), filtered by level.
@@ -509,16 +500,6 @@ object WebUiServer {
 
                 method == "POST" && path == "/api/torrent_save_folder" ->
                     handleSetTorrentSaveFolder(context, String(bodyBytes, StandardCharsets.UTF_8), output)
-
-                // Feature: per-torrent speed limit - same native
-                // setTorrentSpeedLimits call and same "torrent_speed_limits"
-                // prefs (keyed by info-hash, never list index) as the
-                // app's own "Apply Torrent Speed Limit" button.
-                method == "GET" && path == "/api/torrent_speed_limit" ->
-                    handleGetTorrentSpeedLimit(parseQueryParam(query, "index")?.toIntOrNull(), output)
-
-                method == "POST" && path == "/api/torrent_speed_limit" ->
-                    handleSetTorrentSpeedLimit(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
                 // Feature: graphical folder picker for the Save Folder
                 // panels - lists subfolders of a path, and creates a new
@@ -1030,72 +1011,6 @@ object WebUiServer {
         sendJson(output, "{\"ok\":true}")
     }
 
-    // Feature: "Speed Limits" - mirrors MainActivity.showSpeedLimitsScreen():
-    // limits are entered in KB/s, stored in bytes in the same
-    // "global_speed_limits" prefs ("upload_limit"/"download_limit"),
-    // blank or 0 means unlimited, and applied live through the same
-    // TorrentNative.applyGlobalSpeedLimits call.
-    private fun handleGetSpeedLimits(context: Context, output: OutputStream) {
-        val prefs = context.getSharedPreferences("global_speed_limits", Context.MODE_PRIVATE)
-
-        val uploadBytes = prefs.getInt("upload_limit", 0)
-        val downloadBytes = prefs.getInt("download_limit", 0)
-
-        sendJson(
-            output,
-            "{\"ok\":true" +
-                    ",\"upload\":" + jsonString(if (uploadBytes > 0) (uploadBytes / 1024).toString() else "") +
-                    ",\"download\":" + jsonString(if (downloadBytes > 0) (downloadBytes / 1024).toString() else "") +
-                    "}"
-        )
-    }
-
-    private fun handleSetSpeedLimits(context: Context, body: String, output: OutputStream) {
-        val uploadText = (extractJsonStringField(body, "upload") ?: "").trim()
-        val downloadText = (extractJsonStringField(body, "download") ?: "").trim()
-
-        // Same rules as the app's input fields: blank means unlimited, but
-        // anything typed has to be a plain number (the app's field only
-        // accepts digits, so a non-number here is rejected rather than
-        // silently turned into "unlimited").
-        if (uploadText.isNotEmpty() && uploadText.toIntOrNull() == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Upload limit must be a whole number\"}")
-            return
-        }
-
-        if (downloadText.isNotEmpty() && downloadText.toIntOrNull() == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Download limit must be a whole number\"}")
-            return
-        }
-
-        // KB/s -> bytes/s, capped so the Int can never overflow into a
-        // negative number (which would be treated as unlimited).
-        val maxKb = Int.MAX_VALUE / 1024
-        val uploadKb = (uploadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
-        val downloadKb = (downloadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
-
-        val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
-        val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
-
-        context.getSharedPreferences("global_speed_limits", Context.MODE_PRIVATE)
-            .edit()
-            .putInt("upload_limit", uploadBytes)
-            .putInt("download_limit", downloadBytes)
-            .apply()
-
-        try {
-            TorrentNative.applyGlobalSpeedLimits(uploadBytes, downloadBytes)
-        } catch (e: Throwable) {
-            sendJson(
-                output,
-                "{\"ok\":false,\"error\":" + jsonString("Could not apply speed limits: " + (e.message ?: "failed")) + "}"
-            )
-            return
-        }
-
-        sendJson(output, "{\"ok\":true}")
-    }
-
     // Feature: "Execution Log" - same AppLog store the app's own
     // Execution Log screen reads (AppLog.init is idempotent, so this is
     // safe to call from here too), filtered by level the same way
@@ -1498,112 +1413,11 @@ object WebUiServer {
         sendJson(output, "{\"ok\":true}")
     }
 
-    // Feature: per-torrent speed limit - mirrors the app's General tab:
-    // KB/s in the fields, bytes underneath, 0 or blank meaning "no cap of
-    // its own" (the global limit still applies on top). The current value
-    // is read from the engine itself (TorrentNative.getTorrentSpeedLimits,
-    // "upBytes|downBytes"), exactly like the app does.
     private fun usableTorrentHash(hash: String): Boolean {
         return hash.isNotBlank() &&
                 hash != "Hash not ready" &&
                 hash != "Invalid torrent" &&
                 !hash.startsWith("ERROR")
-    }
-
-    private fun handleGetTorrentSpeedLimit(torrentIndex: Int?, output: OutputStream) {
-        if (torrentIndex == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
-            return
-        }
-
-        val hash = try {
-            TorrentNative.getTorrentHash(torrentIndex)
-        } catch (_: Throwable) {
-            ""
-        }
-
-        val limits = if (usableTorrentHash(hash)) {
-            try {
-                TorrentNative.getTorrentSpeedLimits(hash)
-            } catch (_: Throwable) {
-                ""
-            }
-        } else {
-            ""
-        }
-
-        val parts = limits.split("|")
-        val uploadBytes = parts.getOrNull(0)?.toIntOrNull() ?: 0
-        val downloadBytes = parts.getOrNull(1)?.toIntOrNull() ?: 0
-
-        sendJson(
-            output,
-            "{\"ok\":true" +
-                    ",\"upload\":" + jsonString(if (uploadBytes > 0) (uploadBytes / 1024).toString() else "") +
-                    ",\"download\":" + jsonString(if (downloadBytes > 0) (downloadBytes / 1024).toString() else "") +
-                    "}"
-        )
-    }
-
-    private fun handleSetTorrentSpeedLimit(context: Context, body: String, output: OutputStream) {
-        val torrentIndex = extractJsonStringField(body, "index")?.toIntOrNull()
-        val uploadText = (extractJsonStringField(body, "upload") ?: "").trim()
-        val downloadText = (extractJsonStringField(body, "download") ?: "").trim()
-
-        if (torrentIndex == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
-            return
-        }
-
-        if (uploadText.isNotEmpty() && uploadText.toIntOrNull() == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Upload limit must be a whole number\"}")
-            return
-        }
-
-        if (downloadText.isNotEmpty() && downloadText.toIntOrNull() == null) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Download limit must be a whole number\"}")
-            return
-        }
-
-        val hash = try {
-            TorrentNative.getTorrentHash(torrentIndex)
-        } catch (_: Throwable) {
-            ""
-        }
-
-        if (!usableTorrentHash(hash)) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Torrent hash not available yet\"}")
-            return
-        }
-
-        // KB/s -> bytes/s, capped so the Int can never overflow into a
-        // negative number.
-        val maxKb = Int.MAX_VALUE / 1024
-        val uploadKb = (uploadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
-        val downloadKb = (downloadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
-
-        val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
-        val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
-
-        val applied = try {
-            TorrentNative.setTorrentSpeedLimits(hash, uploadBytes, downloadBytes)
-        } catch (_: Throwable) {
-            false
-        }
-
-        if (!applied) {
-            sendJson(output, "{\"ok\":false,\"error\":\"Could not apply torrent speed limit\"}")
-            return
-        }
-
-        // Same prefs file and key/value shape the app writes, so the
-        // service re-applies it after a restart and the app shows it.
-        context.getSharedPreferences("torrent_speed_limits", Context.MODE_PRIVATE)
-            .edit()
-            .putString(normalizeHash(hash), "$uploadBytes|$downloadBytes")
-            .apply()
-
-        sendJson(output, "{\"ok\":true}")
     }
 
     private fun handleGetTorrentSaveFolder(context: Context, torrentIndex: Int?, output: OutputStream) {
@@ -3133,7 +2947,6 @@ object WebUiServer {
     <button id="selectModeBtn" class="secondary">Select Torrents</button>
     <button id="globalStatsBtn" class="secondary">Global Statistics</button>
     <button id="storageBtn" class="secondary">Storage Space</button>
-    <button id="speedLimitsBtn" class="secondary">Speed Limits</button>
     <button id="executionLogBtn" class="secondary">Execution Log</button>
     <button id="onlineSearchBtn" class="secondary">Online Search</button>
     <button id="rssBtn" class="secondary">RSS Feeds</button>
@@ -3333,27 +3146,6 @@ object WebUiServer {
     </div>
   </div>
 
-  <!-- Feature: "Speed Limits" - same global limits as the app's own Speed
-       Limits screen (KB/s, blank or 0 for unlimited). -->
-  <div class="overlayPanel" id="speedLimitsPanel" style="display:none;">
-    <div class="overlayHeader">
-      <div class="name">Speed Limits</div>
-      <button class="secondary" onclick="closeSpeedLimits()">Close</button>
-    </div>
-    <div class="meta">Global limits only. Leave a field blank or 0 for unlimited.</div>
-    <div class="meta" style="margin-top:16px;">Upload limit (KB/s)</div>
-    <div class="row">
-      <input type="number" id="speedUploadInput" min="0" placeholder="Unlimited">
-    </div>
-    <div class="meta">Download limit (KB/s)</div>
-    <div class="row">
-      <input type="number" id="speedDownloadInput" min="0" placeholder="Unlimited">
-    </div>
-    <div class="actions">
-      <button onclick="applySpeedLimits()">Apply</button>
-    </div>
-  </div>
-
   <div id="list"></div>
 
   <!-- Deliberately OUTSIDE #list: #list is fully rebuilt by render()
@@ -3383,7 +3175,6 @@ function setBtnLabel(btn, iconName, label) {
     selectModeBtn: ['select', 'Select Torrents'],
     globalStatsBtn: ['statistics', 'Global Statistics'],
     storageBtn: ['storage', 'Storage Space'],
-    speedLimitsBtn: ['speed', 'Speed Limits'],
     executionLogBtn: ['log', 'Execution Log'],
     onlineSearchBtn: ['search', 'Online Search'],
     rssBtn: ['rss', 'RSS Feeds'],
@@ -3975,7 +3766,6 @@ async function batchRemove(deleteFiles) {
 function closeAllFeaturePanels() {
   closeGlobalStats();
   closeStorage();
-  closeSpeedLimits();
   closeExecutionLog();
   closeOnlineSearch();
   closeSaveFolder();
@@ -4117,57 +3907,6 @@ async function applyStorageThreshold() {
     loadStorage();
   } catch (e) {
     alert('Could not set the threshold');
-  }
-}
-
-// ---------------------------------------------------------------------
-// Feature: "Speed Limits" panel - same global upload/download limits
-// (KB/s, blank or 0 for unlimited) as the app's own Speed Limits screen.
-let speedLimitsOpen = false;
-
-document.getElementById('speedLimitsBtn').addEventListener('click', function() {
-  if (speedLimitsOpen) closeSpeedLimits(); else openSpeedLimits();
-});
-
-function openSpeedLimits() {
-  closeAllFeaturePanels();
-  speedLimitsOpen = true;
-  document.getElementById('speedLimitsPanel').style.display = 'block';
-  loadSpeedLimits();
-}
-
-function closeSpeedLimits() {
-  speedLimitsOpen = false;
-  document.getElementById('speedLimitsPanel').style.display = 'none';
-}
-
-async function loadSpeedLimits() {
-  try {
-    const res = await api('/api/speed_limits');
-    const data = await res.json();
-    if (!data.ok) return;
-    document.getElementById('speedUploadInput').value = data.upload;
-    document.getElementById('speedDownloadInput').value = data.download;
-  } catch (e) {
-    alert('Could not load the speed limits');
-  }
-}
-
-async function applySpeedLimits() {
-  const upload = document.getElementById('speedUploadInput').value.trim();
-  const download = document.getElementById('speedDownloadInput').value.trim();
-  try {
-    const res = await api('/api/speed_limits', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ upload: upload, download: download })
-    });
-    const data = await res.json();
-    if (!data.ok) { alert(data.error || 'Could not apply the speed limits'); return; }
-    alert('Speed limits applied');
-    loadSpeedLimits();
-  } catch (e) {
-    alert('Could not apply the speed limits');
   }
 }
 
@@ -5234,20 +4973,7 @@ function renderFilesPanel() {
       '</div>'
     : '';
 
-  // Feature: per-torrent speed limit, same place and wording as the
-  // app's General tab (KB/s, 0 or blank = use the global limit).
-  const speedLimitRow = (openFilesTab === 'general')
-    ? '<div class="meta" style="margin-top:16px;">Per-Torrent Speed Limit (KB/s, 0 or blank = use global)</div>' +
-      '<div class="row">' +
-        '<input type="number" id="torrentUploadLimitInput" min="0" placeholder="Upload KB/s - unlimited">' +
-        '<input type="number" id="torrentDownloadLimitInput" min="0" placeholder="Download KB/s - unlimited">' +
-      '</div>' +
-      '<div class="actions">' +
-        '<button onclick="applyTorrentSpeedLimit(' + index + ')">Apply Torrent Speed Limit</button>' +
-      '</div>'
-    : '';
-
-  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow + speedLimitRow +
+  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow +
     '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
 
   if (openFilesTab === 'swarmhealth') {
@@ -5257,7 +4983,6 @@ function renderFilesPanel() {
 
   if (openFilesTab === 'general') {
     loadTorrentSaveFolder(index);
-    loadTorrentSpeedLimit(index);
   }
 
   if (textTabEndpoints[openFilesTab]) loadTextTab(index, openFilesTab);
@@ -5320,42 +5045,6 @@ async function applyTorrentSaveFolder(index, path) {
     alert('Moving files to ' + path + ' - this may take a moment for large torrents. Check the Execution Log for when it\'s done.');
   } catch (e) {
     alert('Could not change save folder');
-  }
-}
-
-// Feature: per-torrent speed limit - loads this torrent's current limits
-// into the two fields once when the General tab opens (never on a timer,
-// so a number being typed is not overwritten), and applies them on request.
-async function loadTorrentSpeedLimit(index) {
-  try {
-    const res = await api('/api/torrent_speed_limit?index=' + index);
-    const data = await res.json();
-    if (!data.ok || openFilesIndex !== index) return;
-    const up = document.getElementById('torrentUploadLimitInput');
-    const down = document.getElementById('torrentDownloadLimitInput');
-    if (up) up.value = data.upload;
-    if (down) down.value = data.download;
-  } catch (e) {}
-}
-
-async function applyTorrentSpeedLimit(index) {
-  const up = document.getElementById('torrentUploadLimitInput');
-  const down = document.getElementById('torrentDownloadLimitInput');
-  try {
-    const res = await api('/api/torrent_speed_limit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        index: String(index),
-        upload: up ? up.value.trim() : '',
-        download: down ? down.value.trim() : ''
-      })
-    });
-    const data = await res.json();
-    if (!data.ok) { alert(data.error || 'Could not apply torrent speed limit'); return; }
-    alert('Torrent speed limit applied');
-  } catch (e) {
-    alert('Could not apply torrent speed limit');
   }
 }
 
