@@ -185,6 +185,18 @@ object TabIcons {
         "back" to listOf(
             "M19 12H5", "M12 19l-7-7 7-7"
         ),
+        "theme" to listOf(
+            "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"
+        ),
+        "selectall" to listOf(
+            "M18 6L7 17l-5-5",
+            "M22 10l-7.5 7.5L13 16"
+        ),
+        "selectnone" to listOf(
+            "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
+            "M9 9l6 6",
+            "M15 9l-6 6"
+        ),
         "addfile" to listOf(
             "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z",
             "M14 2v6h6",

@@ -1042,6 +1042,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Icons next to the button names (flat single-colour, see TabIcons.kt)
+        TabIcons.apply(themeButton, "theme")
+        TabIcons.apply(selectAllButton, "selectall")
+        TabIcons.apply(selectNoneButton, "selectnone")
+        TabIcons.apply(forceRecheckSelected, "recheck")
+        TabIcons.apply(forceReannounceSelected, "reannounce")
+        TabIcons.apply(pauseSelected, "pause")
+        TabIcons.apply(resumeSelected, "play")
+        TabIcons.apply(removeSelected, "trash")
         TabIcons.apply(sortButton, "sort")
         TabIcons.apply(selectModeButton, "select")
         TabIcons.apply(addMagnet, "magnet")
