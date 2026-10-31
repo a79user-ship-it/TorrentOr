@@ -511,6 +511,19 @@ static void ensureSession(const std::string& savePath) {
                 g_globalDownloadLimit
         );
 
+        // Bug fix: libtorrent's default is to IGNORE the speed limits for
+        // any peer on the local network (same Wi-Fi/LAN, found for example
+        // through Local Service Discovery, which this app has on). So a
+        // limit set to 50 KB/s held for internet peers but jumped to
+        // 2 MB/s whenever a peer on the local network was connected. With
+        // this off the limits apply to every peer. It changes nothing when
+        // no limit is set (0 = unlimited), so unlimited speeds are
+        // unaffected.
+        pack.set_bool(
+                lt::settings_pack::ignore_limits_on_local_network,
+                false
+        );
+
         if (!g_upnpEnabled) {
             g_upnpState = "Disabled";
             g_upnpMessage = "UPnP is turned off";

@@ -1029,6 +1029,25 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
         }
 
+        // Icons next to the button names (flat single-colour, see TabIcons.kt)
+        TabIcons.apply(selectModeButton, "select")
+        TabIcons.apply(addMagnet, "magnet")
+        TabIcons.apply(selectFile, "addfile")
+        TabIcons.apply(pauseAll, "pause")
+        TabIcons.apply(resumeAll, "play")
+        TabIcons.apply(clearSaved, "trash")
+        TabIcons.apply(globalStatistics, "statistics")
+        TabIcons.apply(portForwardingStatus, "portfwd")
+        TabIcons.apply(networkFeatures, "network")
+        TabIcons.apply(connectionSettingsButton, "connection")
+        TabIcons.apply(speedLimitsButton, "speed")
+        TabIcons.apply(storageSpaceButton, "storage")
+        TabIcons.apply(saveFolderButton, "folder")
+        TabIcons.apply(rssButton, "rss")
+        TabIcons.apply(executionLogButton, "log")
+        TabIcons.apply(onlineSearchButton, "search")
+        TabIcons.apply(webUiButton, "webui")
+
         root.addView(title)
         root.addView(themeButton)
         root.addView(selectModeButton)
@@ -2838,13 +2857,22 @@ class MainActivity : AppCompatActivity() {
 
         AppLog.init(applicationContext)
 
-        val shownLevels = mutableSetOf(
-            AppLog.Level.INFO,
-            AppLog.Level.WARNING,
-            AppLog.Level.ERROR
-        )
+        // Bug fix: the INFO / WARNING / ERROR / Auto-scroll ticks used to
+        // start out all ticked every time this screen was opened, so
+        // anything unticked was forgotten as soon as the screen (or the
+        // app) was closed. They are now saved the moment they change and
+        // restored here - a box you unticked stays unticked.
+        val logPrefs = getSharedPreferences("execution_log_settings", MODE_PRIVATE)
 
-        var autoScroll = true
+        val shownLevels = mutableSetOf<AppLog.Level>()
+
+        for (level in listOf(AppLog.Level.INFO, AppLog.Level.WARNING, AppLog.Level.ERROR)) {
+            if (logPrefs.getBoolean("show_" + level.name.lowercase(), true)) {
+                shownLevels.add(level)
+            }
+        }
+
+        var autoScroll = logPrefs.getBoolean("auto_scroll", true)
         var lastShownId = 0L
 
         val root = LinearLayout(this).apply {
@@ -2879,7 +2907,7 @@ class MainActivity : AppCompatActivity() {
         val autoScrollBox = CheckBox(this).apply {
             text = "Auto-scroll"
             setTextColor(Color.WHITE)
-            isChecked = true
+            isChecked = autoScroll
         }
 
         fun levelColor(level: AppLog.Level): Int {
@@ -2950,6 +2978,7 @@ class MainActivity : AppCompatActivity() {
 
         autoScrollBox.setOnCheckedChangeListener { _, checked ->
             autoScroll = checked
+            logPrefs.edit().putBoolean("auto_scroll", checked).apply()
 
             if (checked) {
                 logScroll.post {
@@ -2962,7 +2991,7 @@ class MainActivity : AppCompatActivity() {
             return CheckBox(this).apply {
                 text = label
                 setTextColor(levelColor(level))
-                isChecked = true
+                isChecked = shownLevels.contains(level)
 
                 setOnCheckedChangeListener { _, checked ->
                     if (checked) {
@@ -2970,6 +2999,10 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         shownLevels.remove(level)
                     }
+
+                    logPrefs.edit()
+                        .putBoolean("show_" + level.name.lowercase(), checked)
+                        .apply()
 
                     rebuild()
                 }
@@ -5956,6 +5989,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(generalButton, "general", 18, 6)
+        TabIcons.apply(filesButton, "files", 18, 6)
+        TabIcons.apply(peersButton, "peers", 18, 6)
+        TabIcons.apply(trackersButton, "trackers", 18, 6)
+        TabIcons.apply(webSeedsButton, "webseeds", 18, 6)
+        TabIcons.apply(swarmButton, "swarm", 18, 6)
+        TabIcons.apply(piecesButton, "pieces", 18, 6)
+        TabIcons.apply(statisticsButton, "statistics", 18, 6)
+        TabIcons.apply(commentButton, "comment", 18, 6)
+
         tabRowOne.addView(generalButton)
         tabRowOne.addView(filesButton)
         tabRowOne.addView(peersButton)
@@ -7920,6 +7963,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            TabIcons.apply(pause, "pause", 18, 6)
+            TabIcons.apply(resume, "play", 18, 6)
+            TabIcons.apply(remove, "trash", 18, 6)
             buttonRow.addView(pause)
             buttonRow.addView(resume)
             buttonRow.addView(remove)
@@ -7951,6 +7997,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            TabIcons.apply(forceRecheck, "recheck", 18, 6)
+            TabIcons.apply(forceReannounce, "reannounce", 18, 6)
             buttonRow2.addView(forceRecheck)
             buttonRow2.addView(forceReannounce)
 

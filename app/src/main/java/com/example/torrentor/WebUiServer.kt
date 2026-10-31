@@ -3,6 +3,7 @@ package com.example.torrentor
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.StatFs
 import android.util.Base64
 import java.io.BufferedInputStream
 import java.io.File
@@ -422,6 +423,24 @@ object WebUiServer {
                 method == "GET" && path == "/api/global_statistics" ->
                     handleGlobalStatistics(context, output)
 
+                // Feature: "Storage Space" tab - same figures, same
+                // "storage_settings" threshold pref and same red-below-
+                // threshold rule as the app's own Storage Space screen.
+                method == "GET" && path == "/api/storage_space" ->
+                    handleStorageSpace(context, output)
+
+                method == "POST" && path == "/api/storage_threshold" ->
+                    handleSetStorageThreshold(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: "Speed Limits" tab - same "global_speed_limits"
+                // prefs and same TorrentNative.applyGlobalSpeedLimits call
+                // as the app's own Speed Limits screen (global limits only).
+                method == "GET" && path == "/api/speed_limits" ->
+                    handleGetSpeedLimits(context, output)
+
+                method == "POST" && path == "/api/speed_limits" ->
+                    handleSetSpeedLimits(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
                 // Feature: "Execution Log" - same AppLog entries the
                 // app's own Execution Log screen shows (shared process,
                 // same in-memory/on-disk log), filtered by level.
@@ -490,6 +509,16 @@ object WebUiServer {
 
                 method == "POST" && path == "/api/torrent_save_folder" ->
                     handleSetTorrentSaveFolder(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: per-torrent speed limit - same native
+                // setTorrentSpeedLimits call and same "torrent_speed_limits"
+                // prefs (keyed by info-hash, never list index) as the
+                // app's own "Apply Torrent Speed Limit" button.
+                method == "GET" && path == "/api/torrent_speed_limit" ->
+                    handleGetTorrentSpeedLimit(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "POST" && path == "/api/torrent_speed_limit" ->
+                    handleSetTorrentSpeedLimit(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
                 // Feature: graphical folder picker for the Save Folder
                 // panels - lists subfolders of a path, and creates a new
@@ -929,6 +958,144 @@ object WebUiServer {
         sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
     }
 
+    // Feature: "Storage Space" - mirrors MainActivity.buildStorageSpaceText()
+    // exactly: monitors the global default save folder's volume, same
+    // StatFs figures, same size formatting, same "free < threshold" rule.
+    // The page builds the text (and applies the red) from these fields.
+    private fun formatStorageSize(bytes: Long): String {
+        if (bytes <= 0L) return "0 B"
+
+        val kb = bytes / 1024.0
+        val mb = kb / 1024.0
+        val gb = mb / 1024.0
+
+        return when {
+            gb >= 1 -> String.format("%.2f GB", gb)
+            mb >= 1 -> String.format("%.2f MB", mb)
+            kb >= 1 -> String.format("%.2f KB", kb)
+            else -> "$bytes B"
+        }
+    }
+
+    private fun handleStorageSpace(context: Context, output: OutputStream) {
+        val path = getGlobalSaveFolder(context)
+
+        val thresholdMb = context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE)
+            .getInt("low_space_threshold_mb", 500)
+
+        try {
+            val stat = StatFs(path)
+
+            val total = stat.totalBytes
+            val free = stat.availableBytes
+            val used = total - free
+            val usedPercent = if (total > 0L) {
+                (used.toDouble() / total.toDouble()) * 100.0
+            } else {
+                0.0
+            }
+
+            val isLow = free < thresholdMb.toLong() * 1024L * 1024L
+
+            sendJson(
+                output,
+                "{\"ok\":true" +
+                        ",\"path\":" + jsonString(path) +
+                        ",\"free\":" + jsonString(formatStorageSize(free)) +
+                        ",\"used\":" + jsonString(formatStorageSize(used)) +
+                        ",\"total\":" + jsonString(formatStorageSize(total)) +
+                        ",\"usedPercent\":" + jsonString(String.format("%.1f", usedPercent)) +
+                        ",\"thresholdMb\":" + thresholdMb +
+                        ",\"low\":" + (if (isLow) "true" else "false") +
+                        "}"
+            )
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"path\":" + jsonString(path) + "}")
+        }
+    }
+
+    private fun handleSetStorageThreshold(context: Context, body: String, output: OutputStream) {
+        val mb = (extractJsonStringField(body, "mb") ?: "").trim().toIntOrNull()
+
+        if (mb == null || mb <= 0) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Enter a threshold greater than 0\"}")
+            return
+        }
+
+        context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putInt("low_space_threshold_mb", mb)
+            .apply()
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    // Feature: "Speed Limits" - mirrors MainActivity.showSpeedLimitsScreen():
+    // limits are entered in KB/s, stored in bytes in the same
+    // "global_speed_limits" prefs ("upload_limit"/"download_limit"),
+    // blank or 0 means unlimited, and applied live through the same
+    // TorrentNative.applyGlobalSpeedLimits call.
+    private fun handleGetSpeedLimits(context: Context, output: OutputStream) {
+        val prefs = context.getSharedPreferences("global_speed_limits", Context.MODE_PRIVATE)
+
+        val uploadBytes = prefs.getInt("upload_limit", 0)
+        val downloadBytes = prefs.getInt("download_limit", 0)
+
+        sendJson(
+            output,
+            "{\"ok\":true" +
+                    ",\"upload\":" + jsonString(if (uploadBytes > 0) (uploadBytes / 1024).toString() else "") +
+                    ",\"download\":" + jsonString(if (downloadBytes > 0) (downloadBytes / 1024).toString() else "") +
+                    "}"
+        )
+    }
+
+    private fun handleSetSpeedLimits(context: Context, body: String, output: OutputStream) {
+        val uploadText = (extractJsonStringField(body, "upload") ?: "").trim()
+        val downloadText = (extractJsonStringField(body, "download") ?: "").trim()
+
+        // Same rules as the app's input fields: blank means unlimited, but
+        // anything typed has to be a plain number (the app's field only
+        // accepts digits, so a non-number here is rejected rather than
+        // silently turned into "unlimited").
+        if (uploadText.isNotEmpty() && uploadText.toIntOrNull() == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Upload limit must be a whole number\"}")
+            return
+        }
+
+        if (downloadText.isNotEmpty() && downloadText.toIntOrNull() == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Download limit must be a whole number\"}")
+            return
+        }
+
+        // KB/s -> bytes/s, capped so the Int can never overflow into a
+        // negative number (which would be treated as unlimited).
+        val maxKb = Int.MAX_VALUE / 1024
+        val uploadKb = (uploadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
+        val downloadKb = (downloadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
+
+        val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
+        val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
+
+        context.getSharedPreferences("global_speed_limits", Context.MODE_PRIVATE)
+            .edit()
+            .putInt("upload_limit", uploadBytes)
+            .putInt("download_limit", downloadBytes)
+            .apply()
+
+        try {
+            TorrentNative.applyGlobalSpeedLimits(uploadBytes, downloadBytes)
+        } catch (e: Throwable) {
+            sendJson(
+                output,
+                "{\"ok\":false,\"error\":" + jsonString("Could not apply speed limits: " + (e.message ?: "failed")) + "}"
+            )
+            return
+        }
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
     // Feature: "Execution Log" - same AppLog store the app's own
     // Execution Log screen reads (AppLog.init is idempotent, so this is
     // safe to call from here too), filtered by level the same way
@@ -1326,6 +1493,114 @@ object WebUiServer {
         context.getSharedPreferences("save_folder_settings", Context.MODE_PRIVATE)
             .edit()
             .putString("global_save_path", path)
+            .apply()
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    // Feature: per-torrent speed limit - mirrors the app's General tab:
+    // KB/s in the fields, bytes underneath, 0 or blank meaning "no cap of
+    // its own" (the global limit still applies on top). The current value
+    // is read from the engine itself (TorrentNative.getTorrentSpeedLimits,
+    // "upBytes|downBytes"), exactly like the app does.
+    private fun usableTorrentHash(hash: String): Boolean {
+        return hash.isNotBlank() &&
+                hash != "Hash not ready" &&
+                hash != "Invalid torrent" &&
+                !hash.startsWith("ERROR")
+    }
+
+    private fun handleGetTorrentSpeedLimit(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val limits = if (usableTorrentHash(hash)) {
+            try {
+                TorrentNative.getTorrentSpeedLimits(hash)
+            } catch (_: Throwable) {
+                ""
+            }
+        } else {
+            ""
+        }
+
+        val parts = limits.split("|")
+        val uploadBytes = parts.getOrNull(0)?.toIntOrNull() ?: 0
+        val downloadBytes = parts.getOrNull(1)?.toIntOrNull() ?: 0
+
+        sendJson(
+            output,
+            "{\"ok\":true" +
+                    ",\"upload\":" + jsonString(if (uploadBytes > 0) (uploadBytes / 1024).toString() else "") +
+                    ",\"download\":" + jsonString(if (downloadBytes > 0) (downloadBytes / 1024).toString() else "") +
+                    "}"
+        )
+    }
+
+    private fun handleSetTorrentSpeedLimit(context: Context, body: String, output: OutputStream) {
+        val torrentIndex = extractJsonStringField(body, "index")?.toIntOrNull()
+        val uploadText = (extractJsonStringField(body, "upload") ?: "").trim()
+        val downloadText = (extractJsonStringField(body, "download") ?: "").trim()
+
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        if (uploadText.isNotEmpty() && uploadText.toIntOrNull() == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Upload limit must be a whole number\"}")
+            return
+        }
+
+        if (downloadText.isNotEmpty() && downloadText.toIntOrNull() == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Download limit must be a whole number\"}")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (!usableTorrentHash(hash)) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Torrent hash not available yet\"}")
+            return
+        }
+
+        // KB/s -> bytes/s, capped so the Int can never overflow into a
+        // negative number.
+        val maxKb = Int.MAX_VALUE / 1024
+        val uploadKb = (uploadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
+        val downloadKb = (downloadText.toIntOrNull() ?: 0).coerceAtMost(maxKb)
+
+        val uploadBytes = if (uploadKb > 0) uploadKb * 1024 else 0
+        val downloadBytes = if (downloadKb > 0) downloadKb * 1024 else 0
+
+        val applied = try {
+            TorrentNative.setTorrentSpeedLimits(hash, uploadBytes, downloadBytes)
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (!applied) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Could not apply torrent speed limit\"}")
+            return
+        }
+
+        // Same prefs file and key/value shape the app writes, so the
+        // service re-applies it after a restart and the app shows it.
+        context.getSharedPreferences("torrent_speed_limits", Context.MODE_PRIVATE)
+            .edit()
+            .putString(normalizeHash(hash), "$uploadBytes|$downloadBytes")
             .apply()
 
         sendJson(output, "{\"ok\":true}")
@@ -2737,6 +3012,7 @@ object WebUiServer {
     cursor: pointer;
     transition: background 0.15s, transform 0.1s, border-color 0.15s;
   }
+  button .ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 7px; flex-shrink: 0; }
   button:hover { background: var(--accent-soft-hover); }
   button:active { transform: scale(0.97); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2856,6 +3132,8 @@ object WebUiServer {
     <button id="resumeAllBtn" class="secondary">Resume All</button>
     <button id="selectModeBtn" class="secondary">Select Torrents</button>
     <button id="globalStatsBtn" class="secondary">Global Statistics</button>
+    <button id="storageBtn" class="secondary">Storage Space</button>
+    <button id="speedLimitsBtn" class="secondary">Speed Limits</button>
     <button id="executionLogBtn" class="secondary">Execution Log</button>
     <button id="onlineSearchBtn" class="secondary">Online Search</button>
     <button id="rssBtn" class="secondary">RSS Feeds</button>
@@ -3036,6 +3314,46 @@ object WebUiServer {
     <pre id="globalStatsText" style="white-space:pre-wrap;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>
   </div>
 
+  <!-- Feature: "Storage Space" - same text, same red "below threshold"
+       rule and same Low Space Warning Threshold setting as the app's own
+       Storage Space screen, refreshed every 3 seconds while open. -->
+  <div class="overlayPanel" id="storagePanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Storage Space</div>
+      <button class="secondary" onclick="closeStorage()">Close</button>
+    </div>
+    <div id="storageInfo" style="white-space:pre-wrap;font-size:16px;padding:16px 0;">Loading...</div>
+    <div class="actions">
+      <button class="secondary" onclick="loadStorage()">Refresh</button>
+    </div>
+    <div class="meta" style="margin-top:24px;">Low Space Warning Threshold (MB)</div>
+    <div class="row">
+      <input type="number" id="storageThresholdInput" min="1">
+      <button onclick="applyStorageThreshold()">Apply Threshold</button>
+    </div>
+  </div>
+
+  <!-- Feature: "Speed Limits" - same global limits as the app's own Speed
+       Limits screen (KB/s, blank or 0 for unlimited). -->
+  <div class="overlayPanel" id="speedLimitsPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Speed Limits</div>
+      <button class="secondary" onclick="closeSpeedLimits()">Close</button>
+    </div>
+    <div class="meta">Global limits only. Leave a field blank or 0 for unlimited.</div>
+    <div class="meta" style="margin-top:16px;">Upload limit (KB/s)</div>
+    <div class="row">
+      <input type="number" id="speedUploadInput" min="0" placeholder="Unlimited">
+    </div>
+    <div class="meta">Download limit (KB/s)</div>
+    <div class="row">
+      <input type="number" id="speedDownloadInput" min="0" placeholder="Unlimited">
+    </div>
+    <div class="actions">
+      <button onclick="applySpeedLimits()">Apply</button>
+    </div>
+  </div>
+
   <div id="list"></div>
 
   <!-- Deliberately OUTSIDE #list: #list is fully rebuilt by render()
@@ -3047,6 +3365,36 @@ object WebUiServer {
   <div class="status" id="statusLine">Loading...</div>
 
 <script>
+const ICONS = {"general": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16v-4", "M12 8h.01"], "files": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M16 13H8", "M16 17H8", "M10 9H8"], "priority": ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M1 14h6", "M9 8h6", "M17 16h6"], "peers": ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8Z", "M23 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"], "trackers": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12Z", "M12 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4Z"], "webseeds": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"], "swarm": ["M22 12h-4l-3 9L9 3l-3 9H2"], "pieces": ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M14 14h7v7h-7z", "M3 14h7v7H3z"], "statistics": ["M18 20V10", "M12 20V4", "M6 20v-6"], "comment": ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"], "pause": ["M6 4h4v16H6z", "M14 4h4v16h-4z"], "play": ["M5 3l14 9-14 9z"], "select": ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"], "trash": ["M3 6h18", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"], "portfwd": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16l4-4-4-4", "M8 12h8"], "network": ["M5 12.55a11 11 0 0 1 14.08 0", "M1.42 9a16 16 0 0 1 21.16 0", "M8.53 16.11a6 6 0 0 1 6.95 0", "M12 20h.01"], "connection": ["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"], "speed": ["M13 2L3 14h9l-1 8 10-12h-9l1-8z"], "storage": ["M22 12H2", "M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z", "M6 16h.01", "M10 16h.01"], "folder": ["M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"], "rss": ["M4 11a9 9 0 0 1 9 9", "M4 4a16 16 0 0 1 16 16", "M5 18a1 1 0 1 0 0 2a1 1 0 1 0 0-2Z"], "log": ["M4 17l6-6-6-6", "M12 19h8"], "search": ["M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16Z", "M21 21l-4.35-4.35"], "webui": ["M2 3h20v14H2z", "M8 21h8", "M12 17v4"], "magnet": ["M6 15a6 6 0 0 0 12 0V3h-4v12a2 2 0 0 1-4 0V3H6z", "M6 8h4", "M14 8h4"], "recheck": ["M23 4v6h-6", "M1 20v-6h6", "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"], "reannounce": ["M22 2L11 13", "M22 2l-7 20-4-9-9-4z"], "addfile": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M12 18v-6", "M9 15h6"]};
+function iconSvg(name) {
+  const parts = ICONS[name];
+  if (!parts) return '';
+  let d = '';
+  for (const p of parts) { d += '<path d="' + p + '"/>'; }
+  return '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + d + '</svg>';
+}
+function setBtnLabel(btn, iconName, label) {
+  btn.innerHTML = iconSvg(iconName) + label;
+}
+(function() {
+  const map = {
+    pauseAllBtn: ['pause', 'Pause All'],
+    resumeAllBtn: ['play', 'Resume All'],
+    selectModeBtn: ['select', 'Select Torrents'],
+    globalStatsBtn: ['statistics', 'Global Statistics'],
+    storageBtn: ['storage', 'Storage Space'],
+    speedLimitsBtn: ['speed', 'Speed Limits'],
+    executionLogBtn: ['log', 'Execution Log'],
+    onlineSearchBtn: ['search', 'Online Search'],
+    rssBtn: ['rss', 'RSS Feeds'],
+    saveFolderBtn: ['folder', 'Save Folder']
+  };
+  for (const id in map) {
+    const el = document.getElementById(id);
+    if (el) setBtnLabel(el, map[id][0], map[id][1]);
+  }
+})();
+
 async function api(path, options) {
   const res = await fetch(path, options);
   if (res.status === 401) {
@@ -3498,19 +3846,19 @@ function render(torrents) {
         ' &middot; ' + escapeHtml(t.eta) + '</div>' +
       '<div class="bar"><div class="fill" style="width:' + t.percent + '%"></div></div>' +
       '<div class="actions">' +
-        '<button onclick="doAction(\'pause\', ' + t.index + ')">Pause</button>' +
-        '<button onclick="doAction(\'resume\', ' + t.index + ')">Resume</button>' +
-        '<button class="secondary" onclick="toggleFiles(' + t.index + ')">Files</button>' +
+        '<button onclick="doAction(\'pause\', ' + t.index + ')">' + iconSvg('pause') + 'Pause</button>' +
+        '<button onclick="doAction(\'resume\', ' + t.index + ')">' + iconSvg('play') + 'Resume</button>' +
+        '<button class="secondary" onclick="toggleFiles(' + t.index + ')">' + iconSvg('files') + 'Files</button>' +
         // Feature: Force Recheck / Force Reannounce right on this card,
         // matching the app's own main torrent card - reuses the exact
         // same server endpoints (/api/force_recheck/<index> and
         // /api/force_reannounce/<index>) the bulk "Select Torrents"
         // actions already call, just for this one torrent's index
         // instead of looping over a selected set.
-        '<button class="secondary" onclick="doAction(\'force_recheck\', ' + t.index + ')">Force Recheck</button>' +
-        '<button class="secondary" onclick="doAction(\'force_reannounce\', ' + t.index + ')">Force Reannounce</button>' +
-        '<button class="danger" onclick="doRemove(' + t.index + ', false)">Remove</button>' +
-        '<button class="danger" onclick="doRemove(' + t.index + ', true)">Remove + Files</button>' +
+        '<button class="secondary" onclick="doAction(\'force_recheck\', ' + t.index + ')">' + iconSvg('recheck') + 'Force Recheck</button>' +
+        '<button class="secondary" onclick="doAction(\'force_reannounce\', ' + t.index + ')">' + iconSvg('reannounce') + 'Force Reannounce</button>' +
+        '<button class="danger" onclick="doRemove(' + t.index + ', false)">' + iconSvg('trash') + 'Remove</button>' +
+        '<button class="danger" onclick="doRemove(' + t.index + ', true)">' + iconSvg('trash') + 'Remove + Files</button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -3556,7 +3904,7 @@ function selectNoneTorrents() {
 document.getElementById('selectModeBtn').addEventListener('click', function() {
   selectMode = !selectMode;
   selectedTorrents.clear();
-  document.getElementById('selectModeBtn').textContent = selectMode ? 'Exit Select Mode' : 'Select Torrents';
+  setBtnLabel(document.getElementById('selectModeBtn'), 'select', selectMode ? 'Exit Select Mode' : 'Select Torrents');
   document.getElementById('selectActionsRow').style.display = selectMode ? 'flex' : 'none';
   render(lastTorrents);
 });
@@ -3586,7 +3934,7 @@ async function batchAction(kind) {
 
   selectedTorrents.clear();
   selectMode = false;
-  document.getElementById('selectModeBtn').textContent = 'Select Torrents';
+  setBtnLabel(document.getElementById('selectModeBtn'), 'select', 'Select Torrents');
   document.getElementById('selectActionsRow').style.display = 'none';
   refresh();
 }
@@ -3615,7 +3963,7 @@ async function batchRemove(deleteFiles) {
 
   selectedTorrents.clear();
   selectMode = false;
-  document.getElementById('selectModeBtn').textContent = 'Select Torrents';
+  setBtnLabel(document.getElementById('selectModeBtn'), 'select', 'Select Torrents');
   document.getElementById('selectActionsRow').style.display = 'none';
   refresh();
 }
@@ -3626,6 +3974,8 @@ async function batchRemove(deleteFiles) {
 // end up stacked with no way to see or close the one underneath.
 function closeAllFeaturePanels() {
   closeGlobalStats();
+  closeStorage();
+  closeSpeedLimits();
   closeExecutionLog();
   closeOnlineSearch();
   closeSaveFolder();
@@ -3682,6 +4032,146 @@ async function loadGlobalStatistics() {
 }
 
 // ---------------------------------------------------------------------
+// Feature: "Storage Space" panel - same text as the app's own Storage
+// Space screen (Save Path, Free/Used/Total Space, Used %, threshold), with
+// the Free Space figure and the warning line in red (#FF5252, same red as
+// the app) whenever free space is below the Low Space Warning Threshold.
+// Refreshed every 3 seconds while open, same as the app.
+let storageOpen = false;
+let storageTimer = null;
+let storageThresholdLoaded = false;
+
+document.getElementById('storageBtn').addEventListener('click', function() {
+  if (storageOpen) closeStorage(); else openStorage();
+});
+
+function openStorage() {
+  closeAllFeaturePanels();
+  storageOpen = true;
+  storageThresholdLoaded = false;
+  document.getElementById('storagePanel').style.display = 'block';
+  loadStorage();
+  if (storageTimer) clearInterval(storageTimer);
+  storageTimer = setInterval(loadStorage, 3000);
+}
+
+function closeStorage() {
+  storageOpen = false;
+  if (storageTimer) { clearInterval(storageTimer); storageTimer = null; }
+  document.getElementById('storagePanel').style.display = 'none';
+}
+
+async function loadStorage() {
+  if (!storageOpen) return;
+  const el = document.getElementById('storageInfo');
+  try {
+    const res = await api('/api/storage_space');
+    const data = await res.json();
+    if (!storageOpen) return;
+
+    if (!data.ok) {
+      el.textContent = 'Could not read storage space\n\n' + (data.path || '');
+      return;
+    }
+
+    const red = function(text) {
+      return '<span style="color:#FF5252;">' + escapeHtml(text) + '</span>';
+    };
+
+    let html = 'Save Path:\n' + escapeHtml(data.path) + '\n\n' +
+      'Free Space: ' + (data.low ? red(data.free) : escapeHtml(data.free)) + '\n' +
+      'Used Space: ' + escapeHtml(data.used) + '\n' +
+      'Total Space: ' + escapeHtml(data.total) + '\n' +
+      'Used: ' + escapeHtml(data.usedPercent) + '%\n' +
+      'Low Space Warning Threshold: ' + escapeHtml(data.thresholdMb) + ' MB';
+
+    if (data.low) {
+      html += '\n' + red('\u26A0 LOW SPACE WARNING - free space is below the ' + data.thresholdMb + ' MB threshold');
+    }
+
+    html += '\n\nAuto-refresh: Every 3 seconds';
+    el.innerHTML = html;
+
+    // Fill the threshold box once per opening, never on later refreshes,
+    // so a number being typed isn't overwritten every 3 seconds.
+    if (!storageThresholdLoaded) {
+      document.getElementById('storageThresholdInput').value = data.thresholdMb;
+      storageThresholdLoaded = true;
+    }
+  } catch (e) {
+    el.textContent = 'Could not read storage space';
+  }
+}
+
+async function applyStorageThreshold() {
+  const mb = document.getElementById('storageThresholdInput').value.trim();
+  try {
+    const res = await api('/api/storage_threshold', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mb: mb })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || 'Could not set the threshold'); return; }
+    alert('Low space threshold set to ' + mb + ' MB');
+    loadStorage();
+  } catch (e) {
+    alert('Could not set the threshold');
+  }
+}
+
+// ---------------------------------------------------------------------
+// Feature: "Speed Limits" panel - same global upload/download limits
+// (KB/s, blank or 0 for unlimited) as the app's own Speed Limits screen.
+let speedLimitsOpen = false;
+
+document.getElementById('speedLimitsBtn').addEventListener('click', function() {
+  if (speedLimitsOpen) closeSpeedLimits(); else openSpeedLimits();
+});
+
+function openSpeedLimits() {
+  closeAllFeaturePanels();
+  speedLimitsOpen = true;
+  document.getElementById('speedLimitsPanel').style.display = 'block';
+  loadSpeedLimits();
+}
+
+function closeSpeedLimits() {
+  speedLimitsOpen = false;
+  document.getElementById('speedLimitsPanel').style.display = 'none';
+}
+
+async function loadSpeedLimits() {
+  try {
+    const res = await api('/api/speed_limits');
+    const data = await res.json();
+    if (!data.ok) return;
+    document.getElementById('speedUploadInput').value = data.upload;
+    document.getElementById('speedDownloadInput').value = data.download;
+  } catch (e) {
+    alert('Could not load the speed limits');
+  }
+}
+
+async function applySpeedLimits() {
+  const upload = document.getElementById('speedUploadInput').value.trim();
+  const download = document.getElementById('speedDownloadInput').value.trim();
+  try {
+    const res = await api('/api/speed_limits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ upload: upload, download: download })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || 'Could not apply the speed limits'); return; }
+    alert('Speed limits applied');
+    loadSpeedLimits();
+  } catch (e) {
+    alert('Could not apply the speed limits');
+  }
+}
+
+// ---------------------------------------------------------------------
 // Feature: "Execution Log" - same AppLog entries (INFO/WARNING/ERROR)
 // the app's own Execution Log screen shows, with the same level
 // checkboxes, Clear Log and Copy Log. Refreshed every second alongside
@@ -3704,8 +4194,22 @@ function closeExecutionLog() {
   document.getElementById('executionLogPanel').style.display = 'none';
 }
 
-['logLevelInfo', 'logLevelWarning', 'logLevelError'].forEach(function(id) {
-  document.getElementById(id).addEventListener('change', function() {
+// The INFO / WARNING / ERROR / Auto-scroll ticks are remembered in this
+// browser (localStorage), so a box you unticked stays unticked after the
+// panel - or the whole page - is closed and opened again. Wrapped in
+// try/catch because some private-browsing modes block storage; the
+// boxes then simply behave as before.
+['logLevelInfo', 'logLevelWarning', 'logLevelError', 'logAutoScroll'].forEach(function(id) {
+  const box = document.getElementById(id);
+
+  try {
+    const saved = localStorage.getItem('torrentor_execlog_' + id);
+    if (saved === 'false') box.checked = false;
+    else if (saved === 'true') box.checked = true;
+  } catch (e) {}
+
+  box.addEventListener('change', function() {
+    try { localStorage.setItem('torrentor_execlog_' + id, box.checked ? 'true' : 'false'); } catch (e) {}
     if (executionLogOpen) loadExecutionLog();
   });
 });
@@ -4663,16 +5167,16 @@ function renderFilesPanel() {
   if (index === null) return;
 
   const tabs = '<div class="actions" style="margin-bottom:8px;flex-wrap:wrap;">' +
-    '<button class="' + (openFilesTab === 'general' ? '' : 'secondary') + '" onclick="switchFilesTab(\'general\')">General</button>' +
-    '<button class="' + (openFilesTab === 'files' ? '' : 'secondary') + '" onclick="switchFilesTab(\'files\')">Files</button>' +
-    '<button class="' + (openFilesTab === 'priority' ? '' : 'secondary') + '" onclick="switchFilesTab(\'priority\')">Priority &amp; Peers</button>' +
-    '<button class="' + (openFilesTab === 'peers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'peers\')">Peers</button>' +
-    '<button class="' + (openFilesTab === 'swarmhealth' ? '' : 'secondary') + '" onclick="switchFilesTab(\'swarmhealth\')">Swarm Health</button>' +
-    '<button class="' + (openFilesTab === 'pieces' ? '' : 'secondary') + '" onclick="switchFilesTab(\'pieces\')">Pieces</button>' +
-    '<button class="' + (openFilesTab === 'trackers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'trackers\')">Trackers</button>' +
-    '<button class="' + (openFilesTab === 'webseeds' ? '' : 'secondary') + '" onclick="switchFilesTab(\'webseeds\')">Web Seeds</button>' +
-    '<button class="' + (openFilesTab === 'statistics' ? '' : 'secondary') + '" onclick="switchFilesTab(\'statistics\')">Statistics</button>' +
-    '<button class="' + (openFilesTab === 'comment' ? '' : 'secondary') + '" onclick="switchFilesTab(\'comment\')">Comment</button>' +
+    '<button class="' + (openFilesTab === 'general' ? '' : 'secondary') + '" onclick="switchFilesTab(\'general\')">' + iconSvg('general') + 'General</button>' +
+    '<button class="' + (openFilesTab === 'files' ? '' : 'secondary') + '" onclick="switchFilesTab(\'files\')">' + iconSvg('files') + 'Files</button>' +
+    '<button class="' + (openFilesTab === 'priority' ? '' : 'secondary') + '" onclick="switchFilesTab(\'priority\')">' + iconSvg('priority') + 'Priority &amp; Peers</button>' +
+    '<button class="' + (openFilesTab === 'peers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'peers\')">' + iconSvg('peers') + 'Peers</button>' +
+    '<button class="' + (openFilesTab === 'swarmhealth' ? '' : 'secondary') + '" onclick="switchFilesTab(\'swarmhealth\')">' + iconSvg('swarm') + 'Swarm Health</button>' +
+    '<button class="' + (openFilesTab === 'pieces' ? '' : 'secondary') + '" onclick="switchFilesTab(\'pieces\')">' + iconSvg('pieces') + 'Pieces</button>' +
+    '<button class="' + (openFilesTab === 'trackers' ? '' : 'secondary') + '" onclick="switchFilesTab(\'trackers\')">' + iconSvg('trackers') + 'Trackers</button>' +
+    '<button class="' + (openFilesTab === 'webseeds' ? '' : 'secondary') + '" onclick="switchFilesTab(\'webseeds\')">' + iconSvg('webseeds') + 'Web Seeds</button>' +
+    '<button class="' + (openFilesTab === 'statistics' ? '' : 'secondary') + '" onclick="switchFilesTab(\'statistics\')">' + iconSvg('statistics') + 'Statistics</button>' +
+    '<button class="' + (openFilesTab === 'comment' ? '' : 'secondary') + '" onclick="switchFilesTab(\'comment\')">' + iconSvg('comment') + 'Comment</button>' +
   '</div>';
 
   // Plain-text tabs - same shape as the app's own General/Peers/Swarm/
@@ -4730,7 +5234,20 @@ function renderFilesPanel() {
       '</div>'
     : '';
 
-  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow +
+  // Feature: per-torrent speed limit, same place and wording as the
+  // app's General tab (KB/s, 0 or blank = use the global limit).
+  const speedLimitRow = (openFilesTab === 'general')
+    ? '<div class="meta" style="margin-top:16px;">Per-Torrent Speed Limit (KB/s, 0 or blank = use global)</div>' +
+      '<div class="row">' +
+        '<input type="number" id="torrentUploadLimitInput" min="0" placeholder="Upload KB/s - unlimited">' +
+        '<input type="number" id="torrentDownloadLimitInput" min="0" placeholder="Download KB/s - unlimited">' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button onclick="applyTorrentSpeedLimit(' + index + ')">Apply Torrent Speed Limit</button>' +
+      '</div>'
+    : '';
+
+  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow + speedLimitRow +
     '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
 
   if (openFilesTab === 'swarmhealth') {
@@ -4738,7 +5255,10 @@ function renderFilesPanel() {
     drawSwarmHealthGraph();
   }
 
-  if (openFilesTab === 'general') loadTorrentSaveFolder(index);
+  if (openFilesTab === 'general') {
+    loadTorrentSaveFolder(index);
+    loadTorrentSpeedLimit(index);
+  }
 
   if (textTabEndpoints[openFilesTab]) loadTextTab(index, openFilesTab);
 }
@@ -4800,6 +5320,42 @@ async function applyTorrentSaveFolder(index, path) {
     alert('Moving files to ' + path + ' - this may take a moment for large torrents. Check the Execution Log for when it\'s done.');
   } catch (e) {
     alert('Could not change save folder');
+  }
+}
+
+// Feature: per-torrent speed limit - loads this torrent's current limits
+// into the two fields once when the General tab opens (never on a timer,
+// so a number being typed is not overwritten), and applies them on request.
+async function loadTorrentSpeedLimit(index) {
+  try {
+    const res = await api('/api/torrent_speed_limit?index=' + index);
+    const data = await res.json();
+    if (!data.ok || openFilesIndex !== index) return;
+    const up = document.getElementById('torrentUploadLimitInput');
+    const down = document.getElementById('torrentDownloadLimitInput');
+    if (up) up.value = data.upload;
+    if (down) down.value = data.download;
+  } catch (e) {}
+}
+
+async function applyTorrentSpeedLimit(index) {
+  const up = document.getElementById('torrentUploadLimitInput');
+  const down = document.getElementById('torrentDownloadLimitInput');
+  try {
+    const res = await api('/api/torrent_speed_limit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        index: String(index),
+        upload: up ? up.value.trim() : '',
+        download: down ? down.value.trim() : ''
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || 'Could not apply torrent speed limit'); return; }
+    alert('Torrent speed limit applied');
+  } catch (e) {
+    alert('Could not apply torrent speed limit');
   }
 }
 
