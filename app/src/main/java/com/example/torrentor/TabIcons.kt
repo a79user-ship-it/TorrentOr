@@ -281,21 +281,24 @@ object TabIcons {
         val baseLeft = view.paddingLeft
         val baseRight = view.paddingRight
 
+        // Centres icon + text as one group. The padding is fixed right inside
+        // the layout pass (not posted for later), so the system re-measures
+        // before the first frame is drawn - posting it made the icons jump
+        // from the left edge to the middle for a moment every time the main
+        // screen was rebuilt (e.g. when Select Torrents is tapped).
         view.addOnLayoutChangeListener { v, left, _, right, _, _, _, _, _ ->
             val tv = v as TextView
-            tv.post {
-                val shown: CharSequence =
-                    tv.transformationMethod?.getTransformation(tv.text, tv) ?: tv.text
-                val textWidth = tv.paint.measureText(shown, 0, shown.length)
-                val free = (right - left) - size - gap - textWidth
-                val side = (free / 2f).toInt()
+            val shown: CharSequence =
+                tv.transformationMethod?.getTransformation(tv.text, tv) ?: tv.text
+            val textWidth = tv.paint.measureText(shown, 0, shown.length)
+            val free = (right - left) - size - gap - textWidth
+            val side = (free / 2f).toInt()
 
-                val newLeft = maxOf(baseLeft, side)
-                val newRight = maxOf(baseRight, side)
+            val newLeft = maxOf(baseLeft, side)
+            val newRight = maxOf(baseRight, side)
 
-                if (tv.paddingLeft != newLeft || tv.paddingRight != newRight) {
-                    tv.setPadding(newLeft, tv.paddingTop, newRight, tv.paddingBottom)
-                }
+            if (tv.paddingLeft != newLeft || tv.paddingRight != newRight) {
+                tv.setPadding(newLeft, tv.paddingTop, newRight, tv.paddingBottom)
             }
         }
     }
