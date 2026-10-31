@@ -575,6 +575,21 @@ object WebUiServer {
                 method == "GET" && path == "/api/torrent_swarmhealth" ->
                     handleTorrentSwarmHealth(parseQueryParam(query, "index")?.toIntOrNull(), output)
 
+                // Feature: the app's torrent-detail action buttons (Copy Magnet,
+                // Copy Hash, Sequential Download, First/Last Piece Priority,
+                // Save as .torrent File) for the Web UI's General tab.
+                method == "GET" && path == "/api/torrent_info" ->
+                    handleTorrentInfo(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_piece_settings" ->
+                    handleGetPieceSettings(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "POST" && path == "/api/torrent_piece_settings" ->
+                    handleSetPieceSettings(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/save_torrent_file" ->
+                    handleSaveTorrentFile(String(bodyBytes, StandardCharsets.UTF_8), output)
+
                 // Feature: Force Recheck / Force Reannounce - same native
                 // calls as MainActivity's own buttons. Fire-and-forget,
                 // like the app's own versions (no return value to report).
@@ -1418,6 +1433,159 @@ object WebUiServer {
                 hash != "Hash not ready" &&
                 hash != "Invalid torrent" &&
                 !hash.startsWith("ERROR")
+    }
+
+    // Magnet link and info-hash for the Copy Magnet / Copy Hash buttons.
+    private fun handleTorrentInfo(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val magnet = try {
+            TorrentNative.getTorrentMagnet(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        sendJson(
+            output,
+            "{\"ok\":true,\"hash\":" + jsonString(hash) + ",\"magnet\":" + jsonString(magnet) + "}"
+        )
+    }
+
+    // Sequential Download / First-Last Piece Priority - same engine calls
+    // and same prefs files ("sequential_download" / "firstlast_priority",
+    // key = lowercase letters and digits of the info-hash) as the app's
+    // own General tab buttons, so the service re-applies them on restart.
+    private fun pieceSettingKey(hash: String): String {
+        return hash.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+    }
+
+    private fun handleGetPieceSettings(torrentIndex: Int?, output: OutputStream) {
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (!usableTorrentHash(hash)) {
+            sendJson(output, "{\"ok\":true,\"sequential\":false,\"firstLast\":false}")
+            return
+        }
+
+        val sequential = try {
+            TorrentNative.getSequentialDownload(hash)
+        } catch (_: Throwable) {
+            false
+        }
+
+        val firstLast = try {
+            TorrentNative.getFirstLastPiecePriority(hash)
+        } catch (_: Throwable) {
+            false
+        }
+
+        sendJson(output, "{\"ok\":true,\"sequential\":$sequential,\"firstLast\":$firstLast}")
+    }
+
+    private fun handleSetPieceSettings(context: Context, body: String, output: OutputStream) {
+        val torrentIndex = extractJsonStringField(body, "index")?.toIntOrNull()
+        val setting = (extractJsonStringField(body, "setting") ?: "").trim()
+        val enabled = extractJsonStringField(body, "enabled") == "true"
+
+        if (torrentIndex == null || (setting != "sequential" && setting != "firstlast")) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad request\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (!usableTorrentHash(hash)) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Torrent hash not available yet\"}")
+            return
+        }
+
+        val applied = try {
+            if (setting == "sequential") {
+                TorrentNative.setSequentialDownload(hash, enabled)
+            } else {
+                TorrentNative.setFirstLastPiecePriority(hash, enabled)
+            }
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (!applied) {
+            sendJson(
+                output,
+                "{\"ok\":false,\"error\":\"Could not change this yet - the torrent's metadata may still be loading. Try again in a moment.\"}"
+            )
+            return
+        }
+
+        val prefsName = if (setting == "sequential") "sequential_download" else "firstlast_priority"
+        context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(pieceSettingKey(hash), enabled)
+            .apply()
+
+        sendJson(output, "{\"ok\":true,\"enabled\":$enabled}")
+    }
+
+    // Save as .torrent File - same folder the app uses
+    // (Download/Saved Torrent Files on the phone).
+    private fun handleSaveTorrentFile(body: String, output: OutputStream) {
+        val torrentIndex = extractJsonStringField(body, "index")?.toIntOrNull()
+
+        if (torrentIndex == null) {
+            sendJson(output, "{\"ok\":false,\"error\":\"bad torrent index\"}", status = "400 Bad Request")
+            return
+        }
+
+        val hash = try {
+            TorrentNative.getTorrentHash(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (!usableTorrentHash(hash)) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Torrent hash not available yet\"}")
+            return
+        }
+
+        val destFolder = File("/storage/emulated/0/Download", "Saved Torrent Files")
+        destFolder.mkdirs()
+
+        val savedPath = try {
+            TorrentNative.saveTorrentFile(hash, destFolder.absolutePath)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (savedPath.isNotBlank()) {
+            sendJson(output, "{\"ok\":true,\"path\":" + jsonString(savedPath) + "}")
+        } else {
+            sendJson(
+                output,
+                "{\"ok\":false,\"error\":\"Couldn't save yet - metadata hasn't finished downloading for this torrent\"}"
+            )
+        }
     }
 
     private fun handleGetTorrentSaveFolder(context: Context, torrentIndex: Int?, output: OutputStream) {
@@ -2827,6 +2995,8 @@ object WebUiServer {
     transition: background 0.15s, transform 0.1s, border-color 0.15s;
   }
   button .ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 7px; flex-shrink: 0; }
+  .rowIcon { display: inline-flex; color: var(--accent); }
+  .rowIcon .ico { width: 18px; height: 18px; margin: 0; }
   button:hover { background: var(--accent-soft-hover); }
   button:active { transform: scale(0.97); }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -3033,6 +3203,7 @@ object WebUiServer {
     <button class="secondary" data-filter="Completed" onclick="setActiveFilter('Completed')">Completed</button>
   </div>
   <div class="row">
+    <span id="sortModeIcon" class="rowIcon"></span>
     <select id="sortModeSelect">
       <option value="None">Sort: None</option>
       <option value="Name (A-Z)">Sort: Name (A-Z)</option>
@@ -3157,7 +3328,7 @@ object WebUiServer {
   <div class="status" id="statusLine">Loading...</div>
 
 <script>
-const ICONS = {"general": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16v-4", "M12 8h.01"], "files": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M16 13H8", "M16 17H8", "M10 9H8"], "priority": ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M1 14h6", "M9 8h6", "M17 16h6"], "peers": ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8Z", "M23 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"], "trackers": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12Z", "M12 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4Z"], "webseeds": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"], "swarm": ["M22 12h-4l-3 9L9 3l-3 9H2"], "pieces": ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M14 14h7v7h-7z", "M3 14h7v7H3z"], "statistics": ["M18 20V10", "M12 20V4", "M6 20v-6"], "comment": ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"], "pause": ["M6 4h4v16H6z", "M14 4h4v16h-4z"], "play": ["M5 3l14 9-14 9z"], "select": ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"], "trash": ["M3 6h18", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"], "portfwd": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16l4-4-4-4", "M8 12h8"], "network": ["M5 12.55a11 11 0 0 1 14.08 0", "M1.42 9a16 16 0 0 1 21.16 0", "M8.53 16.11a6 6 0 0 1 6.95 0", "M12 20h.01"], "connection": ["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"], "speed": ["M13 2L3 14h9l-1 8 10-12h-9l1-8z"], "storage": ["M22 12H2", "M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z", "M6 16h.01", "M10 16h.01"], "folder": ["M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"], "rss": ["M4 11a9 9 0 0 1 9 9", "M4 4a16 16 0 0 1 16 16", "M5 18a1 1 0 1 0 0 2a1 1 0 1 0 0-2Z"], "log": ["M4 17l6-6-6-6", "M12 19h8"], "search": ["M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16Z", "M21 21l-4.35-4.35"], "webui": ["M2 3h20v14H2z", "M8 21h8", "M12 17v4"], "magnet": ["M6 15a6 6 0 0 0 12 0V3h-4v12a2 2 0 0 1-4 0V3H6z", "M6 8h4", "M14 8h4"], "recheck": ["M23 4v6h-6", "M1 20v-6h6", "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"], "reannounce": ["M22 2L11 13", "M22 2l-7 20-4-9-9-4z"], "addfile": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M12 18v-6", "M9 15h6"]};
+const ICONS = {"general": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16v-4", "M12 8h.01"], "files": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M16 13H8", "M16 17H8", "M10 9H8"], "priority": ["M4 21v-7", "M4 10V3", "M12 21v-9", "M12 8V3", "M20 21v-5", "M20 12V3", "M1 14h6", "M9 8h6", "M17 16h6"], "peers": ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8Z", "M23 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"], "trackers": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12Z", "M12 10a2 2 0 1 0 0 4a2 2 0 1 0 0-4Z"], "webseeds": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"], "swarm": ["M22 12h-4l-3 9L9 3l-3 9H2"], "pieces": ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M14 14h7v7h-7z", "M3 14h7v7H3z"], "statistics": ["M18 20V10", "M12 20V4", "M6 20v-6"], "comment": ["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"], "pause": ["M6 4h4v16H6z", "M14 4h4v16h-4z"], "play": ["M5 3l14 9-14 9z"], "select": ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"], "trash": ["M3 6h18", "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"], "portfwd": ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20Z", "M12 16l4-4-4-4", "M8 12h8"], "network": ["M5 12.55a11 11 0 0 1 14.08 0", "M1.42 9a16 16 0 0 1 21.16 0", "M8.53 16.11a6 6 0 0 1 6.95 0", "M12 20h.01"], "connection": ["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71", "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"], "speed": ["M13 2L3 14h9l-1 8 10-12h-9l1-8z"], "storage": ["M22 12H2", "M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z", "M6 16h.01", "M10 16h.01"], "folder": ["M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"], "rss": ["M4 11a9 9 0 0 1 9 9", "M4 4a16 16 0 0 1 16 16", "M5 18a1 1 0 1 0 0 2a1 1 0 1 0 0-2Z"], "log": ["M4 17l6-6-6-6", "M12 19h8"], "search": ["M11 3a8 8 0 1 0 0 16a8 8 0 1 0 0-16Z", "M21 21l-4.35-4.35"], "webui": ["M2 3h20v14H2z", "M8 21h8", "M12 17v4"], "magnet": ["M6 15a6 6 0 0 0 12 0V3h-4v12a2 2 0 0 1-4 0V3H6z", "M6 8h4", "M14 8h4"], "recheck": ["M23 4v6h-6", "M1 20v-6h6", "M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"], "reannounce": ["M22 2L11 13", "M22 2l-7 20-4-9-9-4z"], "sort": ["M3 6h18", "M3 12h12", "M3 18h6"], "filter": ["M22 3H2l8 9.46V19l4 2v-8.54L22 3z"], "list": ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"], "download": ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"], "upload": ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"], "check": ["M20 6L9 17l-5-5"], "copy": ["M9 9h13v13H9z", "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"], "hash": ["M4 9h16", "M4 15h16", "M10 3L8 21", "M16 3l-2 18"], "sequential": ["M5 12h14", "M12 5l7 7-7 7"], "flag": ["M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z", "M4 22v-7"], "edit": ["M12 20h9", "M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"], "save": ["M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z", "M17 21v-8H7v8", "M7 3v5h8"], "back": ["M19 12H5", "M12 19l-7-7 7-7"], "addfile": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M12 18v-6", "M9 15h6"]};
 function iconSvg(name) {
   const parts = ICONS[name];
   if (!parts) return '';
@@ -3180,6 +3351,12 @@ function setBtnLabel(btn, iconName, label) {
     rssBtn: ['rss', 'RSS Feeds'],
     saveFolderBtn: ['folder', 'Save Folder']
   };
+  const filterIcons = { All: 'list', Downloading: 'download', Seeding: 'upload', Paused: 'pause', Completed: 'check' };
+  document.querySelectorAll('[data-filter]').forEach(function(btn) {
+    setBtnLabel(btn, filterIcons[btn.dataset.filter] || 'list', btn.textContent);
+  });
+  const sortIco = document.getElementById('sortModeIcon');
+  if (sortIco) sortIco.innerHTML = iconSvg('sort');
   for (const id in map) {
     const el = document.getElementById(id);
     if (el) setBtnLabel(el, map[id][0], map[id][1]);
@@ -4957,8 +5134,28 @@ function renderFilesPanel() {
 
   const forceButtons = (openFilesTab === 'general')
     ? '<div class="actions" style="margin-top:8px;">' +
-        '<button class="secondary" onclick="forceAction(' + index + ', \'recheck\')">Force Recheck</button>' +
-        '<button class="secondary" onclick="forceAction(' + index + ', \'reannounce\')">Force Reannounce</button>' +
+        '<button class="secondary" onclick="forceAction(' + index + ', \'recheck\')">' + iconSvg('recheck') + 'Force Recheck</button>' +
+        '<button class="secondary" onclick="forceAction(' + index + ', \'reannounce\')">' + iconSvg('reannounce') + 'Force Reannounce</button>' +
+      '</div>'
+    : '';
+
+  // Feature: the app's torrent-detail action buttons, on the General tab.
+  const detailActions = (openFilesTab === 'general')
+    ? '<div class="meta" style="margin-top:12px;">Actions</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" onclick="copyTorrentInfo(' + index + ', \'magnet\')">' + iconSvg('magnet') + 'Copy Magnet</button>' +
+        '<button class="secondary" onclick="copyTorrentInfo(' + index + ', \'hash\')">' + iconSvg('hash') + 'Copy Hash</button>' +
+        '<button onclick="doAction(\'pause\', ' + index + ')">' + iconSvg('pause') + 'Pause</button>' +
+        '<button onclick="doAction(\'resume\', ' + index + ')">' + iconSvg('play') + 'Resume</button>' +
+        '<button class="danger" onclick="deleteTorrentFromDetails(' + index + ')">' + iconSvg('trash') + 'Delete Torrent</button>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" id="seqBtn" onclick="togglePieceSetting(' + index + ', \'sequential\')">' + iconSvg('sequential') + 'Sequential Download: ...</button>' +
+        '<button class="secondary" id="firstLastBtn" onclick="togglePieceSetting(' + index + ', \'firstlast\')">' + iconSvg('flag') + 'First/Last Piece Priority: ...</button>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" onclick="saveTorrentFileFromDetails(' + index + ')">' + iconSvg('save') + 'Save as .torrent File</button>' +
+        '<button class="secondary" onclick="showTorrentFolder(' + index + ')">' + iconSvg('folder') + 'Open Folder</button>' +
       '</div>'
     : '';
 
@@ -4969,11 +5166,11 @@ function renderFilesPanel() {
   const saveFolderRow = (openFilesTab === 'general')
     ? '<div class="meta" style="margin-top:8px;" id="torrentSaveFolderText">Loading current folder...</div>' +
       '<div class="actions">' +
-        '<button class="secondary" onclick="changeTorrentSaveFolder(' + index + ')">Change Save Folder</button>' +
+        '<button class="secondary" onclick="changeTorrentSaveFolder(' + index + ')">' + iconSvg('edit') + 'Change Save Folder</button>' +
       '</div>'
     : '';
 
-  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + saveFolderRow +
+  panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + detailActions + saveFolderRow +
     '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
 
   if (openFilesTab === 'swarmhealth') {
@@ -4983,6 +5180,7 @@ function renderFilesPanel() {
 
   if (openFilesTab === 'general') {
     loadTorrentSaveFolder(index);
+    loadPieceSettings(index);
   }
 
   if (textTabEndpoints[openFilesTab]) loadTextTab(index, openFilesTab);
@@ -5045,6 +5243,115 @@ async function applyTorrentSaveFolder(index, path) {
     alert('Moving files to ' + path + ' - this may take a moment for large torrents. Check the Execution Log for when it\'s done.');
   } catch (e) {
     alert('Could not change save folder');
+  }
+}
+
+// Feature: General-tab action buttons (Copy Magnet / Copy Hash, Delete,
+// Sequential Download, First/Last Piece Priority, Save as .torrent File,
+// Open Folder) - same actions as the app's torrent detail screen.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(function() { return true; }).catch(function() { return false; });
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return Promise.resolve(ok);
+  } catch (e) {
+    return Promise.resolve(false);
+  }
+}
+
+async function copyTorrentInfo(index, what) {
+  try {
+    const res = await api('/api/torrent_info?index=' + index);
+    const data = await res.json();
+    const text = what === 'magnet' ? data.magnet : data.hash;
+    if (!data.ok || !text) { alert('Not available yet'); return; }
+    const ok = await copyText(text);
+    if (ok) alert(what === 'magnet' ? 'Magnet copied' : 'Hash copied');
+    else window.prompt('Copy this manually:', text);
+  } catch (e) {
+    alert('Could not load the torrent info');
+  }
+}
+
+async function deleteTorrentFromDetails(index) {
+  if (!confirm('Delete this torrent?')) return;
+  const withFiles = confirm('Also delete its downloaded files?\n\nOK = delete files too\nCancel = keep the files');
+  await api('/api/remove/' + index + (withFiles ? '?files=1' : ''), { method: 'POST' });
+  if (openFilesIndex === index) toggleFiles(index);
+  refresh();
+}
+
+function setPieceButtons(sequential, firstLast) {
+  const seq = document.getElementById('seqBtn');
+  const fl = document.getElementById('firstLastBtn');
+  if (seq) setBtnLabel(seq, 'sequential', 'Sequential Download: ' + (sequential ? 'On' : 'Off'));
+  if (fl) setBtnLabel(fl, 'flag', 'First/Last Piece Priority: ' + (firstLast ? 'On' : 'Off'));
+}
+
+let pieceSettingState = { sequential: false, firstLast: false };
+
+async function loadPieceSettings(index) {
+  try {
+    const res = await api('/api/torrent_piece_settings?index=' + index);
+    const data = await res.json();
+    if (!data.ok || openFilesIndex !== index) return;
+    pieceSettingState = { sequential: !!data.sequential, firstLast: !!data.firstLast };
+    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast);
+  } catch (e) {}
+}
+
+async function togglePieceSetting(index, setting) {
+  const key = setting === 'sequential' ? 'sequential' : 'firstLast';
+  const newValue = !pieceSettingState[key];
+  try {
+    const res = await api('/api/torrent_piece_settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: String(index), setting: setting, enabled: String(newValue) })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || 'Could not change this setting'); return; }
+    pieceSettingState[key] = newValue;
+    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast);
+  } catch (e) {
+    alert('Could not change this setting');
+  }
+}
+
+async function saveTorrentFileFromDetails(index) {
+  try {
+    const res = await api('/api/save_torrent_file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: String(index) })
+    });
+    const data = await res.json();
+    if (!data.ok) { alert(data.error || 'Could not save the .torrent file'); return; }
+    alert('Saved to ' + data.path);
+  } catch (e) {
+    alert('Could not save the .torrent file');
+  }
+}
+
+// A browser cannot open a folder on the phone, so this shows where the
+// torrent's files are saved.
+async function showTorrentFolder(index) {
+  try {
+    const res = await api('/api/torrent_save_folder?index=' + index);
+    const data = await res.json();
+    if (!data.ok) { alert('Could not read the save folder'); return; }
+    alert('This torrent is saved in:\n' + data.path);
+  } catch (e) {
+    alert('Could not read the save folder');
   }
 }
 

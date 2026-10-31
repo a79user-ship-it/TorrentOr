@@ -994,6 +994,18 @@ class MainActivity : AppCompatActivity() {
         fun makeFilterButton(name: String): Button {
             return Button(this).apply {
                 text = if (activeFilter == name) "[$name]" else name
+                TabIcons.apply(
+                    this,
+                    when (name) {
+                        "Downloading" -> "download"
+                        "Seeding" -> "upload"
+                        "Paused" -> "pause"
+                        "Completed" -> "check"
+                        else -> "list"
+                    },
+                    18,
+                    6
+                )
                 setOnClickListener {
                     activeFilter = name
                     torrentListViewPrefs().edit().putString("filter", name).apply()
@@ -1030,6 +1042,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Icons next to the button names (flat single-colour, see TabIcons.kt)
+        TabIcons.apply(sortButton, "sort")
         TabIcons.apply(selectModeButton, "select")
         TabIcons.apply(addMagnet, "magnet")
         TabIcons.apply(selectFile, "addfile")
@@ -1469,6 +1482,10 @@ class MainActivity : AppCompatActivity() {
                     .show()
             }
         }
+
+        TabIcons.apply(searchButton, "search", 18, 6)
+        TabIcons.apply(sortButton, "sort", 18, 6)
+        TabIcons.apply(filterButton, "filter", 18, 6)
 
         val settingsButton = Button(this).apply {
             text = "Provider Settings"
@@ -6410,6 +6427,21 @@ class MainActivity : AppCompatActivity() {
         root.addView(horizontalScrollFor(tabRowTwo))
         root.addView(contentText)
         root.addView(fileListLayout)
+        TabIcons.apply(copyMagnet, "magnet", 18, 6)
+        TabIcons.apply(copyHash, "hash", 18, 6)
+        TabIcons.apply(pauseButton, "pause", 18, 6)
+        TabIcons.apply(resumeButton, "play", 18, 6)
+        TabIcons.apply(deleteButton, "trash", 18, 6)
+        TabIcons.apply(sequentialButton, "sequential", 18, 6)
+        TabIcons.apply(firstLastButton, "flag", 18, 6)
+        TabIcons.apply(applySpeedLimitButton, "speed", 18, 6)
+        TabIcons.apply(forceReannounce, "reannounce", 18, 6)
+        TabIcons.apply(forceRecheck, "recheck", 18, 6)
+        TabIcons.apply(openFolderButton, "folder", 18, 6)
+        TabIcons.apply(saveTorrentFileButton, "save", 18, 6)
+        TabIcons.apply(changeSaveFolderButton, "edit", 18, 6)
+        TabIcons.apply(backButton, "back", 18, 6)
+
         root.addView(actionTitle)
         root.addView(copyMagnet)
         root.addView(copyHash)

@@ -141,6 +141,50 @@ object TabIcons {
             "M22 2L11 13",
             "M22 2l-7 20-4-9-9-4z"
         ),
+        "sort" to listOf(
+            "M3 6h18", "M3 12h12", "M3 18h6"
+        ),
+        "filter" to listOf(
+            "M22 3H2l8 9.46V19l4 2v-8.54L22 3z"
+        ),
+        "list" to listOf(
+            "M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"
+        ),
+        "download" to listOf(
+            "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"
+        ),
+        "upload" to listOf(
+            "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M17 8l-5-5-5 5", "M12 3v12"
+        ),
+        "check" to listOf(
+            "M20 6L9 17l-5-5"
+        ),
+        "copy" to listOf(
+            "M9 9h13v13H9z",
+            "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+        ),
+        "hash" to listOf(
+            "M4 9h16", "M4 15h16", "M10 3L8 21", "M16 3l-2 18"
+        ),
+        "sequential" to listOf(
+            "M5 12h14", "M12 5l7 7-7 7"
+        ),
+        "flag" to listOf(
+            "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z",
+            "M4 22v-7"
+        ),
+        "edit" to listOf(
+            "M12 20h9",
+            "M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"
+        ),
+        "save" to listOf(
+            "M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z",
+            "M17 21v-8H7v8",
+            "M7 3v5h8"
+        ),
+        "back" to listOf(
+            "M19 12H5", "M12 19l-7-7 7-7"
+        ),
         "addfile" to listOf(
             "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z",
             "M14 2v6h6",
