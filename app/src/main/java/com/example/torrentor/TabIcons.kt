@@ -264,9 +264,12 @@ object TabIcons {
         )
     }
 
-    // Puts the named icon to the left of the button's text and keeps icon +
-    // text together in the middle of the button (a full-width button would
-    // otherwise leave the icon stranded at the far left edge).
+    // Puts the named icon to the left of the button's text. The icon is
+    // shifted sideways while it is DRAWN so that icon + text sit together in
+    // the middle of the button (a full-width button would otherwise leave
+    // the icon stranded at the far left edge). Nothing about the button's
+    // size or padding is ever changed, so rotating the screen or resizing
+    // the window can't leave a button stretched or squashed.
     // An unknown name does nothing, so a typo can never crash the screen.
     fun apply(view: TextView, name: String, sizeDp: Int = 20, gapDp: Int = 8) {
         val layers = ICONS[name] ?: return
@@ -274,39 +277,21 @@ object TabIcons {
         val size = (sizeDp * density).toInt()
         val gap = (gapDp * density).toInt()
 
-        val drawable = ColorIconDrawable(layers, size)
-        view.setCompoundDrawablesRelativeWithIntrinsicBounds(drawable, null, null, null)
+        view.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            ColorIconDrawable(layers, size, gap, view),
+            null,
+            null,
+            null
+        )
         view.compoundDrawablePadding = gap
-
-        val baseLeft = view.paddingLeft
-        val baseRight = view.paddingRight
-
-        // Centres icon + text as one group. The padding is fixed right inside
-        // the layout pass (not posted for later), so the system re-measures
-        // before the first frame is drawn - posting it made the icons jump
-        // from the left edge to the middle for a moment every time the main
-        // screen was rebuilt (e.g. when Select Torrents is tapped).
-        view.addOnLayoutChangeListener { v, left, _, right, _, _, _, _, _ ->
-            val tv = v as TextView
-            val shown: CharSequence =
-                tv.transformationMethod?.getTransformation(tv.text, tv) ?: tv.text
-            val textWidth = tv.paint.measureText(shown, 0, shown.length)
-            val free = (right - left) - size - gap - textWidth
-            val side = (free / 2f).toInt()
-
-            val newLeft = maxOf(baseLeft, side)
-            val newRight = maxOf(baseRight, side)
-
-            if (tv.paddingLeft != newLeft || tv.paddingRight != newRight) {
-                tv.setPadding(newLeft, tv.paddingTop, newRight, tv.paddingBottom)
-            }
-        }
     }
 
     // Draws the coloured shapes scaled from the 24x24 design box to the bounds.
     private class ColorIconDrawable(
         layers: List<Layer>,
-        private val sizePx: Int
+        private val sizePx: Int,
+        private val gapPx: Int,
+        private val owner: TextView
     ) : Drawable() {
 
         private class Shape(val path: Path, val layer: Layer)
@@ -326,8 +311,17 @@ object TabIcons {
             val b = bounds
             if (b.width() <= 0 || b.height() <= 0) return
 
+            // The text is already centred in the space right of the icon, so
+            // only the icon has to move: from the left edge to where the
+            // icon+text group starts when that group is centred.
+            val shown: CharSequence =
+                owner.transformationMethod?.getTransformation(owner.text, owner) ?: owner.text
+            val textWidth = owner.paint.measureText(shown, 0, shown.length)
+            val contentWidth = owner.width - owner.paddingLeft - owner.paddingRight
+            val shift = maxOf(0f, (contentWidth - sizePx - gapPx - textWidth) / 2f)
+
             canvas.save()
-            canvas.translate(b.left.toFloat(), b.top.toFloat())
+            canvas.translate(b.left.toFloat() + shift, b.top.toFloat())
             val scale = b.width() / 24f
             canvas.scale(scale, scale)
 

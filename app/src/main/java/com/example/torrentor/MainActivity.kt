@@ -3782,6 +3782,39 @@ class MainActivity : AppCompatActivity() {
             addView(forwardButton)
         }
 
+        // Quick jump to internal storage or an SD card, so a save folder on
+        // the SD card is one tap away instead of walking up to /storage.
+        val rootsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 8)
+        }
+
+        for (storageRoot in StorageRoots.list(this)) {
+            rootsRow.addView(
+                Button(this).apply {
+                    text = storageRoot.name
+                    setOnClickListener {
+                        if (!storageRoot.available) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "No SD card found. Insert one and try again.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            return@setOnClickListener
+                        }
+
+                        val target = File(storageRoot.path)
+                        if (target.isDirectory && target != currentDir) {
+                            backStack.add(currentDir)
+                            forwardStack.clear()
+                            currentDir = target
+                            refreshContents()
+                        }
+                    }
+                }
+            )
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
@@ -3796,6 +3829,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(navRow)
+        root.addView(rootsRow)
         root.addView(pathText)
         root.addView(scroll)
 
@@ -3813,7 +3847,18 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Choose Folder")
             .setView(root)
             .setPositiveButton("Use This Folder") { _, _ ->
-                onPicked(currentDir.absolutePath)
+                // A folder TorrentOr can't write to (for example a
+                // read-only part of an SD card) would make every download
+                // into it fail, so say so instead of silently saving it.
+                if (!currentDir.canWrite()) {
+                    Toast.makeText(
+                        this,
+                        "TorrentOr can't write to that folder. Pick another one.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    onPicked(currentDir.absolutePath)
+                }
             }
             .setNeutralButton("New Folder", null)
             .setNegativeButton("Cancel", null)
