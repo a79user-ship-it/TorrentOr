@@ -119,6 +119,9 @@ object TorrentNative {
     // index) and returns "" from the getter / false from the setter -
     // never throws - when the hash isn't found.
     external fun applyGlobalSpeedLimits(uploadLimit: Int, downloadLimit: Int)
+
+    // Network policy: pauses/resumes every transfer (not individual torrents).
+    external fun setNetworkPaused(paused: Boolean)
     external fun getGlobalSpeedLimits(): String
     external fun setTorrentSpeedLimits(hash: String, uploadLimit: Int, downloadLimit: Int): Boolean
     external fun getTorrentSpeedLimits(hash: String): String

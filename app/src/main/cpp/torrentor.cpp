@@ -65,6 +65,13 @@ static bool g_lsdEnabled = true;
 static int g_globalUploadLimit = 0;
 static int g_globalDownloadLimit = 0;
 
+// Network policy (Wi-Fi only / mobile data only): when the phone is on a
+// network the user did not allow, the whole session is paused with
+// session::pause(), which stops all transfers without touching any
+// torrent's own paused/resumed state. Kept here so it is also applied if
+// the session is created after the setting was made.
+static bool g_networkPaused = false;
+
 // ---- Execution Log ----
 // libtorrent alerts are turned into short lines ("<level>|<text>", level is
 // N = normal, I = info, W = warning, C = critical). The app collects them with
@@ -535,6 +542,13 @@ static void ensureSession(const std::string& savePath) {
         }
 
         g_session = std::make_unique<lt::session>(pack);
+
+        if (g_networkPaused) {
+            try {
+                g_session->pause();
+            } catch (...) {
+            }
+        }
 
         // PEX note:
         // libtorrent normally enables peer exchange through its standard torrent extensions
@@ -2445,6 +2459,34 @@ Java_com_example_torrentor_TorrentNative_applyGlobalSpeedLimits(
     g_globalDownloadLimit = downloadLimit > 0 ? downloadLimit : 0;
 
     applyGlobalSpeedLimits();
+}
+
+// Network policy: pause (true) or resume (false) every transfer because the
+// current network is not one the user allowed. Never throws; does not change
+// any torrent's own paused state.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_setNetworkPaused(
+        JNIEnv*,
+        jobject,
+        jboolean paused) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    g_networkPaused = (paused == JNI_TRUE);
+
+    if (!g_session) {
+        return;
+    }
+
+    try {
+        if (g_networkPaused) {
+            g_session->pause();
+        } else {
+            g_session->resume();
+        }
+    } catch (...) {
+    }
 }
 
 extern "C"

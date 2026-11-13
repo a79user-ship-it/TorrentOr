@@ -505,9 +505,6 @@ object WebUiServer {
                 // panels - lists subfolders of a path, and creates a new
                 // one, same plain File browsing as the app's own
                 // showFolderPickerDialog/showCreateFolderDialog.
-                method == "GET" && path == "/api/storage_roots" ->
-                    handleStorageRoots(context, output)
-
                 method == "GET" && path == "/api/browse_folder" ->
                     handleBrowseFolder(context, parseQueryParam(query, "path"), output)
 
@@ -1652,22 +1649,6 @@ object WebUiServer {
     // showFolderPickerDialog does (no SAF/DocumentFile involved there
     // either), just driven from a web page instead of an AlertDialog:
     // list of subfolders to tap into, Up, and New Folder.
-
-    // Internal storage + SD card(s), for the folder picker's quick buttons.
-    private fun handleStorageRoots(context: Context, output: OutputStream) {
-        val roots = StorageRoots.list(context)
-        val json = StringBuilder("[")
-        roots.forEachIndexed { i, r ->
-            if (i > 0) json.append(",")
-            json.append(
-                "{\"name\":" + jsonString(r.name) +
-                    ",\"path\":" + jsonString(r.path) +
-                    ",\"available\":" + r.available + "}"
-            )
-        }
-        json.append("]")
-        sendJson(output, "{\"ok\":true,\"roots\":" + json + "}")
-    }
 
     private fun handleBrowseFolder(context: Context, pathParam: String?, output: OutputStream) {
         var dir = File(pathParam ?: "")
@@ -3171,7 +3152,6 @@ object WebUiServer {
         <button class="secondary" id="folderPickerBackBtn">&larr;</button>
         <button class="secondary" id="folderPickerForwardBtn">&rarr;</button>
       </div>
-      <div class="row" id="folderPickerRoots"></div>
       <div class="meta" id="folderPickerPath" style="word-break:break-all;"></div>
       <div id="folderPickerList" style="overflow:auto;flex:1;margin:8px 0;"></div>
       <div class="row">
@@ -4431,35 +4411,7 @@ function openFolderPicker(startPath, onPicked) {
   folderPickerForwardStack = [];
   document.getElementById('folderPickerOverlay').style.display = 'flex';
   document.getElementById('folderPickerNewNameInput').style.display = 'none';
-  loadFolderPickerRoots();
   navigateFolderPicker(startPath || '');
-}
-
-let folderPickerRoots = [];
-
-// Quick jump buttons for internal storage and the SD card.
-async function loadFolderPickerRoots() {
-  try {
-    const res = await api('/api/storage_roots');
-    const data = await res.json();
-    if (!data.ok) return;
-    folderPickerRoots = data.roots || [];
-    const box = document.getElementById('folderPickerRoots');
-    box.innerHTML = folderPickerRoots.map(function(r, i) {
-      return '<button class="secondary" onclick="folderPickerGoToRoot(' + i + ')">' +
-        iconSvg(i === 0 ? 'storage' : 'save') + escapeHtml(r.name) + '</button>';
-    }).join('');
-  } catch (e) {}
-}
-
-function folderPickerGoToRoot(i) {
-  const r = folderPickerRoots[i];
-  if (!r) return;
-  if (!r.available) { alert('No SD card found. Insert one and try again.'); return; }
-  if (r.path === folderPickerCurrentPath) return;
-  folderPickerBackStack.push(folderPickerCurrentPath);
-  folderPickerForwardStack = [];
-  navigateFolderPicker(r.path);
 }
 
 function closeFolderPicker() {

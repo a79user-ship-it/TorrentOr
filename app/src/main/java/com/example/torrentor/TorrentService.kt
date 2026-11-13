@@ -7,6 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.media.MediaScannerConnection
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -43,6 +46,17 @@ class TorrentService : Service() {
     // on, released when it's turned off or the service is destroyed.
     private var upnpMulticastLock: WifiManager.MulticastLock? = null
 
+    companion object {
+        // Set while all transfers are paused because the phone is on a
+        // network the user did not allow (Connection screen -> Download
+        // network). null = nothing blocked. Read by the Connection screen.
+        @Volatile
+        var networkBlockedReason: String? = null
+    }
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastNetworkCaps: NetworkCapabilities? = null
+
     override fun onCreate() {
         super.onCreate()
 
@@ -77,6 +91,7 @@ class TorrentService : Service() {
 
         restoreSavedTorrents()
         startUpdates()
+        startNetworkWatcher()
 
         // Feature: Web UI. Off by default - only starts here if the user
         // already turned it on from the Web UI screen, same pattern as
@@ -91,6 +106,7 @@ class TorrentService : Service() {
     }
 
     override fun onDestroy() {
+        stopNetworkWatcher()
         releaseUpnpMulticastLock()
         WebUiServer.stop()
         super.onDestroy()
@@ -109,6 +125,100 @@ class TorrentService : Service() {
         if (error != null) {
             AppLog.error("Web UI: could not start on port $port: $error")
         }
+    }
+
+    // ------------------------------------------------------- Download network policy
+    // "both" (default: nothing changes), "wifi_only" or "mobile_only", saved
+    // by the Connection screen in the same prefs file as the other
+    // connection settings. When the phone's current network is one that is
+    // not allowed, every transfer is paused (the session is paused - no
+    // torrent's own paused/resumed state is touched) and it carries on by
+    // itself as soon as an allowed network is available.
+
+    private fun startNetworkWatcher() {
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java) ?: return
+
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    networkCapabilities: NetworkCapabilities
+                ) {
+                    lastNetworkCaps = networkCapabilities
+                    handler.post { applyNetworkPolicy() }
+                }
+
+                override fun onLost(network: Network) {
+                    lastNetworkCaps = null
+                    handler.post { applyNetworkPolicy() }
+                }
+            }
+
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        } catch (e: Throwable) {
+            AppLog.error("Could not watch the network for the download network setting: ${e.message}")
+        }
+    }
+
+    private fun stopNetworkWatcher() {
+        try {
+            val callback = networkCallback ?: return
+            getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+        } catch (_: Throwable) {
+        }
+
+        networkCallback = null
+        networkBlockedReason = null
+    }
+
+    private fun applyNetworkPolicy() {
+        val mode = connectionPrefs().getString("network_mode", "both") ?: "both"
+        val caps = lastNetworkCaps
+
+        val reason: String? = if (mode == "both") {
+            null
+        } else if (caps == null) {
+            // No network at all: nothing can transfer anyway, so leave the
+            // current state alone until a network shows up.
+            networkBlockedReason
+        } else {
+            val onWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+            val onMobile = !onWifi && caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+
+            if (mode == "wifi_only" && onMobile) {
+                "Paused - waiting for Wi-Fi"
+            } else if (mode == "mobile_only" && onWifi) {
+                "Paused - waiting for mobile data"
+            } else {
+                null
+            }
+        }
+
+        if (reason == networkBlockedReason) return
+
+        networkBlockedReason = reason
+
+        try {
+            TorrentNative.setNetworkPaused(reason != null)
+        } catch (e: Throwable) {
+            AppLog.error("Could not apply the download network setting: ${e.message}")
+        }
+
+        if (reason != null) {
+            AppLog.info("Network: $reason (all transfers paused)")
+        } else {
+            AppLog.info("Network: allowed network available, transfers resumed")
+        }
+
+        updateNotification(statusWithNetwork())
+    }
+
+    private fun statusWithNetwork(): String {
+        val status = TorrentNative.getDetailedStatus()
+        val reason = networkBlockedReason ?: return status
+        return reason + "\n" + status
     }
 
     // ------------------------------------------------------- Feature 4: Connection
@@ -397,6 +507,10 @@ class TorrentService : Service() {
             // must keep working whether or not the app is in the foreground) stays in sync
             // with the new UPnP setting. It never touches any torrent, pause state or file
             // selection.
+            action == "NETWORK_MODE_CHANGED" -> {
+                applyNetworkPolicy()
+            }
+
             action == "CONNECTION_SETTINGS_CHANGED" -> {
                 val upnpEnabled = intent.getBooleanExtra("UPNP_ENABLED", true)
                 updateUpnpMulticastLock(upnpEnabled)
@@ -617,9 +731,7 @@ class TorrentService : Service() {
         // has a saved per-torrent speed limit waiting for it.
         reapplySavedTorrentSpeedLimits()
 
-        updateNotification(
-            TorrentNative.getDetailedStatus()
-        )
+        updateNotification(statusWithNetwork())
 
         return START_STICKY
     }
@@ -1897,9 +2009,7 @@ class TorrentService : Service() {
                 checkCompletedTorrentDates()
                 checkLowDiskSpace()
 
-                updateNotification(
-                    TorrentNative.getDetailedStatus()
-                )
+                updateNotification(statusWithNetwork())
 
                 // collect the engine's log lines for the Execution Log screen
                 AppLog.pullEngineLog()

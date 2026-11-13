@@ -3782,39 +3782,6 @@ class MainActivity : AppCompatActivity() {
             addView(forwardButton)
         }
 
-        // Quick jump to internal storage or an SD card, so a save folder on
-        // the SD card is one tap away instead of walking up to /storage.
-        val rootsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 8)
-        }
-
-        for (storageRoot in StorageRoots.list(this)) {
-            rootsRow.addView(
-                Button(this).apply {
-                    text = storageRoot.name
-                    setOnClickListener {
-                        if (!storageRoot.available) {
-                            Toast.makeText(
-                                this@MainActivity,
-                                "No SD card found. Insert one and try again.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                            return@setOnClickListener
-                        }
-
-                        val target = File(storageRoot.path)
-                        if (target.isDirectory && target != currentDir) {
-                            backStack.add(currentDir)
-                            forwardStack.clear()
-                            currentDir = target
-                            refreshContents()
-                        }
-                    }
-                }
-            )
-        }
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 24)
@@ -3829,7 +3796,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(navRow)
-        root.addView(rootsRow)
         root.addView(pathText)
         root.addView(scroll)
 
@@ -3847,18 +3813,7 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Choose Folder")
             .setView(root)
             .setPositiveButton("Use This Folder") { _, _ ->
-                // A folder TorrentOr can't write to (for example a
-                // read-only part of an SD card) would make every download
-                // into it fail, so say so instead of silently saving it.
-                if (!currentDir.canWrite()) {
-                    Toast.makeText(
-                        this,
-                        "TorrentOr can't write to that folder. Pick another one.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                } else {
-                    onPicked(currentDir.absolutePath)
-                }
+                onPicked(currentDir.absolutePath)
             }
             .setNeutralButton("New Folder", null)
             .setNegativeButton("Cancel", null)
@@ -4192,6 +4147,71 @@ class MainActivity : AppCompatActivity() {
         portForwardingRow.addView(upnpButton)
         portForwardingRow.addView(natpmpButton)
 
+        // Download network: which kind of connection TorrentOr may transfer
+        // on. Saved in the same prefs file as the other connection settings;
+        // the Service watches the network and pauses/resumes the whole
+        // session (it never touches any torrent's own paused state).
+        val networkLabel = TextView(this).apply {
+            text = "Download over"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(0, 24, 0, 8)
+        }
+
+        val networkNote = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 8, 0, 16)
+        }
+
+        fun refreshNetworkNote() {
+            val blocked = TorrentService.networkBlockedReason
+            networkNote.text =
+                "When the phone is on a network that isn't allowed, all " +
+                        "downloading and seeding pauses and carries on by " +
+                        "itself once an allowed network is available. Your own " +
+                        "pause/resume choices are kept.\n\n" +
+                        (blocked ?: "Status: transferring normally")
+        }
+
+        refreshNetworkNote()
+
+        val networkGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+        }
+
+        val networkModes = listOf(
+            "both" to "Wi-Fi and mobile data",
+            "wifi_only" to "Wi-Fi only",
+            "mobile_only" to "Mobile data only"
+        )
+
+        val currentNetworkMode = prefs.getString("network_mode", "both") ?: "both"
+
+        for ((modeKey, modeLabel) in networkModes) {
+            val radio = RadioButton(this).apply {
+                id = android.view.View.generateViewId()
+                text = modeLabel
+                setTextColor(Color.WHITE)
+                isChecked = (modeKey == currentNetworkMode)
+            }
+            radio.tag = modeKey
+            networkGroup.addView(radio)
+        }
+
+        networkGroup.setOnCheckedChangeListener { group, checkedId ->
+            val chosen = group.findViewById<RadioButton>(checkedId)?.tag as? String
+                ?: return@setOnCheckedChangeListener
+
+            prefs.edit().putString("network_mode", chosen).apply()
+
+            val intent = Intent(this, TorrentService::class.java)
+            intent.putExtra("ACTION", "NETWORK_MODE_CHANGED")
+            startTorrentService(intent)
+
+            handler.postDelayed({ refreshNetworkNote() }, 600)
+        }
+
         val portLabel = TextView(this).apply {
             text = "Listening port"
             textSize = 18f
@@ -4322,13 +4342,19 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        startConnectionAutoRefresh(statusText) { syncPortInputToLivePort() }
+        startConnectionAutoRefresh(statusText) {
+            syncPortInputToLivePort()
+            refreshNetworkNote()
+        }
 
         root.addView(title)
         root.addView(statusText)
         root.addView(utpRow)
         root.addView(tcpRow)
         root.addView(portForwardingRow)
+        root.addView(networkLabel)
+        root.addView(networkGroup)
+        root.addView(networkNote)
         root.addView(portLabel)
         root.addView(portInput)
         root.addView(randomPortCheckbox)
