@@ -168,6 +168,7 @@ Users are responsible for complying with the copyright laws applicable in their 
 Made with ❤️ using Kotlin, Android NDK and native libtorrent.
 
 </p>
+
 ## ❤️ Support TorrentOr
 
 TorrentOr is an independent Android torrent client built to provide a powerful, reliable, and user-friendly downloading experience.
