@@ -298,12 +298,40 @@ object TabIcons {
         view.compoundDrawablePadding = gap
     }
 
+    // Same as apply(), but with a coloured icon on BOTH sides of the text
+    // (for example the magnet icon before "Add Magnet / Hash" and the hash
+    // icon after it). The text stays centred; each icon is drawn next to it.
+    // An unknown name does nothing.
+    fun applyBoth(
+        view: TextView,
+        leftName: String,
+        rightName: String,
+        sizeDp: Int = 20,
+        gapDp: Int = 8
+    ) {
+        val leftLayers = ICONS[leftName] ?: return
+        val rightLayers = ICONS[rightName] ?: return
+        val density = view.resources.displayMetrics.density
+        val size = (sizeDp * density).toInt()
+        val gap = (gapDp * density).toInt()
+
+        view.setCompoundDrawablesRelativeWithIntrinsicBounds(
+            ColorIconDrawable(leftLayers, size, gap, view, 1),
+            null,
+            ColorIconDrawable(rightLayers, size, gap, view, 2),
+            null
+        )
+        view.compoundDrawablePadding = gap
+    }
+
     // Draws the coloured shapes scaled from the 24x24 design box to the bounds.
     private class ColorIconDrawable(
         layers: List<Layer>,
         private val sizePx: Int,
         private val gapPx: Int,
-        private val owner: TextView
+        private val owner: TextView,
+        // 0 = the only icon (left), 1 = left of a pair, 2 = right of a pair
+        private val side: Int = 0
     ) : Drawable() {
 
         private class Shape(val path: Path, val layer: Layer)
@@ -330,7 +358,17 @@ object TabIcons {
                 owner.transformationMethod?.getTransformation(owner.text, owner) ?: owner.text
             val textWidth = owner.paint.measureText(shown, 0, shown.length)
             val contentWidth = owner.width - owner.paddingLeft - owner.paddingRight
-            val shift = maxOf(0f, (contentWidth - sizePx - gapPx - textWidth) / 2f)
+            val shift = if (side == 0) {
+                maxOf(0f, (contentWidth - sizePx - gapPx - textWidth) / 2f)
+            } else {
+                // Icon, text and icon form one group; centre it. The left
+                // icon moves right by this much, the right icon moves left.
+                val groupShift = maxOf(
+                    0f,
+                    (contentWidth - 2f * (sizePx + gapPx) - textWidth) / 2f
+                )
+                if (side == 1) groupShift else -groupShift
+            }
 
             canvas.save()
             canvas.translate(b.left.toFloat() + shift, b.top.toFloat())

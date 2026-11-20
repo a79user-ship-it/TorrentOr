@@ -609,7 +609,7 @@ class MainActivity : AppCompatActivity() {
             val hash = extractHashFromMagnetInput(uriText)
 
             if (isTorrentAlreadyAddedByHash(hash)) {
-                showAlreadyAddedMessage()
+                showAlreadyAddedMessage(hash, uriText)
                 return
             }
 
@@ -639,7 +639,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (isTorrentAlreadyAddedByHash(hash)) {
-                showAlreadyAddedMessage()
+                showAlreadyAddedMessage(hash, filePath)
                 return
             }
 
@@ -927,7 +927,7 @@ class MainActivity : AppCompatActivity() {
                 val hash = extractHashFromMagnetInput(magnet)
 
                 if (isTorrentAlreadyAddedByHash(hash)) {
-                    showAlreadyAddedMessage()
+                    showAlreadyAddedMessage(hash, magnet)
                     return@setOnClickListener
                 }
 
@@ -1209,7 +1209,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(removeSelected, "trash")
         TabIcons.apply(sortButton, "sort")
         TabIcons.apply(selectModeButton, "select")
-        TabIcons.apply(addMagnet, "magnet")
+        TabIcons.applyBoth(addMagnet, "magnet", "hash")
         TabIcons.apply(selectFile, "addfile")
         TabIcons.apply(pauseAll, "pause")
         TabIcons.apply(resumeAll, "play")
@@ -5855,10 +5855,36 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    private fun showAlreadyAddedMessage() {
+    // Adding something that is already in the list no longer just refuses:
+    // when the hash and the new source (a .torrent path or a magnet) are
+    // known, any trackers the new source has that the existing torrent
+    // lacks are merged into it, like qBittorrent does.
+    private fun showAlreadyAddedMessage(hash: String = "", source: String = "") {
+        var message = "Torrent already added"
+
+        if (hash.isNotBlank() && source.isNotBlank()) {
+            val result = try {
+                TorrentNative.mergeTorrentTrackers(hash, source)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (result.startsWith("OK|")) {
+                val added = result.split("|").getOrNull(1)?.toIntOrNull() ?: 0
+                message = if (added > 0) {
+                    "Torrent already added - merged $added new tracker" +
+                        (if (added == 1) "" else "s")
+                } else {
+                    "Torrent already added - no new trackers to merge"
+                }
+            } else if (result == "PRIVATE") {
+                message = "Torrent already added (private torrent - trackers not merged)"
+            }
+        }
+
         Toast.makeText(
             this,
-            "Torrent already added",
+            message,
             Toast.LENGTH_LONG
         ).show()
     }
@@ -5867,7 +5893,7 @@ class MainActivity : AppCompatActivity() {
         val hash = extractHashFromMagnetInput(magnet)
 
         if (isTorrentAlreadyAddedByHash(hash)) {
-            showAlreadyAddedMessage()
+            showAlreadyAddedMessage(hash, magnet)
             return
         }
 
@@ -6323,7 +6349,7 @@ class MainActivity : AppCompatActivity() {
                 hash.isNotBlank() &&
                 isTorrentAlreadyAddedByHash(hash)
             ) {
-                showAlreadyAddedMessage()
+                showAlreadyAddedMessage(hash, filePath)
                 return
             }
         } catch (_: Throwable) {
@@ -6710,7 +6736,7 @@ class MainActivity : AppCompatActivity() {
                     "Could not load statistics"
                 }
 
-                contentText.text = stats
+                contentText.text = highlightTimeLines(stats)
             }
         }
 
@@ -6790,7 +6816,8 @@ class MainActivity : AppCompatActivity() {
                 startTorrentService(intent)
 
                 Toast.makeText(this@MainActivity, "Torrent paused", Toast.LENGTH_SHORT).show()
-                showGeneralTab()
+                // Stay on the tab the user is on - just refresh it.
+                updateActiveDetailsTab()
             }
         }
 
@@ -6805,7 +6832,8 @@ class MainActivity : AppCompatActivity() {
                 startTorrentService(intent)
 
                 Toast.makeText(this@MainActivity, "Torrent resumed", Toast.LENGTH_SHORT).show()
-                showGeneralTab()
+                // Stay on the tab the user is on - just refresh it.
+                updateActiveDetailsTab()
             }
         }
 
@@ -7013,7 +7041,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 TorrentNative.forceReannounce(torrentIndex)
                 Toast.makeText(this@MainActivity, "Reannounce sent", Toast.LENGTH_SHORT).show()
-                showGeneralTab()
+                updateActiveDetailsTab()
             }
         }
 
@@ -7022,7 +7050,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 TorrentNative.forceRecheck(torrentIndex)
                 Toast.makeText(this@MainActivity, "Force recheck started", Toast.LENGTH_SHORT).show()
-                showGeneralTab()
+                updateActiveDetailsTab()
             }
         }
 
@@ -7119,7 +7147,8 @@ class MainActivity : AppCompatActivity() {
                             Toast.LENGTH_LONG
                         ).show()
 
-                        showGeneralTab()
+                        // Stay on the tab the user is on - just refresh it.
+                        updateActiveDetailsTab()
                     } else {
                         Toast.makeText(
                             this@MainActivity,
@@ -7389,11 +7418,11 @@ class MainActivity : AppCompatActivity() {
             }
             "Pieces" -> showPiecesDetails(torrentIndex, contentText)
             "Statistics" -> {
-                contentText.text = try {
+                contentText.text = highlightTimeLines(try {
                     TorrentNative.getTorrentStatistics(torrentIndex)
                 } catch (e: Throwable) {
                     "Could not load statistics"
-                }
+                })
             }
             "Comment" -> {
                 contentText.text = try {
@@ -7628,6 +7657,17 @@ class MainActivity : AppCompatActivity() {
         text.append("ETA: ").append(eta).append("\n")
         text.append("Added: ").append(addedDate).append("\n")
         text.append("Completed: ").append(completedDate).append("\n")
+
+        val timeLines = try {
+            TorrentNative.getTorrentTimeLines(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (timeLines.isNotBlank()) {
+            text.append(timeLines).append("\n")
+        }
+
         text.append(trackerHost).append("\n")
         text.append("Total size: ").append(totalSize).append("\n")
         text.append("Availability: ").append(availability).append("\n")
@@ -7653,7 +7693,7 @@ class MainActivity : AppCompatActivity() {
         text.append("Hash:\n").append(hash).append("\n\n")
         text.append("Magnet:\n").append(magnet)
 
-        contentText.text = colorSwarmHealth(text.toString())
+        contentText.text = highlightTimeLines(colorSwarmHealth(text.toString()))
     }
 
     private fun getTorrentStatusLine(torrentIndex: Int): String {
@@ -9227,7 +9267,7 @@ class MainActivity : AppCompatActivity() {
         val red = Color.parseColor("#FF5252")
         val grey = Color.parseColor("#8A93A3")
 
-        // 0 working, 1 updating, 2 error, 3 not contacted, 4 warning
+        // 0 working, 1 updating, 2 error, 3 not contacted, 4 warning, 5 failing
         fun kindOf(lines: List<String>): Int {
             val status = lines.firstOrNull { it.startsWith("Status: ") }
                 ?.substring("Status: ".length) ?: ""
@@ -9238,6 +9278,7 @@ class MainActivity : AppCompatActivity() {
             return when {
                 status.startsWith("Error") -> 2
                 status.startsWith("Updating") -> 1
+                status.startsWith("Failing") -> 5
                 status.startsWith("Working") -> if (hasLastError && !verified) 4 else 0
                 else -> 3
             }
@@ -9247,7 +9288,7 @@ class MainActivity : AppCompatActivity() {
             0 -> green
             1 -> blue
             2 -> red
-            4 -> orange
+            4, 5 -> orange
             else -> grey
         }
 
@@ -9279,7 +9320,7 @@ class MainActivity : AppCompatActivity() {
 
         add("Tracker Status\n", null, false)
 
-        val labels = listOf(0 to "working", 1 to "updating", 4 to "warning", 2 to "error", 3 to "not contacted")
+        val labels = listOf(0 to "working", 1 to "updating", 4 to "warning", 5 to "failing", 2 to "error", 3 to "not contacted")
         var first = true
         for ((kind, label) in labels) {
             val n = kinds.count { it == kind }
@@ -9305,7 +9346,7 @@ class MainActivity : AppCompatActivity() {
                         add("Status: ", null, false)
                         add(line.substring("Status: ".length), color, true)
                     }
-                    (kind == 2 || kind == 4) &&
+                    (kind == 2 || kind == 4 || kind == 5) &&
                         (line.startsWith("Message: ") || line.startsWith("Last error: ")) ->
                         add(line, color, false)
                     else -> add(line, null, false)
@@ -9314,6 +9355,42 @@ class MainActivity : AppCompatActivity() {
             }
 
             out.append("\n\n")
+        }
+
+        return out
+    }
+
+    // Shows the time lines (Elapsed / Time active / Seeding time / Time to
+    // complete) in purple on the General and Statistics tabs. Display only;
+    // the text itself is unchanged.
+    private fun highlightTimeLines(text: CharSequence): CharSequence {
+        val labels = listOf("Elapsed: ", "Time active: ", "Seeding time: ", "Time to complete: ")
+        val out = if (text is android.text.SpannableStringBuilder) {
+            text
+        } else {
+            android.text.SpannableStringBuilder(text)
+        }
+
+        val color = Color.parseColor("#B794F6")
+        var lineStart = 0
+        val plain = out.toString()
+
+        while (lineStart <= plain.length) {
+            var lineEnd = plain.indexOf('\n', lineStart)
+            if (lineEnd < 0) lineEnd = plain.length
+
+            val line = plain.substring(lineStart, lineEnd)
+
+            if (labels.any { line.startsWith(it) }) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(color),
+                    lineStart,
+                    lineEnd,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+
+            lineStart = lineEnd + 1
         }
 
         return out

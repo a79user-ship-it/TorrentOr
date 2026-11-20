@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <set>
 #include <jni.h>
 #include <string>
 #include <memory>
@@ -300,9 +302,19 @@ static std::string resumeFilePath(const std::string& hash) {
     return g_resumeDir + "/" + hash + ".fastresume";
 }
 
+// Trackers merged into an existing torrent (re-adding the same torrent
+// from another .torrent file / magnet) are kept in <info-hash>.trackers,
+// one "tier<TAB>url" per line, because applyResumeData() deliberately
+// does not restore trackers from the .fastresume file. They are put back
+// on the torrent whenever it is re-added, and deleted with the torrent.
+static std::string mergedTrackersPath(const std::string& hash) {
+    return g_resumeDir + "/" + hash + ".trackers";
+}
+
 static void deleteResumeFile(const std::string& hash) {
     if (g_resumeDir.empty() || !isSafeHashName(hash)) return;
     std::remove(resumeFilePath(hash).c_str());
+    std::remove(mergedTrackersPath(hash).c_str());
 }
 
 static bool resumeFileExists(const std::string& hash) {
@@ -312,6 +324,47 @@ static bool resumeFileExists(const std::string& hash) {
     return static_cast<bool>(in);
 }
 
+static void applyMergedTrackers(lt::add_torrent_params& params, const std::string& hash) {
+    try {
+        std::ifstream in(mergedTrackersPath(hash));
+        if (!in) return;
+
+        std::set<std::string> known;
+        for (const auto& u : params.trackers) known.insert(u);
+
+        if (params.ti) {
+            for (const auto& t : params.ti->trackers()) known.insert(t.url);
+        }
+
+        std::string line;
+
+        while (std::getline(in, line)) {
+            size_t tab = line.find('\t');
+            if (tab == std::string::npos) continue;
+
+            int tier = std::atoi(line.substr(0, tab).c_str());
+            std::string url = line.substr(tab + 1);
+
+            while (!url.empty() && (url.back() == '\r' || url.back() == '\n')) {
+                url.pop_back();
+            }
+
+            if (url.empty() || known.count(url) > 0) continue;
+
+            // tracker_tiers must line up with trackers before appending.
+            while (params.tracker_tiers.size() < params.trackers.size()) {
+                params.tracker_tiers.push_back(0);
+            }
+
+            params.trackers.push_back(url);
+            params.tracker_tiers.push_back(tier);
+            known.insert(url);
+        }
+    } catch (...) {
+        // Best effort - the torrent just starts with its own trackers.
+    }
+}
+
 // Copies only "what we already have" from the saved resume data into the
 // params about to be added. Deliberately NOT copied: save path, flags,
 // file/piece priorities (the app re-applies its own saved selection), and
@@ -319,6 +372,8 @@ static bool resumeFileExists(const std::string& hash) {
 // cannot be read, leaves params untouched.
 static void applyResumeData(lt::add_torrent_params& params, const std::string& hash) {
     if (g_resumeDir.empty() || !isSafeHashName(hash)) return;
+
+    applyMergedTrackers(params, hash);
 
     try {
         std::ifstream in(resumeFilePath(hash), std::ios::binary);
@@ -815,6 +870,45 @@ static std::string formatDuration(long seconds) {
     }
 
     return pluralUnit(seconds, "second", "seconds");
+}
+
+// "Time active: ..." (and "Seeding time: ..." once it has been seeding) -
+// shared by the Statistics tab and the General tab so both always agree.
+// Both values come from libtorrent and are restored from resume data, so
+// they carry over app restarts.
+static std::string buildTimeLines(const lt::torrent_status& st) {
+    std::string out;
+
+    long long added = static_cast<long long>(st.added_time);
+    long long completed = static_cast<long long>(st.completed_time);
+    long long now = static_cast<long long>(std::time(nullptr));
+
+    // Elapsed = real (wall-clock) time since the torrent was added,
+    // including time it was paused or the app was closed. "Time active"
+    // below only counts time it was actually running.
+    if (added > 0 && now > added) {
+        out += "Elapsed: ";
+        out += formatDuration(static_cast<long>(now - added));
+        out += "\n";
+    }
+
+    out += "Time active: ";
+    out += formatDuration(static_cast<long>(st.active_duration.count()));
+
+    long seeding = static_cast<long>(st.seeding_duration.count());
+
+    if (seeding > 0) {
+        out += "\nSeeding time: ";
+        out += formatDuration(seeding);
+    }
+
+    // How long it took from being added to finishing the download.
+    if (added > 0 && completed > added) {
+        out += "\nTime to complete: ";
+        out += formatDuration(static_cast<long>(completed - added));
+    }
+
+    return out;
 }
 
 
@@ -2496,6 +2590,11 @@ Java_com_example_torrentor_TorrentNative_getTorrentTrackerStatus(
             } else if (tracker.verified || (endpointCount > 0 && endpointsFailing < endpointCount &&
                                              (!trackerMessage.empty() || scrapeIncomplete >= 0))) {
                 output += "Working";
+            } else if (maxFails > 0) {
+                // Has failed announces but isn't confirmed dead on every
+                // address - shown orange. Not "Error / Failed", so it does
+                // not trigger the tracker error notification.
+                output += "Failing";
             } else {
                 output += "Not contacted yet";
             }
@@ -2733,6 +2832,134 @@ Java_com_example_torrentor_TorrentNative_hasTorrentHash(
     return hasHashAlready(hash)
            ? JNI_TRUE
            : JNI_FALSE;
+}
+
+// Re-adding a torrent that is already in the session: instead of refusing,
+// merge any trackers from the new .torrent file / magnet link into the
+// existing torrent (like qBittorrent). Returns "OK|<added>|<skipped>",
+// "PRIVATE" (private torrents are left alone) or "ERROR|<message>".
+// Never throws and never creates a second handle for the same hash.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_mergeTorrentTrackers(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jstring sourceValue)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    try {
+        std::string hash = normalizeHash(toString(env, hashValue));
+        std::string source = toString(env, sourceValue);
+
+        if (hash.empty() || source.empty()) {
+            return env->NewStringUTF("ERROR|Missing hash or source");
+        }
+
+        lt::torrent_handle handle = findHandleByHash(hash);
+
+        if (!handle.is_valid()) {
+            return env->NewStringUTF("ERROR|Torrent is not in the session");
+        }
+
+        auto existingInfo = handle.torrent_file();
+
+        if (existingInfo && existingInfo->priv()) {
+            return env->NewStringUTF("PRIVATE");
+        }
+
+        // The trackers the new source carries, with their tiers.
+        std::vector<std::pair<std::string, int>> incoming;
+
+        if (source.rfind("magnet:", 0) == 0) {
+            lt::error_code ec;
+            lt::add_torrent_params params = lt::parse_magnet_uri(source, ec);
+
+            if (ec) {
+                return env->NewStringUTF("ERROR|Could not read the magnet link");
+            }
+
+            for (size_t k = 0; k < params.trackers.size(); k++) {
+                int tier = k < params.tracker_tiers.size() ? params.tracker_tiers[k] : 0;
+                incoming.emplace_back(params.trackers[k], tier);
+            }
+        } else {
+            lt::error_code ec;
+            lt::torrent_info info(source, ec);
+
+            if (ec) {
+                return env->NewStringUTF("ERROR|Could not read the .torrent file");
+            }
+
+            for (const auto& t : info.trackers()) {
+                incoming.emplace_back(t.url, static_cast<int>(t.tier));
+            }
+        }
+
+        auto normalizeUrl = [](std::string u) {
+            for (auto& c : u) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            while (!u.empty() && u.back() == '/') {
+                u.pop_back();
+            }
+            return u;
+        };
+
+        std::set<std::string> known;
+        int maxTier = 0;
+
+        for (const auto& t : handle.trackers()) {
+            known.insert(normalizeUrl(t.url));
+            if (static_cast<int>(t.tier) > maxTier) {
+                maxTier = static_cast<int>(t.tier);
+            }
+        }
+
+        int added = 0;
+        int skipped = 0;
+
+        for (const auto& item : incoming) {
+            if (item.first.empty()) continue;
+
+            std::string key = normalizeUrl(item.first);
+
+            if (known.count(key) > 0) {
+                skipped++;
+                continue;
+            }
+
+            lt::announce_entry entry(item.first);
+            int tier = maxTier + 1 + item.second;
+            entry.tier = static_cast<std::uint8_t>(tier > 255 ? 255 : tier);
+
+            handle.add_tracker(entry);
+            known.insert(key);
+            added++;
+
+            // Remember it so it is still there after a restart.
+            try {
+                std::string fileHash = getHashFromHandle(handle);
+
+                if (!g_resumeDir.empty() && isSafeHashName(fileHash)) {
+                    std::ofstream out(mergedTrackersPath(fileHash), std::ios::app);
+                    out << static_cast<int>(entry.tier) << '\t' << item.first << '\n';
+                }
+            } catch (...) {
+            }
+        }
+
+        if (added > 0) {
+            handle.force_reannounce();
+        }
+
+        std::string result = "OK|" + std::to_string(added) + "|" + std::to_string(skipped);
+        return env->NewStringUTF(result.c_str());
+    }
+    catch (...) {
+        return env->NewStringUTF("ERROR|Could not merge trackers");
+    }
 }
 
 extern "C"
@@ -3573,10 +3800,42 @@ Java_com_example_torrentor_TorrentNative_getTorrentStatistics(
     output += formatEta(eta);
     output += "\n";
 
-    output += "Time active: ";
-    output += formatDuration(static_cast<long>(st.active_duration.count()));
+    output += buildTimeLines(st);
 
     return env->NewStringUTF(output.c_str());
+}
+
+// The General tab's time lines ("Time active: ..." and, once seeding,
+// "Seeding time: ..."). Returns an empty string if the torrent isn't
+// available, so the General tab simply shows nothing extra.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentTimeLines(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    try {
+        lt::torrent_status st = handle.status();
+        std::string lines = buildTimeLines(st);
+        return env->NewStringUTF(lines.c_str());
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
 }
 
 extern "C"

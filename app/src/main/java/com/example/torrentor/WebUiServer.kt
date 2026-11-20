@@ -2124,6 +2124,27 @@ object WebUiServer {
             return
         }
 
+        // Already in the list: merge any new trackers instead of refusing.
+        val uploadedHash = try {
+            TorrentNative.getTorrentFileHash(file.absolutePath)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (uploadedHash.isNotBlank() && isTorrentAlreadyAddedByHash(uploadedHash)) {
+            val mergeMessage = mergeTrackersMessage(uploadedHash, file.absolutePath)
+            try {
+                file.delete()
+            } catch (_: Throwable) {
+            }
+            sendJson(
+                output,
+                "{\"ok\":false,\"alreadyAdded\":true,\"error\":\"Torrent already added\",\"message\":${jsonString(mergeMessage)}}",
+                status = "409 Conflict"
+            )
+            return
+        }
+
         AppLog.info("Web UI: .torrent uploaded (${file.name})")
 
         sendJson(
@@ -2192,7 +2213,12 @@ object WebUiServer {
         // paused twin is created, and starts fetching metadata it
         // already has as if from scratch.
         if (isTorrentAlreadyAddedByHash(requestedHash)) {
-            sendJson(output, "{\"ok\":false,\"alreadyAdded\":true,\"error\":\"Torrent already added\"}", status = "409 Conflict")
+            val mergeMessage = mergeTrackersMessage(requestedHash, magnet)
+            sendJson(
+                output,
+                "{\"ok\":false,\"alreadyAdded\":true,\"error\":\"Torrent already added\",\"message\":${jsonString(mergeMessage)}}",
+                status = "409 Conflict"
+            )
             return
         }
 
@@ -2585,6 +2611,17 @@ object WebUiServer {
         text.append("ETA: ").append(eta()).append("\n")
         text.append("Added: ").append(addedDate).append("\n")
         text.append("Completed: ").append(completedDate).append("\n")
+
+        val timeLines = try {
+            TorrentNative.getTorrentTimeLines(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (timeLines.isNotBlank()) {
+            text.append(timeLines).append("\n")
+        }
+
         text.append(trackerHost).append("\n")
         text.append("Total size: ").append(totalSize).append("\n")
         text.append("Availability: ").append(availability).append("\n")
@@ -3251,6 +3288,31 @@ object WebUiServer {
         }
 
         return null
+    }
+
+    // Merges the new source's trackers (a .torrent path or a magnet) into
+    // the torrent that is already added, and says what happened in words.
+    private fun mergeTrackersMessage(hash: String, source: String): String {
+        val result = try {
+            TorrentNative.mergeTorrentTrackers(hash, source)
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (result.startsWith("OK|")) {
+            val added = result.split("|").getOrNull(1)?.toIntOrNull() ?: 0
+            return if (added > 0) {
+                "Torrent already added - merged $added new tracker" + (if (added == 1) "" else "s")
+            } else {
+                "Torrent already added - no new trackers to merge"
+            }
+        }
+
+        if (result == "PRIVATE") {
+            return "Torrent already added (private torrent - trackers not merged)"
+        }
+
+        return "Torrent already added"
     }
 
     // Mirrors MainActivity.isTorrentAlreadyAddedByHash().
@@ -3949,7 +4011,8 @@ function setBtnLabel(btn, iconName, label) {
     backupBtn: ['save', 'Backup & Restore'],
     onlineSearchBtn: ['search', 'Online Search'],
     rssBtn: ['rss', 'RSS Feeds'],
-    saveFolderBtn: ['folder', 'Save Folder']
+    saveFolderBtn: ['folder', 'Save Folder'],
+    uploadBtn: ['addfile', 'Upload .torrent']
   };
   const filterIcons = { All: 'list', Downloading: 'download', Seeding: 'upload', Paused: 'pause', Completed: 'check' };
   document.querySelectorAll('[data-filter]').forEach(function(btn) {
@@ -3963,6 +4026,14 @@ function setBtnLabel(btn, iconName, label) {
   for (const id in map) {
     const el = document.getElementById(id);
     if (el) setBtnLabel(el, map[id][0], map[id][1]);
+  }
+
+  // Add button: magnet icon before the label and a hash icon after it,
+  // like the app's "Add Magnet / Hash" button.
+  const addBtnEl = document.getElementById('addBtn');
+  if (addBtnEl) {
+    addBtnEl.innerHTML = iconSvg('magnet') + 'Add' +
+      iconSvg('hash').replace('class="ico"', 'class="ico" style="margin:0 0 0 7px;"');
   }
 })();
 
@@ -6165,7 +6236,7 @@ async function addMagnetByValue(magnet) {
     });
     const data = await res.json();
     if (!data.ok) {
-      alert(data.alreadyAdded ? 'Torrent already added' : 'Could not add: ' + (data.error || 'unknown error'));
+      alert(data.alreadyAdded ? (data.message || 'Torrent already added') : 'Could not add: ' + (data.error || 'unknown error'));
       return false;
     }
 
@@ -6237,7 +6308,12 @@ document.getElementById('uploadBtn').addEventListener('click', async function() 
     const data = await res.json();
 
     if (!data.ok) {
-      alert('Could not read torrent: ' + (data.error || 'unknown error'));
+      if (data.alreadyAdded) {
+        alert(data.message || 'Torrent already added');
+        input.value = '';
+      } else {
+        alert('Could not read torrent: ' + (data.error || 'unknown error'));
+      }
       return;
     }
 
@@ -6715,7 +6791,9 @@ async function loadTextTab(index, tab) {
     if (tab === 'trackers' && data.ok) {
       el.innerHTML = colorTrackerText(data.text || '');
     } else if ((tab === 'swarmhealth' || tab === 'general') && data.ok) {
-      el.innerHTML = colorSwarmText(data.text || '');
+      el.innerHTML = colorTimeLinesHtml(colorSwarmText(data.text || ''));
+    } else if (tab === 'statistics' && data.ok) {
+      el.innerHTML = colorTimeLinesHtml(escapeHtml(data.text || ''));
     } else {
       el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
     }
@@ -6736,8 +6814,8 @@ function colorTrackerText(text) {
 
   if (text.indexOf('Tracker Status\n\n') !== 0) return esc(text);
 
-  const palette = { 0: '#4CD964', 1: '#4DA3FF', 2: '#FF5252', 3: '#8A93A3', 4: '#FFA726' };
-  const names = { 0: 'working', 1: 'updating', 4: 'warning', 2: 'error', 3: 'not contacted' };
+  const palette = { 0: '#4CD964', 1: '#4DA3FF', 2: '#FF5252', 3: '#8A93A3', 4: '#FFA726', 5: '#FFA726' };
+  const names = { 0: 'working', 1: 'updating', 4: 'warning', 5: 'failing', 2: 'error', 3: 'not contacted' };
 
   const blocks = text.split('\n\n').slice(1).filter(function(b) { return b.trim() !== ''; })
     .map(function(b) { return b.split('\n'); });
@@ -6753,6 +6831,7 @@ function colorTrackerText(text) {
     });
     if (status.indexOf('Error') === 0) return 2;
     if (status.indexOf('Updating') === 0) return 1;
+    if (status.indexOf('Failing') === 0) return 5;
     if (status.indexOf('Working') === 0) return (hasLastError && !verified) ? 4 : 0;
     return 3;
   });
@@ -6761,7 +6840,7 @@ function colorTrackerText(text) {
     return '<span style="color:' + palette[kind] + ';">&#9679;</span>';
   }
 
-  const summary = [0, 1, 4, 2, 3].map(function(kind) {
+  const summary = [0, 1, 4, 5, 2, 3].map(function(kind) {
     const n = kinds.filter(function(k) { return k === kind; }).length;
     if (n === 0) return '';
     return dot(kind) + ' <span style="color:' + palette[kind] + ';font-weight:bold;">' + n + ' ' + names[kind] + '</span>';
@@ -6777,7 +6856,7 @@ function colorTrackerText(text) {
       if (line.indexOf('Status: ') === 0) {
         return 'Status: <span style="color:' + color + ';font-weight:bold;">' + esc(line.substring(8)) + '</span>';
       }
-      if ((kind === 2 || kind === 4) &&
+      if ((kind === 2 || kind === 4 || kind === 5) &&
           (line.indexOf('Message: ') === 0 || line.indexOf('Last error: ') === 0)) {
         return '<span style="color:' + color + ';">' + esc(line) + '</span>';
       }
@@ -6786,6 +6865,17 @@ function colorTrackerText(text) {
   }).join('\n\n');
 
   return 'Tracker Status\n' + summary + '\n\n' + body;
+}
+
+// Purple for the time lines on the General and Statistics tabs
+// (Elapsed / Time active / Seeding time / Time to complete).
+function colorTimeLinesHtml(html) {
+  return html.split('\n').map(function(line) {
+    if (/^(Elapsed|Time active|Seeding time|Time to complete): /.test(line)) {
+      return '<span style="color:#B794F6;">' + line + '</span>';
+    }
+    return line;
+  }).join('\n');
 }
 
 // Swarm Health text with the Health word and the bar coloured by level.

@@ -68,6 +68,10 @@ object TorrentNative {
     external fun getTorrentSwarmHealth(index: Int): String
     external fun hasTorrentHash(hash: String): Boolean
     external fun getTorrentFileHash(path: String): String
+
+    // Merges trackers from a .torrent path or magnet into an already-added
+    // torrent: "OK|added|skipped", "PRIVATE" or "ERROR|message".
+    external fun mergeTorrentTrackers(hash: String, source: String): String
     // Writes the torrent's metadata out as a real .torrent file into
     // destFolder (created if needed) and returns the full saved path, or
     // "" if the hash wasn't found or the torrent has no metadata yet (a
@@ -82,6 +86,9 @@ object TorrentNative {
     // 1 = downloading, 0 = missing, x = skipped) or a plain message.
     external fun getTorrentPieceStates(index: Int): String
     external fun getTorrentStatistics(index: Int): String
+
+    // "Time active: ..." plus "Seeding time: ..." once seeding (General tab).
+    external fun getTorrentTimeLines(index: Int): String
     external fun getGlobalStatistics(): String
     external fun getPortForwardingStatus(): String
     external fun getDhtStatus(): String
