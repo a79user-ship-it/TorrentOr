@@ -95,6 +95,7 @@ class MainActivity : AppCompatActivity() {
 
     private val TORRENT_SORT_MODES = arrayOf(
         "None",
+        TorrentQueue.SORT_MODE,
         "Name (A-Z)",
         "Name (Z-A)",
         "Size (Largest First)",
@@ -112,8 +113,7 @@ class MainActivity : AppCompatActivity() {
     // and coming back doesn't lose them. Cleared only when you search again.
     private var onlineSearchQueryText = ""
     private var onlineSearchResults: List<TorrentSearchResult> = emptyList()
-    private var onlineSearchSortMode = "Seeders"
-    private var onlineSearchProviderFilter = "All"
+    private var onlineSearchHandle: OnlineSearchManager.SearchHandle? = null
     private var onlineSearchStatus = "Enter a search and tap Search."
 
     private var currentDetailsTab = ""
@@ -246,6 +246,48 @@ class MainActivity : AppCompatActivity() {
         showMainScreen()
     }
 
+    // Backup & Restore (v2.08)
+    private var backupStatusView: TextView? = null
+
+    // Where the main list was scrolled to, so coming back from a torrent's
+    // details (or after Sort / Filter rebuilds the screen) lands in the same
+    // place instead of at the top.
+    private var mainScrollView: ScrollView? = null
+    private var savedMainScrollY = 0
+
+    // After choosing a Filter or Sort the list is rebuilt; instead of
+    // restoring the old scroll position (which can leave the results off
+    // the bottom of the screen) the page scrolls so the "Filter: ..." row
+    // is at the top, with the matching torrents right beneath it.
+    private var scrollToFilterNext = false
+    private var filterTitleView: TextView? = null
+
+    private fun rememberMainScroll() {
+        if (isOnMainScreen) {
+            mainScrollView?.let { savedMainScrollY = it.scrollY }
+        }
+    }
+
+    // Sticky action bar shown at the top of the main screen while
+    // torrents are being selected (long-press a torrent to start).
+    private var selectionBar: LinearLayout? = null
+    private var selectionCountView: TextView? = null
+
+    private fun updateSelectionBar() {
+        selectionBar?.visibility = if (selectMode) android.view.View.VISIBLE else android.view.View.GONE
+        selectionCountView?.text = "${selectedTorrents.size}"
+    }
+
+    private val createBackupLauncher =
+        registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+            if (uri != null) runBackupTo(uri)
+        }
+
+    private val openBackupLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri != null) previewAndRestore(uri)
+        }
+
     private val pickTorrent =
         registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri == null) {
@@ -287,7 +329,12 @@ class MainActivity : AppCompatActivity() {
         // main screen itself, Back keeps its normal behavior (exit).
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (isOnMainScreen) {
+                if (isOnMainScreen && selectMode) {
+                    // Back closes selection first, like the X in the bar.
+                    selectMode = false
+                    selectedTorrents.clear()
+                    showMainScreen()
+                } else if (isOnMainScreen) {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
                     isEnabled = true
@@ -331,8 +378,88 @@ class MainActivity : AppCompatActivity() {
     // sites individually. Defaults to "not main"; showMainScreen() flips
     // it back to true right after calling this.
     override fun setContentView(view: android.view.View?) {
-        super.setContentView(view)
+        // Every screen except the main list and Torrent details (which
+        // carry their own bar, tagged "has_bar") gets a back arrow pinned
+        // at the top-left. It presses that screen's own "Back" button (so
+        // each screen still goes where its Back always went) and that
+        // button is hidden, so nobody has to scroll to the bottom to leave.
+        rememberMainScroll()
+
+        if (view == null || view.tag == "has_bar") {
+            super.setContentView(view)
+            isOnMainScreen = false
+            return
+        }
+
+        val backButton = findBackButton(view)
+        // A real Back button is hidden (the arrow replaces it); the Cancel
+        // buttons of the file-selection screens stay, the arrow just does
+        // the same thing.
+        if (backButton != null && backButton.tag != "back_button") {
+            backButton.visibility = android.view.View.GONE
+        }
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(32, 40, 36))
+            setPadding(8, 8, 8, 8)
+            elevation = 12f
+
+            addView(TextView(this@MainActivity).apply {
+                text = "\u2190"
+                textSize = 26f
+                setTextColor(Color.WHITE)
+                setPadding(28, 12, 28, 12)
+                setOnClickListener {
+                    if (backButton != null) {
+                        backButton.performClick()
+                    } else {
+                        showMainScreen()
+                    }
+                }
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                text = "Back"
+                textSize = 18f
+                setTextColor(Color.WHITE)
+            })
+        }
+
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bgColor())
+            addView(topBar)
+            addView(
+                view,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
+        }
+
+        super.setContentView(wrapper)
         isOnMainScreen = false
+    }
+
+    // The screen's own bottom "Back" button, if it has one.
+    private fun findBackButton(view: android.view.View): Button? {
+        if (view is Button) {
+            val t = view.text?.toString() ?: ""
+            if (t == "Back" || t.startsWith("Back to") || view.tag == "back_button") return view
+        }
+
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                val found = findBackButton(view.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+
+        return null
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -459,6 +586,17 @@ class MainActivity : AppCompatActivity() {
     // with no ACTION_VIEW data.
     private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
+
+        // Tap on a torrent notification: open that torrent's details.
+        val openHash = intent.getStringExtra("OPEN_TORRENT_HASH")
+
+        if (!openHash.isNullOrBlank()) {
+            intent.removeExtra("OPEN_TORRENT_HASH")
+            setIntent(Intent(this, MainActivity::class.java))
+            openTorrentDetailsByHash(openHash)
+            return
+        }
+
         if (intent.action != Intent.ACTION_VIEW) return
 
         val data = intent.data ?: return
@@ -534,6 +672,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showMainScreen() {
+        rememberMainScroll()
+
         stopNetworkFeaturesAutoRefresh()
         stopStorageAutoRefresh()
         stopGlobalStatsAutoRefresh()
@@ -962,6 +1102,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val notificationSettingsButton = Button(this).apply {
+            text = "Notifications"
+            setOnClickListener {
+                showNotificationSettingsScreen()
+            }
+        }
+
+        val backupRestoreButton = Button(this).apply {
+            text = "Backup & Restore"
+            setOnClickListener {
+                showBackupRestoreScreen()
+            }
+        }
+
         val onlineSearchButton = Button(this).apply {
             text = "Online Search"
             setOnClickListener {
@@ -982,6 +1136,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             setPadding(0, 16, 0, 4)
         }
+        filterTitleView = filterTitle
 
         val filterRowOne = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1011,6 +1166,7 @@ class MainActivity : AppCompatActivity() {
                     torrentListViewPrefs().edit().putString("filter", name).apply()
                     selectedTorrents.clear()
                     selectMode = false
+                    scrollToFilterNext = true
                     showMainScreen()
                 }
             }
@@ -1031,6 +1187,7 @@ class MainActivity : AppCompatActivity() {
                     .setItems(TORRENT_SORT_MODES) { _, which ->
                         sortMode = TORRENT_SORT_MODES[which]
                         torrentListViewPrefs().edit().putString("sort", sortMode).apply()
+                        scrollToFilterNext = true
                         showMainScreen()
                     }
                     .show()
@@ -1066,6 +1223,8 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(saveFolderButton, "folder")
         TabIcons.apply(rssButton, "rss")
         TabIcons.apply(executionLogButton, "log")
+        TabIcons.apply(notificationSettingsButton, "comment")
+        TabIcons.apply(backupRestoreButton, "save")
         TabIcons.apply(onlineSearchButton, "search")
         TabIcons.apply(webUiButton, "webui")
 
@@ -1098,6 +1257,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(saveFolderButton)
         root.addView(rssButton)
         root.addView(executionLogButton)
+        root.addView(notificationSettingsButton)
+        root.addView(backupRestoreButton)
         root.addView(onlineSearchButton)
         root.addView(webUiButton)
         root.addView(filterTitle)
@@ -1110,9 +1271,110 @@ class MainActivity : AppCompatActivity() {
             addView(root)
         }
 
-        setContentView(outerScroll)
+        // Sticky selection bar (stays on screen while scrolling the list):
+        // close, count, select all, remove, resume and a menu with the rest
+        // - same actions as the Select Torrents buttons further down, plus
+        // the queue position moves.
+        fun barItem(label: String, onClick: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 30f
+            setTextColor(Color.WHITE)
+            setPadding(34, 30, 34, 30)
+            setOnClickListener { onClick() }
+        }
+
+        val countView = TextView(this).apply {
+            textSize = 30f
+            setTextColor(Color.WHITE)
+            setPadding(16, 0, 0, 0)
+        }
+        selectionCountView = countView
+
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(32, 40, 36))
+            setPadding(12, 14, 12, 14)
+            elevation = 12f
+
+            addView(barItem("\u2715") {
+                selectMode = false
+                selectedTorrents.clear()
+                showMainScreen()
+            })
+
+            addView(
+                countView,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+
+            addView(barItem("\u2610") { selectNoneButton.performClick() })
+            addView(barItem("\u2611") { selectAllButton.performClick() })
+            addView(barItem("\uD83D\uDDD1") { removeSelected.performClick() })
+            addView(barItem("\u25B6") { resumeSelected.performClick() })
+
+            val menuAnchor = barItem("\u22EE") {}
+            menuAnchor.setOnClickListener {
+                val menu = PopupMenu(this@MainActivity, menuAnchor)
+                menu.menu.add(0, 1, 0, "Pause")
+                menu.menu.add(0, 2, 1, "Force Recheck")
+                menu.menu.add(0, 3, 2, "Reannounce")
+                menu.menu.add(1, 0, 3, "Move...").isEnabled = false
+                menu.menu.add(0, 4, 4, "to Top")
+                menu.menu.add(0, 5, 5, "Up")
+                menu.menu.add(0, 6, 6, "Down")
+                menu.menu.add(0, 7, 7, "to Bottom")
+
+                menu.setOnMenuItemClickListener { item ->
+                    when (item.itemId) {
+                        1 -> pauseSelected.performClick()
+                        2 -> forceRecheckSelected.performClick()
+                        3 -> forceReannounceSelected.performClick()
+                        4 -> moveSelectedInQueue("top")
+                        5 -> moveSelectedInQueue("up")
+                        6 -> moveSelectedInQueue("down")
+                        7 -> moveSelectedInQueue("bottom")
+                    }
+                    true
+                }
+
+                menu.show()
+            }
+            addView(menuAnchor)
+        }
+        selectionBar = bar
+
+        val container = LinearLayout(this).apply {
+            tag = "has_bar"
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bgColor())
+            addView(bar)
+            addView(
+                outerScroll,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
+        }
+
+        setContentView(container)
         isOnMainScreen = true
+        mainScrollView = outerScroll
+        updateSelectionBar()
         updateTorrentList()
+
+        val toFilter = scrollToFilterNext
+        scrollToFilterNext = false
+        val restoreY = savedMainScrollY
+        val filterRow = filterTitleView
+
+        if (toFilter && filterRow != null) {
+            outerScroll.post { outerScroll.scrollTo(0, filterRow.top) }
+        } else if (restoreY > 0) {
+            outerScroll.post { outerScroll.scrollTo(0, restoreY) }
+        }
     }
 
     // ------------------------------------------------------------------ RSS
@@ -1134,9 +1396,9 @@ class MainActivity : AppCompatActivity() {
 
         // read the remembered state instead of starting blank each time
         var allResults: List<TorrentSearchResult> = onlineSearchResults
-        var sortMode = onlineSearchSortMode
-        var providerFilter = onlineSearchProviderFilter
-        var searching = false
+        var sortMode = SearchFilters.loadSortMode(this)
+        var filters = SearchFilters.load(this)
+        var searching = onlineSearchHandle != null
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1162,7 +1424,15 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 0, 0, 12)
         }
 
-        val queryBox = EditText(this).apply {
+        val queryBox = AutoCompleteTextView(this).apply {
+            threshold = 1
+            setAdapter(
+                ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_dropdown_item_1line,
+                    SearchHistory.suggestions(this@MainActivity)
+                )
+            )
             hint = "Search online, e.g. ubuntu 24.04"
             setHintTextColor(Color.LTGRAY)
             setTextColor(Color.WHITE)
@@ -1197,19 +1467,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun applySortAndFilter(): List<TorrentSearchResult> {
-            val filtered = if (providerFilter == "All") {
-                allResults
-            } else {
-                allResults.filter { it.sourceName == providerFilter }
-            }
+            val filtered = allResults.filter { filters.matches(it) }
 
-            return when (sortMode) {
-                "Name" -> filtered.sortedBy { it.name.lowercase() }
-                "Size" -> filtered.sortedByDescending { it.sizeBytes }
-                "Leechers" -> filtered.sortedByDescending { it.leechers }
-                "Age" -> filtered.sortedByDescending { it.publicationDate }
-                else -> filtered.sortedByDescending { it.seeders }
-            }
+            return SearchFilters.sort(
+                filtered,
+                sortMode,
+                queryBox.text.toString(),
+                OnlineSearchManager.favoriteNames(this)
+            )
         }
 
         fun resultLabel(result: TorrentSearchResult): String {
@@ -1223,13 +1488,22 @@ class MainActivity : AppCompatActivity() {
 
             if (result.seeders >= 0) parts.add("Seeds: ${result.seeders}")
             if (result.leechers >= 0) parts.add("Leechers: ${result.leechers}")
-            parts.add("Source: ${result.sourceName}")
+
+            val source = if (result.alsoFoundOn.isEmpty()) {
+                "Source: ${result.sourceName}"
+            } else {
+                "Source: ${result.sourceName} (also: ${result.alsoFoundOn.joinToString(", ")})"
+            }
+            parts.add(source)
 
             if (result.publicationDate.isNotBlank()) {
                 parts.add(result.publicationDate)
             }
 
-            return result.name + "\n" + parts.joinToString("  •  ")
+            val hash = result.normalizedHash()
+            val hashLine = if (hash.isNotEmpty()) "\nHash: $hash" else ""
+
+            return result.name + "\n" + parts.joinToString("  •  ") + hashLine
         }
 
         fun rebuildResultsList() {
@@ -1239,7 +1513,11 @@ class MainActivity : AppCompatActivity() {
 
             if (shown.isEmpty()) {
                 val emptyText = TextView(this).apply {
-                    text = if (searching) "Searching..." else "No results."
+                    text = when {
+                        searching -> "Searching..."
+                        allResults.isNotEmpty() -> "No results match the current filters."
+                        else -> "No results."
+                    }
                     textSize = 14f
                     setTextColor(Color.LTGRAY)
                     setPadding(0, 12, 0, 12)
@@ -1381,6 +1659,9 @@ class MainActivity : AppCompatActivity() {
 
         redraw = { rebuildResultsList() }
 
+        // (assigned below; lets runSearch/cancel keep the Cancel button in sync)
+        var cancelButtonRef: Button? = null
+
         fun runSearch() {
             val query = queryBox.text.toString().trim()
 
@@ -1389,6 +1670,20 @@ class MainActivity : AppCompatActivity() {
                 onlineSearchStatus = statusText.text.toString()
                 return
             }
+
+            // A new search replaces any search still running.
+            onlineSearchHandle?.cancel()
+            onlineSearchHandle = null
+
+            SearchHistory.add(this, query)
+            queryBox.setAdapter(
+                ArrayAdapter(
+                    this,
+                    android.R.layout.simple_dropdown_item_1line,
+                    SearchHistory.suggestions(this)
+                )
+            )
+            queryBox.dismissDropDown()
 
             searching = true
             allResults = emptyList()
@@ -1410,8 +1705,9 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Searching ${providerNames.size} provider(s)..."
             onlineSearchStatus = statusText.text.toString()
             onlineSearchResults = emptyList()
+            cancelButtonRef?.isEnabled = true
 
-            OnlineSearchManager.search(
+            val newHandle = OnlineSearchManager.search(
                 this,
                 query,
                 onProviderDone = { outcome ->
@@ -1419,7 +1715,8 @@ class MainActivity : AppCompatActivity() {
                         doneNames.add(outcome.providerName)
 
                         statusText.text = if (outcome.error == null) {
-                            "${outcome.providerName}: ${outcome.resultCount} result(s)   " +
+                            "${outcome.providerName}: ${outcome.resultCount} result(s), " +
+                                    "${outcome.elapsedMs} ms   " +
                                     "(${doneNames.size}/${providerNames.size} providers done)"
                         } else {
                             "${outcome.providerName}: ${outcome.error}   " +
@@ -1431,6 +1728,8 @@ class MainActivity : AppCompatActivity() {
                 onAllDone = { combined ->
                     runOnUiThread {
                         searching = false
+                        onlineSearchHandle = null
+                        cancelButtonRef?.isEnabled = false
                         allResults = combined
 
                         statusText.text = if (combined.isEmpty()) {
@@ -1443,8 +1742,28 @@ class MainActivity : AppCompatActivity() {
 
                         redraw()
                     }
+                },
+                onUpdate = { partial ->
+                    runOnUiThread {
+                        allResults = partial
+                        onlineSearchResults = partial
+                        redraw()
+                    }
                 }
             )
+
+            onlineSearchHandle = newHandle
+        }
+
+        fun cancelSearch() {
+            val handle = onlineSearchHandle ?: return
+            handle.cancel()
+            onlineSearchHandle = null
+            searching = false
+            cancelButtonRef?.isEnabled = false
+            statusText.text = "Search cancelled. ${allResults.size} result(s) found so far."
+            onlineSearchStatus = statusText.text.toString()
+            redraw()
         }
 
         val searchButton = Button(this).apply {
@@ -1460,13 +1779,13 @@ class MainActivity : AppCompatActivity() {
         val sortButton = Button(this).apply {
             text = "Sort: $sortMode"
             setOnClickListener {
-                val options = arrayOf("Seeders", "Leechers", "Size", "Name", "Age")
+                val options = SearchFilters.SORT_MODES.toTypedArray()
 
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("Sort by")
                     .setItems(options) { _, which ->
                         sortMode = options[which]
-                        onlineSearchSortMode = sortMode
+                        SearchFilters.saveSortMode(this@MainActivity, sortMode)
                         text = "Sort: $sortMode"
                         redraw()
                     }
@@ -1474,22 +1793,39 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val filterButton = Button(this).apply {
-            text = "Provider: $providerFilter"
-            setOnClickListener {
-                val options = (listOf("All") + visibleProviderNames()).toTypedArray()
+        fun filterButtonText(): String {
+            return if (filters.isActive()) "Filters (on)" else "Filters"
+        }
 
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Show results from")
-                    .setItems(options) { _, which ->
-                        providerFilter = options[which]
-                        onlineSearchProviderFilter = providerFilter
-                        text = "Provider: $providerFilter"
-                        redraw()
-                    }
-                    .show()
+        val filterButton = Button(this).apply {
+            text = filterButtonText()
+            setOnClickListener {
+                showSearchFiltersDialog(filters, allResults) { newFilters ->
+                    filters = newFilters
+                    SearchFilters.save(this@MainActivity, filters)
+                    text = filterButtonText()
+                    redraw()
+                }
             }
         }
+
+        val historyButton = Button(this).apply {
+            text = "History"
+            setOnClickListener {
+                showSearchHistoryDialog { picked ->
+                    queryBox.setText(picked)
+                    queryBox.setSelection(queryBox.text.length)
+                    runSearch()
+                }
+            }
+        }
+
+        val cancelButton = Button(this).apply {
+            text = "Cancel"
+            isEnabled = searching
+            setOnClickListener { cancelSearch() }
+        }
+        cancelButtonRef = cancelButton
 
         TabIcons.apply(searchButton, "search", 18, 6)
         TabIcons.apply(sortButton, "sort", 18, 6)
@@ -1501,6 +1837,7 @@ class MainActivity : AppCompatActivity() {
                 showOnlineSearchProviderSettings()
             }
         }
+        TabIcons.apply(settingsButton, "settings", 18, 6)
 
         val backButton = Button(this).apply {
             text = "Back"
@@ -1517,8 +1854,10 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     addView(searchButton)
+                    addView(cancelButton)
                     addView(sortButton)
                     addView(filterButton)
+                    addView(historyButton)
                     addView(settingsButton)
                 }
             )
@@ -1528,6 +1867,205 @@ class MainActivity : AppCompatActivity() {
         root.addView(backButton)
 
         setContentView(outerScroll)
+    }
+
+    // Advanced filters for Online Search. Empty/blank number = no limit.
+    // Results with an unknown value for a field are never hidden by that
+    // field's limit.
+    private fun showSearchFiltersDialog(
+        current: SearchFilters,
+        results: List<TorrentSearchResult>,
+        onApply: (SearchFilters) -> Unit
+    ) {
+        val builder = AlertDialog.Builder(this)
+        val ctx = builder.context
+
+        var providers = current.providers
+        var category = current.category
+        var fileType = current.fileType
+
+        val col = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 16, 32, 16)
+        }
+
+        fun numberField(label: String, value: Long): EditText {
+            col.addView(TextView(ctx).apply {
+                text = label
+                textSize = 13f
+                setPadding(0, 12, 0, 0)
+            })
+
+            return EditText(ctx).apply {
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                hint = "No limit"
+                setText(if (value > 0L) value.toString() else "")
+                col.addView(this)
+            }
+        }
+
+        val minSeedersInput = numberField("Minimum seeders", current.minSeeders.toLong())
+        val maxLeechersInput = numberField("Maximum leechers", current.maxLeechers.toLong())
+        val minSizeInput = numberField("Minimum size (MB)", current.minSizeMb)
+        val maxSizeInput = numberField("Maximum size (MB)", current.maxSizeMb)
+        val minHealthInput = numberField(
+            "Minimum availability (seeders + leechers)",
+            current.minHealth.toLong()
+        )
+
+        fun providerText() = if (providers.isEmpty()) "Providers: all" else "Providers: ${providers.size} selected"
+        fun categoryText() = "Category: " + category.ifBlank { "any" }
+        fun typeText() = "File type: " + fileType.ifBlank { "any" }
+
+        val providerButton = Button(ctx).apply {
+            text = providerText()
+            setOnClickListener {
+                val names = OnlineSearchManager.allProviders(this@MainActivity).map { it.name }.distinct()
+                val labels = names.map { n ->
+                    val star = if (OnlineSearchManager.isFavorite(this@MainActivity, n)) "★ " else ""
+                    val bad = if (OnlineSearchManager.loadStats(this@MainActivity, n).unavailable) " (unavailable)" else ""
+                    star + n + bad
+                }.toTypedArray()
+                val checked = BooleanArray(names.size) { names[it] in providers }
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Show results from (none checked = all)")
+                    .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                        checked[which] = isChecked
+                    }
+                    .setPositiveButton("OK") { _, _ ->
+                        providers = names.filterIndexed { i, _ -> checked[i] }.toSet()
+                        text = providerText()
+                    }
+                    .setNeutralButton("Favorites only") { _, _ ->
+                        providers = OnlineSearchManager.favoriteNames(this@MainActivity)
+                        text = providerText()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+
+        val categoryButton = Button(ctx).apply {
+            text = categoryText()
+            setOnClickListener {
+                val cats = results
+                    .map { it.category.trim().ifBlank { SearchFilters.UNCATEGORIZED } }
+                    .distinct().sorted()
+                val options = (listOf("Any") + cats).toTypedArray()
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Category")
+                    .setItems(options) { _, which ->
+                        category = if (which == 0) "" else options[which]
+                        text = categoryText()
+                    }
+                    .show()
+            }
+        }
+
+        val typeButton = Button(ctx).apply {
+            text = typeText()
+            setOnClickListener {
+                val options = (listOf("Any") + SearchFilters.FILE_TYPES).toTypedArray()
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("File type (guessed from name)")
+                    .setItems(options) { _, which ->
+                        fileType = if (which == 0) "" else options[which]
+                        text = typeText()
+                    }
+                    .show()
+            }
+        }
+
+        col.addView(providerButton)
+        col.addView(categoryButton)
+        col.addView(typeButton)
+
+        fun num(e: EditText): Long = e.text.toString().trim().toLongOrNull()?.coerceAtLeast(0L) ?: 0L
+
+        builder.setTitle("Search filters")
+            .setView(ScrollView(ctx).apply { addView(col) })
+            .setPositiveButton("Apply") { _, _ ->
+                onApply(
+                    SearchFilters(
+                        minSeeders = num(minSeedersInput).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        maxLeechers = num(maxLeechersInput).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        minSizeMb = num(minSizeInput),
+                        maxSizeMb = num(maxSizeInput),
+                        minHealth = num(minHealthInput).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                        providers = providers,
+                        category = category,
+                        fileType = fileType
+                    )
+                )
+            }
+            .setNeutralButton("Reset") { _, _ -> onApply(SearchFilters()) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Past Online Search queries: tap one to search it again, X removes
+    // one, Clear all removes everything.
+    private fun showSearchHistoryDialog(onPick: (String) -> Unit) {
+        val history = SearchHistory.load(this)
+
+        if (history.isEmpty()) {
+            Toast.makeText(this, "No search history yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val builder = AlertDialog.Builder(this)
+        val ctx = builder.context
+        var dialog: AlertDialog? = null
+
+        val col = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 8, 24, 8)
+        }
+
+        for (q in history) {
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+
+            val label = TextView(ctx).apply {
+                text = q
+                textSize = 16f
+                setPadding(8, 20, 8, 20)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener {
+                    dialog?.dismiss()
+                    onPick(q)
+                }
+            }
+
+            val removeButton = Button(ctx).apply {
+                text = "✕"
+                setOnClickListener {
+                    SearchHistory.remove(this@MainActivity, q)
+                    col.removeView(row)
+
+                    if (col.childCount == 0) dialog?.dismiss()
+                }
+            }
+
+            row.addView(label)
+            row.addView(removeButton)
+            col.addView(row)
+        }
+
+        builder.setTitle("Search history")
+            .setView(ScrollView(ctx).apply { addView(col) })
+            .setNeutralButton("Clear all") { _, _ ->
+                SearchHistory.clear(this)
+                Toast.makeText(this, "Search history cleared", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Close", null)
+
+        dialog = builder.show()
     }
 
     private fun showOnlineSearchProviderSettings() {
@@ -1573,24 +2111,137 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        for (provider in OnlineSearchManager.BUILTIN_PROVIDERS) {
+        // One card per provider: enable checkbox, last-known health
+        // (response time, last success, last error), a favorite toggle and
+        // a Test button. Custom providers also get Remove.
+        // Re-run every second while this screen is showing, so "last
+        // success: 5 min ago" and results of searches/tests keep up in real time.
+        val statusRefreshers = mutableListOf<() -> Unit>()
+
+        fun statusLine(name: String): String {
+            val st = OnlineSearchManager.loadStats(this, name)
+
+            if (st.lastAttemptMs == 0L) return "Not tested yet"
+
+            fun ago(ms: Long): String {
+                if (ms <= 0L) return "never"
+                val sec = (System.currentTimeMillis() - ms) / 1000L
+                return when {
+                    sec < 60 -> "just now"
+                    sec < 3600 -> "${sec / 60} min ago"
+                    sec < 86400 -> "${sec / 3600} h ago"
+                    else -> "${sec / 86400} d ago"
+                }
+            }
+
+            val head = if (st.unavailable) "UNAVAILABLE: ${st.lastError}" else "Working, ${st.lastResponseMs} ms"
+            return head + "\nLast success: " + ago(st.lastSuccessMs) +
+                    (if (st.unavailable) "   (response ${st.lastResponseMs} ms)" else "")
+        }
+
+        fun addProviderCard(name: String, isCustom: Boolean) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(16, 12, 16, 12)
+                background = roundedCardBackground()
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = 10 }
+            }
+
             val box = CheckBox(this).apply {
-                text = provider.name
+                text = name
                 setTextColor(Color.WHITE)
-                isChecked = OnlineSearchManager.isProviderEnabled(this@MainActivity, provider.name)
+                isChecked = OnlineSearchManager.isProviderEnabled(this@MainActivity, name)
 
                 setOnCheckedChangeListener { _, checked ->
-                    OnlineSearchManager.setProviderEnabled(
-                        this@MainActivity,
-                        provider.name,
-                        checked
-                    )
+                    OnlineSearchManager.setProviderEnabled(this@MainActivity, name, checked)
+                }
+            }
+
+            val initial = OnlineSearchManager.loadStats(this, name)
+
+            val status = TextView(this).apply {
+                text = statusLine(name)
+                textSize = 12f
+                setTextColor(if (initial.unavailable) Color.rgb(255, 120, 120) else Color.LTGRAY)
+                setPadding(8, 0, 0, 6)
+            }
+
+            statusRefreshers.add {
+                val st = OnlineSearchManager.loadStats(this@MainActivity, name)
+                status.text = statusLine(name)
+                status.setTextColor(if (st.unavailable) Color.rgb(255, 120, 120) else Color.LTGRAY)
+            }
+
+            val favButton = Button(this).apply {
+                text = if (OnlineSearchManager.isFavorite(this@MainActivity, name)) "★ Favorite" else "☆ Favorite"
+                setOnClickListener {
+                    val now = !OnlineSearchManager.isFavorite(this@MainActivity, name)
+                    OnlineSearchManager.setFavorite(this@MainActivity, name, now)
+                    text = if (now) "★ Favorite" else "☆ Favorite"
+                }
+            }
+
+            val testButton = Button(this).apply {
+                text = "Test"
+                setOnClickListener {
+                    isEnabled = false
+                    text = "Testing..."
+                    status.text = "Testing..."
+
+                    OnlineSearchManager.testProvider(this@MainActivity, name) { _ ->
+                        runOnUiThread {
+                            isEnabled = true
+                            text = "Test"
+                            val st = OnlineSearchManager.loadStats(this@MainActivity, name)
+                            status.text = statusLine(name)
+                            status.setTextColor(
+                                if (st.unavailable) Color.rgb(255, 120, 120) else Color.LTGRAY
+                            )
+                        }
+                    }
+                }
+            }
+
+            val buttons = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(favButton)
+                addView(testButton)
+
+                if (isCustom) {
+                    addView(Button(this@MainActivity).apply {
+                        text = "Remove"
+                        setOnClickListener {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("Remove search provider?")
+                                .setMessage("Remove \"$name\"? This cannot be undone.")
+                                .setPositiveButton("Remove") { _, _ ->
+                                    OnlineSearchManager.removeCustomProvider(this@MainActivity, name)
+                                    showOnlineSearchProviderSettings()
+                                }
+                                .setNegativeButton("Cancel", null)
+                                .show()
+                        }
+                    })
                 }
             }
 
             allProviderCheckboxes.add(box)
-            root.addView(box)
+            card.addView(box)
+            card.addView(status)
+            card.addView(horizontalScrollFor(buttons))
+            root.addView(card)
         }
+
+        // Favorites first, then the rest in registry order.
+        val builtinNames = OnlineSearchManager.BUILTIN_PROVIDERS.map { it.name }
+        val orderedBuiltin = builtinNames.sortedBy {
+            if (OnlineSearchManager.isFavorite(this, it)) 0 else 1
+        }
+
+        for (name in orderedBuiltin) addProviderCard(name, false)
 
         val customProvidersTitle = TextView(this).apply {
             text = "Custom Providers"
@@ -1611,51 +2262,41 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 0, 0, 8)
             })
         } else {
-            for (provider in customProviders) {
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                }
+            val orderedCustom = customProviders.sortedBy {
+                if (OnlineSearchManager.isFavorite(this, it.name)) 0 else 1
+            }
 
-                val box = CheckBox(this).apply {
-                    text = provider.name
-                    setTextColor(Color.WHITE)
-                    isChecked = OnlineSearchManager.isProviderEnabled(this@MainActivity, provider.name)
+            for (provider in orderedCustom) addProviderCard(provider.name, true)
+        }
 
-                    setOnCheckedChangeListener { _, checked ->
-                        OnlineSearchManager.setProviderEnabled(
-                            this@MainActivity,
-                            provider.name,
-                            checked
-                        )
+        val refreshHandler = Handler(Looper.getMainLooper())
+
+        refreshHandler.postDelayed(object : Runnable {
+            override fun run() {
+                // Stops by itself once another screen replaces this one.
+                if (!root.isAttachedToWindow) return
+
+                for (refresh in statusRefreshers) {
+                    try {
+                        refresh()
+                    } catch (_: Throwable) {
                     }
                 }
 
-                val removeButton = Button(this).apply {
-                    text = "Remove"
-                    setOnClickListener {
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Remove search provider?")
-                            .setMessage(
-                                "Remove \"${provider.name}\"? This cannot be undone."
-                            )
-                            .setPositiveButton("Remove") { _, _ ->
-                                OnlineSearchManager.removeCustomProvider(
-                                    this@MainActivity,
-                                    provider.name
-                                )
-                                showOnlineSearchProviderSettings()
-                            }
-                            .setNegativeButton("Cancel", null)
-                            .show()
-                    }
-                }
+                refreshHandler.postDelayed(this, 1000L)
+            }
+        }, 1000L)
 
-                allProviderCheckboxes.add(box)
-                row.addView(box)
-                row.addView(removeButton)
-                root.addView(row)
+        val suggestBox = CheckBox(this).apply {
+            text = "Show search suggestions from history"
+            setTextColor(Color.WHITE)
+            isChecked = SearchHistory.suggestionsEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                SearchHistory.setSuggestionsEnabled(this@MainActivity, checked)
             }
         }
+
+        root.addView(suggestBox)
 
         val addCustomProviderButton = Button(this).apply {
             text = "Add Custom Provider"
@@ -5363,6 +6004,7 @@ class MainActivity : AppCompatActivity() {
 
         val cancelButton = Button(this).apply {
             text = "Cancel"
+            tag = "back_button"
             setOnClickListener {
                 skipMagnetSelection = true
                 TorrentNative.removeTorrent(torrentIndex, false)
@@ -5648,6 +6290,7 @@ class MainActivity : AppCompatActivity() {
 
         val cancel = Button(this).apply {
             text = "Cancel"
+            tag = "back_button"
             setOnClickListener {
                 TorrentNative.removeTorrent(torrentIndex, false)
                 showMainScreen()
@@ -5882,8 +6525,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Nothing has been added yet on this screen, so leaving it is a
+        // plain Cancel; the top arrow does the same.
         val back = Button(this).apply {
-            text = "Back"
+            text = "Cancel"
+            tag = "back_button"
             setOnClickListener { showMainScreen() }
         }
 
@@ -6035,11 +6681,11 @@ class MainActivity : AppCompatActivity() {
                 currentDetailsTab = "Swarm"
                 clearContent()
 
-                contentText.text = try {
+                contentText.text = colorSwarmHealth(try {
                     TorrentNative.getTorrentSwarmHealth(torrentIndex)
                 } catch (e: Throwable) {
                     "Could not load swarm health"
-                }
+                })
             }
         }
 
@@ -6538,13 +7184,52 @@ class MainActivity : AppCompatActivity() {
         root.addView(openFolderButton)
         root.addView(saveTorrentFileButton)
         root.addView(changeSaveFolderButton)
-        root.addView(backButton)
 
         val outerScroll = ScrollView(this).apply {
             addView(root)
         }
 
-        setContentView(outerScroll)
+        // Back arrow pinned at the top-left (no scrolling to the bottom to
+        // leave this screen). The bottom Back button it replaces is gone.
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(32, 40, 36))
+            setPadding(8, 8, 8, 8)
+            elevation = 12f
+
+            addView(TextView(this@MainActivity).apply {
+                text = "\u2190"
+                textSize = 26f
+                setTextColor(Color.WHITE)
+                setPadding(28, 12, 28, 12)
+                setOnClickListener { showMainScreen() }
+            })
+
+            addView(TextView(this@MainActivity).apply {
+                text = "Torrent details"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+                setPadding(12, 0, 0, 0)
+            })
+        }
+
+        val container = LinearLayout(this).apply {
+            tag = "has_bar"
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bgColor())
+            addView(topBar)
+            addView(
+                outerScroll,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f
+                )
+            )
+        }
+
+        setContentView(container)
         showGeneralTab()
     }
 
@@ -6564,12 +7249,115 @@ class MainActivity : AppCompatActivity() {
             ""
         }
 
+        val stateText = try {
+            TorrentNative.getTorrentPieceStates(torrentIndex)
+        } catch (e: Throwable) {
+            ""
+        }
+
+        if (stateText.startsWith("OK|")) {
+            contentText.text = buildColoredPieceMap(stateText, pieceSize)
+            return
+        }
+
         contentText.text =
             if (pieceSize.isBlank()) {
                 pieceInfo
             } else {
                 "$pieceInfo\n\n$pieceSize"
             }
+    }
+
+    // Four-state piece map: downloaded (teal-green), downloading now
+    // (amber), missing but wanted (dark grey), skipped because its file is
+    // not selected (very faint grey). Same colours as the Web UI.
+    private fun buildColoredPieceMap(stateText: String, pieceSize: String): CharSequence {
+        val newline = stateText.indexOf('\n')
+        val header = stateText.substring(0, if (newline < 0) stateText.length else newline).split("|")
+        val states = if (newline < 0) "" else stateText.substring(newline + 1)
+
+        val total = header.getOrNull(1)?.toIntOrNull() ?: states.length
+        val completed = header.getOrNull(2)?.toIntOrNull() ?: 0
+        val sizeBytes = header.getOrNull(3) ?: "?"
+        val percent = if (total > 0) (completed.toLong() * 100L / total).toInt() else 0
+
+        val haveColor = Color.parseColor("#4DA3FF")
+        val downloadingColor = Color.parseColor("#4CD964")
+        val missingColor = Color.parseColor("#6B7686")
+        val skippedColor = Color.parseColor("#2C3442")
+
+        val out = android.text.SpannableStringBuilder()
+
+        out.append("Pieces\n\n")
+        out.append("Completed: $completed / $total\n")
+        out.append("Progress: $percent%\n")
+        out.append("Piece size: ${formatSize(sizeBytes.toLongOrNull() ?: 0L)}\n\n")
+
+        fun legend(color: Int, label: String) {
+            val start = out.length
+            out.append("\u25A0")
+            out.setSpan(
+                android.text.style.ForegroundColorSpan(color),
+                start,
+                out.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            out.append(" $label    ")
+        }
+
+        legend(haveColor, "downloaded")
+        legend(downloadingColor, "downloading")
+        out.append("\n")
+        legend(missingColor, "missing")
+        legend(skippedColor, "skipped (file not selected)")
+        out.append("\n\n")
+
+        val perLine = 40
+        var runStart = out.length
+        var runColor = -1
+
+        fun closeRun() {
+            if (runColor != -1 && out.length > runStart) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(runColor),
+                    runStart,
+                    out.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+        }
+
+        for (p in states.indices) {
+            val color = when (states[p]) {
+                '2' -> haveColor
+                '1' -> downloadingColor
+                'x' -> skippedColor
+                else -> missingColor
+            }
+
+            if (color != runColor) {
+                closeRun()
+                runStart = out.length
+                runColor = color
+            }
+
+            out.append("\u25A0")
+
+            if ((p + 1) % perLine == 0) {
+                closeRun()
+                out.append("\n")
+                runStart = out.length
+                runColor = -1
+            }
+        }
+
+        closeRun()
+
+        if (states.length < total) {
+            out.append("\n\nShowing first ${states.length} of $total pieces.")
+        }
+
+        return out
     }
 
     // Auto-refresh all live tabs every 3 seconds.
@@ -6593,11 +7381,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             "Swarm" -> {
-                contentText.text = try {
+                contentText.text = colorSwarmHealth(try {
                     TorrentNative.getTorrentSwarmHealth(torrentIndex)
                 } catch (e: Throwable) {
                     "Could not load swarm health"
-                }
+                })
             }
             "Pieces" -> showPiecesDetails(torrentIndex, contentText)
             "Statistics" -> {
@@ -7054,8 +7842,22 @@ class MainActivity : AppCompatActivity() {
         val peers: Int,
         val totalSeeds: Int,
         val totalPeers: Int,
-        val uploading: Int
+        val uploading: Int,
+        // % of this file's pieces that we or a connected peer has; -1 = unknown
+        val availability: Int = -1,
+        // distributed copies x1000 (1234 = 1.234 copies); -1 = unknown
+        val copiesMilli: Int = -1
     )
+
+    private fun formatFileAvailability(swarm: FileSwarm?): String {
+        val a = swarm?.availability ?: -1
+        val c = swarm?.copiesMilli ?: -1
+
+        val pct = if (a < 0) "Availability --" else "Availability $a%"
+        val copies = if (c < 0) "Copies --" else "Copies " + String.format(java.util.Locale.US, "%.3f", c / 1000.0)
+
+        return "$pct  •  $copies"
+    }
 
     // Matches the main card's own "Uploading to: N peer(s)" wording
     // (st.num_uploads) so the per-file line reads the same way.
@@ -7085,7 +7887,7 @@ class MainActivity : AppCompatActivity() {
         for (line in swarmData.lines()) {
             if (line.isBlank()) continue
 
-            val parts = line.split("|", limit = 6)
+            val parts = line.split("|", limit = 8)
             if (parts.size < 6) continue
 
             val index = parts[0].toIntOrNull() ?: continue
@@ -7094,8 +7896,12 @@ class MainActivity : AppCompatActivity() {
             val totalSeeds = parts[3].toIntOrNull() ?: 0
             val totalPeers = parts[4].toIntOrNull() ?: 0
             val uploading = parts[5].toIntOrNull() ?: 0
+            val availability = parts.getOrNull(6)?.toIntOrNull() ?: -1
+            val copiesMilli = parts.getOrNull(7)?.toIntOrNull() ?: -1
 
-            map[index] = FileSwarm(seeds, peers, totalSeeds, totalPeers, uploading)
+            map[index] = FileSwarm(
+                seeds, peers, totalSeeds, totalPeers, uploading, availability, copiesMilli
+            )
         }
 
         return map
@@ -7252,7 +8058,8 @@ class MainActivity : AppCompatActivity() {
             val swarm = swarmMap[index]
             val swarmText = "Seeds ${swarm?.seeds ?: 0} (${swarm?.totalSeeds ?: 0})" +
                     "  Peers ${swarm?.peers ?: 0} (${swarm?.totalPeers ?: 0})" +
-                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}"
+                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}" +
+                    "  •  ${formatFileAvailability(swarm)}"
 
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -7358,7 +8165,8 @@ class MainActivity : AppCompatActivity() {
             val swarm = swarmMap[index]
             val swarmText = "Seeds ${swarm?.seeds ?: 0} (${swarm?.totalSeeds ?: 0})" +
                     "  Peers ${swarm?.peers ?: 0} (${swarm?.totalPeers ?: 0})" +
-                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}"
+                    "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}" +
+                    "  •  ${formatFileAvailability(swarm)}"
 
             views.first.text =
                 "Progress: ${progress.percent}%  •  " +
@@ -7952,6 +8760,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateTorrentList() {
         if (!::listLayout.isInitialized) return
 
+        // Select All / Select None change selectedTorrents without going
+        // through a checkbox, so keep the bar's count in step here.
+        updateSelectionBar()
+
         listLayout.removeAllViews()
 
         val status = try {
@@ -8027,6 +8839,7 @@ class MainActivity : AppCompatActivity() {
                     setOnCheckedChangeListener { _, isChecked ->
                         if (isChecked) selectedTorrents.add(torrentIndex)
                         else selectedTorrents.remove(torrentIndex)
+                        updateSelectionBar()
                     }
                 }
 
@@ -8034,6 +8847,17 @@ class MainActivity : AppCompatActivity() {
             } else {
                 card.setOnClickListener {
                     showTorrentDetails(torrentIndex)
+                }
+
+                // Long-press a torrent to start selecting (like the picture):
+                // selection mode turns on with this torrent already ticked.
+                card.setOnLongClickListener {
+                    selectMode = true
+                    selectedTorrents.clear()
+                    selectedTorrents.add(torrentIndex)
+                    updateSelectionBar()
+                    updateTorrentList()
+                    true
                 }
             }
 
@@ -8321,6 +9145,15 @@ class MainActivity : AppCompatActivity() {
         lines: List<IndexedValue<String>>
     ): List<IndexedValue<String>> {
         return when (sortMode) {
+            TorrentQueue.SORT_MODE -> {
+                val rank = TorrentQueue.rankMap(this)
+                lines.sortedBy {
+                    rank[TorrentQueue.normalize(
+                        getSafeTorrentHashForAction(it.index + 1)
+                    )] ?: Int.MAX_VALUE
+                }
+            }
+
             "Name (A-Z)" ->
                 lines.sortedBy { extractNameForSort(it.value).lowercase() }
 
@@ -8378,6 +9211,52 @@ class MainActivity : AppCompatActivity() {
         } ?: throw Exception("Cannot open torrent file")
 
         return file.absolutePath
+    }
+
+    // Colours the Swarm Health text: the "Health:" word and the bar follow
+    // the health level (red / orange / lime / green); the empty part of the
+    // bar is dim grey. Anything unexpected is returned unchanged.
+    private fun colorSwarmHealth(text: String): CharSequence {
+        val level = Regex("Health: (Critical|Weak|Healthy|Excellent)").find(text)?.groupValues?.get(1)
+            ?: return text
+
+        val levelColor = Color.parseColor(
+            when (level) {
+                "Critical" -> "#FF5252"
+                "Weak" -> "#FFA726"
+                "Healthy" -> "#C0CA33"
+                else -> "#4CD964"
+            }
+        )
+        val emptyColor = Color.parseColor("#3A4150")
+
+        val out = android.text.SpannableStringBuilder(text)
+
+        val healthMatch = Regex("Health: $level").find(text)
+        if (healthMatch != null) {
+            out.setSpan(
+                android.text.style.ForegroundColorSpan(levelColor),
+                healthMatch.range.first + "Health: ".length,
+                healthMatch.range.last + 1,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+        val graphMatch = Regex("[\\u2588\\u2591]{6,}").find(text)
+        if (graphMatch != null) {
+            for (i in graphMatch.range) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(
+                        if (text[i] == '\u2588') levelColor else emptyColor
+                    ),
+                    i,
+                    i + 1,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+        }
+
+        return out
     }
 
     private fun formatSize(bytes: Long): String {
@@ -8541,6 +9420,541 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(scroll)
+    }
+
+    // Opens the details screen of the torrent with this info-hash (used
+    // when a notification is tapped). Does nothing if it is not (yet) in
+    // the live session.
+    private fun openTorrentDetailsByHash(hash: String) {
+        val target = normalizeHashForKey(hash)
+        if (target.isBlank()) return
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val count = status.lines().count { it.isNotBlank() }
+
+        for (i in 1..count) {
+            val h = try {
+                TorrentNative.getTorrentHash(i)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (normalizeHashForKey(h) == target) {
+                showTorrentDetails(i)
+                return
+            }
+        }
+    }
+
+    // Notification Settings: which alerts to show, per-torrent progress
+    // notifications, update frequency, sound/silent, per-torrent off switch.
+    // Move to Top / Up / Down / To Bottom for the selected torrents.
+    private fun moveSelectedInQueue(dir: String) {
+        if (selectedTorrents.isEmpty()) {
+            Toast.makeText(this, "No torrents selected", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        if (status.isBlank() || status == "No torrents" || status == "Engine not ready") {
+            return
+        }
+
+        val count = status.lines().count { it.isNotBlank() }
+
+        val all = (1..count).map { getSafeTorrentHashForAction(it) }
+        val selected = selectedTorrents.map { getSafeTorrentHashForAction(it) }.toSet()
+        val visible = getVisibleTorrentIndexes().map { getSafeTorrentHashForAction(it) }.toSet()
+
+        val changed = TorrentQueue.move(this, dir, all, selected, visible)
+
+        if (sortMode != TorrentQueue.SORT_MODE) {
+            sortMode = TorrentQueue.SORT_MODE
+            torrentListViewPrefs().edit().putString("sort", sortMode).apply()
+            Toast.makeText(this, "Sort set to Queue Order", Toast.LENGTH_SHORT).show()
+            showMainScreen()
+            return
+        }
+
+        if (!changed) {
+            Toast.makeText(this, "Already there", Toast.LENGTH_SHORT).show()
+        }
+
+        updateTorrentList()
+    }
+
+    private fun setBackupStatus(text: String) {
+        runOnUiThread { backupStatusView?.text = text }
+    }
+
+    private fun showBackupRestoreScreen() {
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        root.addView(TextView(this).apply {
+            text = "Backup & Restore"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 12)
+        })
+
+        root.addView(TextView(this).apply {
+            text = "A backup is one .zip file with your torrent list, per-torrent " +
+                "settings (file selection, speed limits, save folders, paused state), " +
+                "all app settings (connection, notifications, search providers, RSS, " +
+                "Web UI) and libtorrent progress data so torrents continue without a " +
+                "full recheck.\n\nDownloaded files themselves are not included."
+            textSize = 13f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 0, 0, 16)
+        })
+
+        val status = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(255, 200, 120))
+            setPadding(0, 12, 0, 12)
+        }
+        backupStatusView = status
+
+        root.addView(Button(this).apply {
+            text = "Create Backup"
+            TabIcons.apply(this, "save", 18, 6)
+            setOnClickListener {
+                val stamp = java.text.SimpleDateFormat(
+                    "yyyyMMdd-HHmmss", java.util.Locale.US
+                ).format(java.util.Date())
+                try {
+                    createBackupLauncher.launch("TorrentOr-backup-$stamp.zip")
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "No file picker available", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
+
+        root.addView(Button(this).apply {
+            text = "Restore from Backup"
+            TabIcons.apply(this, "folder", 18, 6)
+            setOnClickListener {
+                try {
+                    openBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "No file picker available", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
+
+        root.addView(status)
+
+        root.addView(Button(this).apply {
+            text = "Back"
+            setOnClickListener {
+                backupStatusView = null
+                showMainScreen()
+            }
+        })
+
+        setContentView(ScrollView(this).apply { addView(root) })
+    }
+
+    private fun appVersionLabel(): String {
+        return try {
+            val info = packageManager.getPackageInfo(packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION") info.versionCode.toLong()
+            }
+            "${info.versionName} ($code)"
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun runBackupTo(uri: Uri) {
+        setBackupStatus("Creating backup...")
+
+        Thread {
+            var tmp: File? = null
+            try {
+                // Make sure the newest progress is on disk first.
+                try {
+                    TorrentNative.saveResumeData(2500)
+                } catch (_: Throwable) {
+                }
+
+                tmp = File(cacheDir, "backup_tmp.zip")
+                tmp.outputStream().use { out ->
+                    BackupManager.createBackup(this, out, appVersionLabel())
+                }
+
+                val out = contentResolver.openOutputStream(uri, "wt")
+                    ?: throw java.io.IOException("Could not open the chosen file for writing")
+
+                out.use { o ->
+                    tmp.inputStream().use { it.copyTo(o) }
+                    o.flush()
+                }
+
+                val kb = (tmp.length() + 1023) / 1024
+                setBackupStatus("Backup saved ($kb KB).")
+                runOnUiThread {
+                    Toast.makeText(this, "Backup saved", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                setBackupStatus("Backup failed: ${e.message ?: e.javaClass.simpleName}")
+                AppLog.warning("Backup failed: ${e.message}")
+            } finally {
+                try {
+                    tmp?.delete()
+                } catch (_: Exception) {
+                }
+            }
+        }.start()
+    }
+
+    private fun previewAndRestore(uri: Uri) {
+        setBackupStatus("Reading backup...")
+
+        Thread {
+            try {
+                val preview = contentResolver.openInputStream(uri)?.use {
+                    BackupManager.readPreview(this, it)
+                } ?: throw BackupManager.BackupException("Could not open the chosen file.")
+
+                runOnUiThread { showRestoreChoiceDialog(uri, preview) }
+            } catch (e: BackupManager.BackupException) {
+                setBackupStatus("Cannot restore: ${e.message}")
+            } catch (e: Exception) {
+                setBackupStatus("Cannot read the backup: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }.start()
+    }
+
+    private fun showRestoreChoiceDialog(uri: Uri, p: BackupManager.Preview) {
+        setBackupStatus("")
+
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+        }
+
+        box.addView(TextView(this).apply {
+            text = "Created: ${BackupManager.formatDate(p.createdAt)}\n" +
+                "App version: ${p.appVersion}\n" +
+                "Torrents: ${p.torrentCount}\n" +
+                "Progress data: ${p.resumeCount} torrent(s)\n" +
+                "Settings groups: ${p.settingsFileCount}"
+            textSize = 14f
+        })
+
+        val group = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            setPadding(0, 16, 0, 0)
+        }
+        val mergeRadio = RadioButton(this).apply {
+            id = android.view.View.generateViewId()
+            text = "Merge - add missing torrents and settings, keep what is here"
+        }
+        val replaceRadio = RadioButton(this).apply {
+            id = android.view.View.generateViewId()
+            text = "Replace - make this device match the backup"
+        }
+        group.addView(mergeRadio)
+        group.addView(replaceRadio)
+        mergeRadio.isChecked = true
+        box.addView(group)
+
+        AlertDialog.Builder(this)
+            .setTitle("Restore backup")
+            .setView(box)
+            .setPositiveButton("Restore") { _, _ ->
+                if (replaceRadio.isChecked) {
+                    AlertDialog.Builder(this)
+                        .setTitle("Replace everything?")
+                        .setMessage(
+                            "All torrents currently in TorrentOr will be removed from " +
+                                "the app (their downloaded files stay on disk) and " +
+                                "settings will be overwritten by the backup."
+                        )
+                        .setPositiveButton("Replace") { _, _ -> runRestore(uri, true) }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                } else {
+                    runRestore(uri, false)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runRestore(uri: Uri, replace: Boolean) {
+        setBackupStatus("Restoring...")
+
+        Thread {
+            try {
+                val result = contentResolver.openInputStream(uri)?.use {
+                    BackupManager.restore(this, it, replace)
+                } ?: throw BackupManager.BackupException("Could not open the chosen file.")
+
+                runOnUiThread {
+                    try {
+                        startTorrentService(
+                            Intent(this, TorrentService::class.java).apply {
+                                putExtra("ACTION", "RESTORE_RELOAD")
+                                putExtra("REPLACE", replace)
+                            }
+                        )
+                    } catch (e: Exception) {
+                        AppLog.warning("Restore: could not reach the service: ${e.message}")
+                    }
+
+                    val msg = StringBuilder()
+                    msg.append(if (replace) "Mode: Replace\n" else "Mode: Merge\n")
+                    msg.append("Torrents in backup: ${result.torrentsInBackup}\n")
+                    msg.append("Added: ${result.torrentsAdded}\n")
+                    if (!replace) msg.append("Already present: ${result.torrentsAlreadyPresent}\n")
+                    if (result.torrentsSkipped > 0) {
+                        msg.append("Skipped (.torrent file missing): ${result.torrentsSkipped}\n")
+                    }
+                    msg.append("Progress data restored: ${result.resumeFiles}\n")
+                    msg.append("Settings groups: ${result.settingsFiles}")
+
+                    AlertDialog.Builder(this)
+                        .setTitle("Restore complete")
+                        .setMessage(msg.toString())
+                        .setPositiveButton("OK", null)
+                        .show()
+
+                    // Stay on the Backup & Restore screen.
+                    backupStatusView?.text =
+                        "Restore complete (" + (if (replace) "Replace" else "Merge") + "): " +
+                            result.torrentsAdded + " torrent(s) added."
+                }
+            } catch (e: BackupManager.BackupException) {
+                setBackupStatus("Restore failed: ${e.message}")
+            } catch (e: Exception) {
+                setBackupStatus("Restore failed: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }.start()
+    }
+
+    private fun showNotificationSettingsScreen() {
+        stopNetworkFeaturesAutoRefresh()
+        stopStorageAutoRefresh()
+        stopGlobalStatsAutoRefresh()
+        stopRssUiRefresh()
+        stopLogUiRefresh()
+
+        currentDetailsTab = ""
+        currentDetailsTorrentIndex = -1
+        currentDetailsContentText = null
+        currentDetailsFileListLayout = null
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(bgColor())
+        }
+
+        fun heading(text: String) = TextView(this).apply {
+            this.text = text
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(0, 24, 0, 6)
+        }
+
+        fun note(text: String) = TextView(this).apply {
+            this.text = text
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            setPadding(0, 0, 0, 6)
+        }
+
+        fun check(text: String, initial: Boolean, onChange: (Boolean) -> Unit) = CheckBox(this).apply {
+            this.text = text
+            setTextColor(Color.WHITE)
+            isChecked = initial
+            setOnCheckedChangeListener { _, checked -> onChange(checked) }
+        }
+
+        root.addView(TextView(this).apply {
+            text = "Notification Settings"
+            textSize = 24f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 8)
+        })
+
+        root.addView(note(
+            "The ongoing \"TorrentOr is running\" notification is not affected by anything here."
+        ))
+
+        val permissionNote = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(255, 170, 120))
+            setPadding(0, 4, 0, 4)
+        }
+
+        val systemSettingsButton = Button(this).apply {
+            text = "Open Android notification settings"
+            setOnClickListener {
+                try {
+                    startActivity(
+                        Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+                    )
+                } catch (_: Throwable) {
+                }
+            }
+        }
+
+        val blocked = !androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()
+
+        if (blocked) {
+            permissionNote.text = "Notifications are currently blocked for TorrentOr in Android settings, so none of these will show."
+            root.addView(permissionNote)
+        }
+
+        root.addView(systemSettingsButton)
+
+        root.addView(heading("Notification types"))
+
+        for (type in NotificationSettings.EVENT_TYPES) {
+            root.addView(check(type.label, NotificationSettings.isTypeEnabled(this, type.id)) {
+                NotificationSettings.setTypeEnabled(this, type.id, it)
+            })
+        }
+
+        root.addView(heading("Progress notifications"))
+        root.addView(note(
+            "One live notification per downloading torrent with progress, speeds, " +
+                    "size, ETA and Pause/Resume, Stop and Open buttons. Stop pauses the " +
+                    "torrent and hides its notification until it runs again."
+        ))
+
+        root.addView(check(
+            "Show a progress notification for each torrent",
+            NotificationSettings.progressEnabled(this)
+        ) { NotificationSettings.setProgressEnabled(this, it) })
+
+        val intervalButton = Button(this).apply {
+            text = "Update every ${NotificationSettings.intervalSeconds(this@MainActivity)} s"
+            setOnClickListener {
+                val options = NotificationSettings.INTERVAL_CHOICES_SECONDS
+                    .map { "$it seconds" }.toTypedArray()
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Progress update frequency")
+                    .setItems(options) { _, which ->
+                        val sec = NotificationSettings.INTERVAL_CHOICES_SECONDS[which]
+                        NotificationSettings.setIntervalSeconds(this@MainActivity, sec)
+                        text = "Update every $sec s"
+                    }
+                    .show()
+            }
+        }
+
+        root.addView(intervalButton)
+
+        root.addView(heading("Sound"))
+
+        root.addView(check("Play sound for alerts", NotificationSettings.soundEnabled(this)) {
+            NotificationSettings.setSoundEnabled(this, it)
+        })
+        root.addView(check(
+            "Silent mode (no sound or vibration for any alert)",
+            NotificationSettings.silentMode(this)
+        ) { NotificationSettings.setSilentMode(this, it) })
+        root.addView(note("Progress notifications are always silent."))
+
+        root.addView(heading("Per torrent"))
+
+        val perTorrentButton = Button(this).apply {
+            text = "Choose torrents to notify about"
+            setOnClickListener {
+                val status = try {
+                    TorrentNative.getDetailedStatus()
+                } catch (_: Throwable) {
+                    ""
+                }
+
+                val lines = if (status == "No torrents" || status == "No active torrents") {
+                    emptyList()
+                } else {
+                    status.lines().filter { it.isNotBlank() }
+                }
+
+                val names = mutableListOf<String>()
+                val hashes = mutableListOf<String>()
+
+                for (i in lines.indices) {
+                    val h = try {
+                        TorrentNative.getTorrentHash(i + 1)
+                    } catch (_: Throwable) {
+                        ""
+                    }
+
+                    if (normalizeHashForKey(h).isBlank() || h.startsWith("ERROR") ||
+                        h == "Hash not ready" || h == "Invalid torrent"
+                    ) continue
+
+                    names.add(extractTorrentName(lines[i], i + 1))
+                    hashes.add(h)
+                }
+
+                if (names.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "No torrents yet", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                val checked = BooleanArray(names.size) {
+                    !NotificationSettings.isTorrentDisabled(this@MainActivity, hashes[it])
+                }
+
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Notify about (unchecked = off)")
+                    .setMultiChoiceItems(names.toTypedArray(), checked) { _, which, isChecked ->
+                        NotificationSettings.setTorrentDisabled(
+                            this@MainActivity, hashes[which], !isChecked
+                        )
+                    }
+                    .setPositiveButton("Done", null)
+                    .show()
+            }
+        }
+
+        root.addView(perTorrentButton)
+        root.addView(note("Unchecked torrents get no progress or alert notifications at all."))
+
+        root.addView(Button(this).apply {
+            text = "Back"
+            setOnClickListener { showMainScreen() }
+        })
+
+        setContentView(ScrollView(this).apply { addView(root) })
     }
 
     private fun showStorageSpaceScreen() {

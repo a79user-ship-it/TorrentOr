@@ -77,6 +77,10 @@ object TorrentNative {
     external fun forceReannounce(index: Int)
     external fun getTorrentPieces(index: Int): String
     external fun getTorrentPieceSize(index: Int): String
+
+    // "OK|total|completed|pieceSize\n<one char per piece>" (2 = have,
+    // 1 = downloading, 0 = missing, x = skipped) or a plain message.
+    external fun getTorrentPieceStates(index: Int): String
     external fun getTorrentStatistics(index: Int): String
     external fun getGlobalStatistics(): String
     external fun getPortForwardingStatus(): String
@@ -122,6 +126,11 @@ object TorrentNative {
 
     // Network policy: pauses/resumes every transfer (not individual torrents).
     external fun setNetworkPaused(paused: Boolean)
+
+    // Fast-resume data (which pieces are already on disk), so a restart or
+    // restore does not have to re-check every file.
+    external fun setResumeDataDir(dir: String)
+    external fun saveResumeData(waitMs: Int): Int
     external fun getGlobalSpeedLimits(): String
     external fun setTorrentSpeedLimits(hash: String, uploadLimit: Int, downloadLimit: Int): Boolean
     external fun getTorrentSpeedLimits(hash: String): String

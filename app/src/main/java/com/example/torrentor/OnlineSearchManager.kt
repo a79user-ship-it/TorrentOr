@@ -89,105 +89,244 @@ object OnlineSearchManager {
     data class ProviderOutcome(
         val providerName: String,
         val resultCount: Int,
-        val error: String?
+        val error: String?,
+        val elapsedMs: Long = 0L
     )
+
+    /** Returned by search(); cancel() stops delivering any further callbacks. */
+    class SearchHandle internal constructor() {
+        @Volatile
+        var cancelled = false
+            private set
+
+        internal val workers = CopyOnWriteArrayList<Thread>()
+
+        fun cancel() {
+            cancelled = true
+
+            for (w in workers) {
+                try {
+                    w.interrupt()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+    }
+
+    // ---- Per-provider health stats (response time, last success, error) ----
+
+    data class ProviderStats(
+        val lastAttemptMs: Long,
+        val lastSuccessMs: Long,
+        val lastResponseMs: Long,
+        val lastError: String
+    ) {
+        // Unavailable = the most recent attempt failed.
+        val unavailable: Boolean
+            get() = lastAttemptMs > 0L && lastError.isNotBlank()
+    }
+
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun loadStats(context: Context, providerName: String): ProviderStats {
+        val p = prefs(context)
+
+        return ProviderStats(
+            lastAttemptMs = p.getLong("stat_try_$providerName", 0L),
+            lastSuccessMs = p.getLong("stat_ok_$providerName", 0L),
+            lastResponseMs = p.getLong("stat_ms_$providerName", 0L),
+            lastError = p.getString("stat_err_$providerName", "") ?: ""
+        )
+    }
+
+    private fun recordStats(context: Context, providerName: String, outcome: ProviderOutcome) {
+        val e = prefs(context).edit()
+        val now = System.currentTimeMillis()
+
+        e.putLong("stat_try_$providerName", now)
+        e.putLong("stat_ms_$providerName", outcome.elapsedMs)
+
+        if (outcome.error == null) {
+            e.putLong("stat_ok_$providerName", now)
+            e.putString("stat_err_$providerName", "")
+        } else {
+            e.putString("stat_err_$providerName", outcome.error)
+        }
+
+        e.apply()
+    }
+
+    fun isFavorite(context: Context, providerName: String): Boolean {
+        return prefs(context).getBoolean("fav_$providerName", false)
+    }
+
+    fun setFavorite(context: Context, providerName: String, favorite: Boolean) {
+        prefs(context).edit().putBoolean("fav_$providerName", favorite).apply()
+    }
+
+    fun favoriteNames(context: Context): Set<String> {
+        return allProviders(context).map { it.name }.filter { isFavorite(context, it) }.toSet()
+    }
+
+    // Runs one provider with a hard timeout on a daemon worker thread.
+    private fun runOne(
+        provider: SearchProvider,
+        query: String,
+        timeoutMs: Long,
+        handle: SearchHandle?
+    ): Pair<List<TorrentSearchResult>?, ProviderOutcome> {
+        val started = System.currentTimeMillis()
+        val threadResult = arrayOfNulls<List<TorrentSearchResult>>(1)
+        val threadError = arrayOfNulls<String>(1)
+
+        val worker = Thread {
+            try {
+                threadResult[0] = provider.search(query)
+            } catch (e: Throwable) {
+                threadError[0] = e.message ?: e.javaClass.simpleName
+            }
+        }
+
+        worker.isDaemon = true
+        handle?.workers?.add(worker)
+        worker.start()
+
+        try {
+            worker.join(timeoutMs)
+        } catch (_: InterruptedException) {
+        }
+
+        val elapsed = System.currentTimeMillis() - started
+        val results = threadResult[0]
+
+        val error = when {
+            worker.isAlive -> "Timed out"
+            threadError[0] != null -> threadError[0]
+            results == null -> "No response"
+            else -> null
+        }
+
+        return Pair(
+            if (error == null) results else null,
+            ProviderOutcome(
+                providerName = provider.name,
+                resultCount = if (error == null) (results?.size ?: 0) else 0,
+                error = error,
+                elapsedMs = elapsed
+            )
+        )
+    }
+
+    /**
+     * Runs one provider with a sample query so the user can see whether it
+     * works right now. Records health stats; onResult runs on a background
+     * thread.
+     */
+    fun testProvider(context: Context, providerName: String, onResult: (ProviderOutcome) -> Unit) {
+        val appContext = context.applicationContext
+
+        Thread {
+            val provider = allProviders(appContext).firstOrNull { it.name == providerName }
+
+            val outcome = if (provider == null) {
+                ProviderOutcome(providerName, 0, "Provider not found")
+            } else {
+                runOne(provider, "ubuntu", loadTimeoutSeconds(appContext) * 1000L, null).second
+            }
+
+            if (provider != null) recordStats(appContext, providerName, outcome)
+            onResult(outcome)
+        }.start()
+    }
 
     /**
      * Runs every enabled provider on its own thread at the same time.
-     * onProviderDone is called on a background thread as each provider
-     * finishes (success or failure) so the UI can show progress live;
-     * onAllDone is called once, after every provider has finished or timed
-     * out, with the combined, de-duplicated result list.
+     *
+     * onProviderDone: called (background thread) as each provider finishes,
+     *   success or failure.
+     * onUpdate: called (background thread) after each provider finishes
+     *   with the merged, de-duplicated list so far, so results can be shown
+     *   as they arrive.
+     * onAllDone: called once, after every provider has finished or timed
+     *   out, with the final merged list.
      *
      * One provider failing, timing out, or throwing never stops the others.
+     * After the returned handle's cancel() no further callbacks are made.
      */
     fun search(
         context: Context,
         query: String,
         onProviderDone: (ProviderOutcome) -> Unit,
-        onAllDone: (List<TorrentSearchResult>) -> Unit
-    ) {
-        AppLog.init(context.applicationContext)
+        onAllDone: (List<TorrentSearchResult>) -> Unit,
+        onUpdate: (List<TorrentSearchResult>) -> Unit = {}
+    ): SearchHandle {
+        val appContext = context.applicationContext
+        AppLog.init(appContext)
 
+        val handle = SearchHandle()
         val trimmed = query.trim()
 
         if (trimmed.isBlank()) {
             onAllDone(emptyList())
-            return
+            return handle
         }
 
-        val providers = allProviders(context).filter { isProviderEnabled(context, it.name) }
+        val providers = allProviders(appContext).filter { isProviderEnabled(appContext, it.name) }
 
         if (providers.isEmpty()) {
             onAllDone(emptyList())
-            return
+            return handle
         }
 
-        val timeoutMs = loadTimeoutSeconds(context) * 1000L
-        val collected = CopyOnWriteArrayList<TorrentSearchResult>()
+        val timeoutMs = loadTimeoutSeconds(appContext) * 1000L
+        val merged = LinkedHashMap<String, TorrentSearchResult>()
         val remaining = AtomicInteger(providers.size)
 
         for (provider in providers) {
             Thread {
-                val threadResult = arrayOfNulls<List<TorrentSearchResult>>(1)
-                val threadError = arrayOfNulls<String>(1)
+                val (results, outcome) = runOne(provider, trimmed, timeoutMs, handle)
 
-                val worker = Thread {
-                    try {
-                        threadResult[0] = provider.search(trimmed)
-                    } catch (e: Throwable) {
-                        threadError[0] = e.message ?: e.javaClass.simpleName
+                // Health stats are recorded even if the search was cancelled
+                // meanwhile; a cancelled search that never answered is not
+                // counted as a provider failure.
+                if (!handle.cancelled || results != null) {
+                    recordStats(appContext, provider.name, outcome)
+                }
+
+                if (results != null) {
+                    AppLog.info("Search: ${provider.name} - ${results.size} result(s) in ${outcome.elapsedMs} ms")
+                } else if (!handle.cancelled) {
+                    AppLog.warning("Search: ${provider.name} failed: ${outcome.error}")
+                }
+
+                var snapshot: List<TorrentSearchResult>? = null
+
+                synchronized(merged) {
+                    if (results != null) {
+                        for (r in results) {
+                            val key = r.dedupeKey()
+                            val existing = merged[key]
+                            merged[key] = if (existing == null) r else existing.mergedWith(r)
+                        }
                     }
+
+                    snapshot = merged.values.toList()
                 }
 
-                worker.isDaemon = true
-                worker.start()
-                worker.join(timeoutMs)
+                val done = remaining.decrementAndGet() == 0
 
-                val results = threadResult[0]
-                val error = when {
-                    worker.isAlive -> "Timed out"
-                    threadError[0] != null -> threadError[0]
-                    results == null -> "No response"
-                    else -> null
-                }
+                if (!handle.cancelled) {
+                    onProviderDone(outcome)
+                    onUpdate(snapshot ?: emptyList())
 
-                if (results != null && error == null) {
-                    collected.addAll(results)
-                    AppLog.info("Search: ${provider.name} - ${results.size} result(s)")
-                } else {
-                    AppLog.warning("Search: ${provider.name} failed: $error")
-                }
-
-                onProviderDone(
-                    ProviderOutcome(
-                        providerName = provider.name,
-                        resultCount = results?.size ?: 0,
-                        error = error
-                    )
-                )
-
-                if (remaining.decrementAndGet() == 0) {
-                    onAllDone(deduplicate(collected.toList()))
+                    if (done) {
+                        onAllDone(snapshot ?: emptyList())
+                    }
                 }
             }.start()
         }
-    }
 
-    private fun deduplicate(results: List<TorrentSearchResult>): List<TorrentSearchResult> {
-        val seen = LinkedHashMap<String, TorrentSearchResult>()
-
-        for (result in results) {
-            val key = result.dedupeKey()
-            val existing = seen[key]
-
-            // Keep the copy with the higher seeder count; if that's a tie,
-            // keep whichever was found first.
-            if (existing == null || result.seeders > existing.seeders) {
-                seen[key] = result
-            }
-        }
-
-        return seen.values.toList()
+        return handle
     }
 }

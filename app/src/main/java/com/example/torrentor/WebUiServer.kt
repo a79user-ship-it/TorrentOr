@@ -448,6 +448,57 @@ object WebUiServer {
                 method == "POST" && path == "/api/online_search" ->
                     handleOnlineSearch(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
+                method == "GET" && path == "/api/online_search_poll" ->
+                    handleOnlineSearchPoll(parseQueryParam(query, "id"), parseQueryParam(query, "v"), output)
+
+                method == "POST" && path == "/api/online_search_cancel" ->
+                    handleOnlineSearchCancel(output)
+
+                method == "GET" && path == "/api/online_search_history" ->
+                    handleOnlineSearchHistory(context, output)
+
+                method == "POST" && path == "/api/online_search_history_remove" -> {
+                    SearchHistory.remove(
+                        context,
+                        extractJsonStringField(String(bodyBytes, StandardCharsets.UTF_8), "query") ?: ""
+                    )
+                    handleOnlineSearchHistory(context, output)
+                }
+
+                method == "POST" && path == "/api/online_search_history_clear" -> {
+                    SearchHistory.clear(context)
+                    handleOnlineSearchHistory(context, output)
+                }
+
+                method == "GET" && path == "/api/online_search_providers" ->
+                    handleOnlineSearchProviders(context, output)
+
+                method == "POST" && path == "/api/online_search_provider_set" ->
+                    handleOnlineSearchProviderSet(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/online_search_provider_test" ->
+                    handleOnlineSearchProviderTest(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                // Feature: Notification Settings - same NotificationSettings
+                // prefs the app's own Notifications screen uses.
+                method == "GET" && path == "/api/notification_settings" ->
+                    handleNotificationSettingsGet(context, output)
+
+                method == "GET" && path == "/api/backup" ->
+                    handleBackupDownload(context, output)
+
+                method == "POST" && path == "/api/restore_preview" ->
+                    handleRestorePreview(context, bodyBytes, output)
+
+                method == "POST" && path == "/api/restore" ->
+                    handleRestore(context, query, bodyBytes, output)
+
+                method == "POST" && path == "/api/queue_move" ->
+                    handleQueueMove(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
+                method == "POST" && path == "/api/notification_settings" ->
+                    handleNotificationSettingsSet(context, String(bodyBytes, StandardCharsets.UTF_8), output)
+
                 method == "POST" && path == "/api/online_search_resolve" ->
                     handleOnlineSearchResolve(context, String(bodyBytes, StandardCharsets.UTF_8), output)
 
@@ -796,6 +847,7 @@ object WebUiServer {
         // itself, and a later re-add of the exact same magnet is never
         // stuck hidden by a stale leftover entry.
         val stillPendingHashes = mutableSetOf<String>()
+        val queueRank = TorrentQueue.rankMap(context)
 
         if (raw.isNotBlank() && raw != "No torrents" && raw != "No active torrents") {
             var index = 1
@@ -877,6 +929,17 @@ object WebUiServer {
                     }
                 }
 
+                // queuePos backs the "Queue Order" sort (same saved order
+                // as the app's own To Top/Up/Down/To Bottom buttons).
+                val queuePos = run {
+                    val h = try {
+                        TorrentNative.getTorrentHash(index)
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    queueRank[TorrentQueue.normalize(h)] ?: 1000000
+                }
+
                 torrents.append("{")
                 torrents.append("\"index\":").append(index).append(",")
                 torrents.append("\"name\":").append(jsonString(name)).append(",")
@@ -889,6 +952,7 @@ object WebUiServer {
                 torrents.append("\"peers\":").append(jsonString(peers)).append(",")
                 torrents.append("\"eta\":").append(jsonString(eta)).append(",")
                 torrents.append("\"addedTimestamp\":").append(addedTimestamp).append(",")
+                torrents.append("\"queuePos\":").append(queuePos).append(",")
                 torrents.append("\"totalBytes\":").append(totalBytes)
                 torrents.append("}")
 
@@ -1063,26 +1127,291 @@ object WebUiServer {
     // own thread with its own timeout inside that function, so this
     // never blocks longer than that - the extra margin below is just a
     // safety net against a bug in that logic, not the normal case).
+    // ------------------------------------------------ notification settings
+
+    private fun handleNotificationSettingsGet(context: Context, output: OutputStream) {
+        val json = StringBuilder("{\"ok\":true,\"types\":[")
+        json.append(NotificationSettings.EVENT_TYPES.joinToString(",") { t ->
+            "{\"id\":" + jsonString(t.id) +
+                    ",\"label\":" + jsonString(t.label) +
+                    ",\"enabled\":" + NotificationSettings.isTypeEnabled(context, t.id) + "}"
+        })
+        json.append("],\"progress\":").append(NotificationSettings.progressEnabled(context))
+        json.append(",\"interval\":").append(NotificationSettings.intervalSeconds(context))
+        json.append(",\"intervals\":[")
+            .append(NotificationSettings.INTERVAL_CHOICES_SECONDS.joinToString(","))
+            .append("]")
+        json.append(",\"sound\":").append(NotificationSettings.soundEnabled(context))
+        json.append(",\"silent\":").append(NotificationSettings.silentMode(context))
+        json.append(",\"torrents\":[")
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val lines = if (status == "No torrents" || status == "No active torrents") {
+            emptyList()
+        } else {
+            status.lines().filter { it.isNotBlank() }
+        }
+
+        val items = ArrayList<String>()
+
+        for (i in lines.indices) {
+            val h = try {
+                TorrentNative.getTorrentHash(i + 1)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (h.isBlank() || h.startsWith("ERROR") || h == "Hash not ready" || h == "Invalid torrent") continue
+
+            val name = lines[i].split(" \u2022 ").firstOrNull()?.trim().orEmpty().ifBlank { "Torrent" }
+
+            items.add(
+                "{\"hash\":" + jsonString(h) +
+                        ",\"name\":" + jsonString(name) +
+                        ",\"enabled\":" + !NotificationSettings.isTorrentDisabled(context, h) + "}"
+            )
+        }
+
+        json.append(items.joinToString(","))
+        json.append("]}")
+        sendJson(output, json.toString())
+    }
+
+    // Body: {"field":"type:<id>"|"progress"|"interval"|"sound"|"silent"|"torrent:<hash>","value":"..."}
+    private fun handleNotificationSettingsSet(context: Context, body: String, output: OutputStream) {
+        val field = extractJsonStringField(body, "field") ?: ""
+        val value = extractJsonStringField(body, "value") ?: ""
+        val on = value == "true"
+
+        when {
+            field.startsWith("type:") -> {
+                val id = field.removePrefix("type:")
+
+                if (NotificationSettings.EVENT_TYPES.none { it.id == id }) {
+                    sendJson(output, "{\"ok\":false,\"error\":\"Unknown type\"}")
+                    return
+                }
+
+                NotificationSettings.setTypeEnabled(context, id, on)
+            }
+            field == "progress" -> NotificationSettings.setProgressEnabled(context, on)
+            field == "sound" -> NotificationSettings.setSoundEnabled(context, on)
+            field == "silent" -> NotificationSettings.setSilentMode(context, on)
+            field == "interval" -> {
+                val sec = value.toIntOrNull()
+
+                if (sec == null || sec !in NotificationSettings.INTERVAL_CHOICES_SECONDS) {
+                    sendJson(output, "{\"ok\":false,\"error\":\"Invalid interval\"}")
+                    return
+                }
+
+                NotificationSettings.setIntervalSeconds(context, sec)
+            }
+            field.startsWith("torrent:") ->
+                NotificationSettings.setTorrentDisabled(context, field.removePrefix("torrent:"), !on)
+            else -> {
+                sendJson(output, "{\"ok\":false,\"error\":\"Unknown field\"}")
+                return
+            }
+        }
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    // One running (or last finished) web search. The browser starts it with
+    // POST /api/online_search and then polls /api/online_search_poll, so
+    // results show up as each provider answers instead of all at the end.
+    private class WebSearchJob(val id: String, val query: String) {
+        @Volatile var handle: OnlineSearchManager.SearchHandle? = null
+        @Volatile var results: List<TorrentSearchResult> = emptyList()
+        @Volatile var done = false
+        @Volatile var cancelled = false
+        @Volatile var version = 0
+        @Volatile var total = 0
+        val outcomes = java.util.concurrent.CopyOnWriteArrayList<OnlineSearchManager.ProviderOutcome>()
+    }
+
+    @Volatile
+    private var webSearchJob: WebSearchJob? = null
+
+    private fun searchResultJson(r: TorrentSearchResult): String {
+        val json = StringBuilder("{")
+        json.append("\"name\":").append(jsonString(r.name)).append(",")
+        json.append("\"sourceName\":").append(jsonString(r.sourceName)).append(",")
+        json.append("\"sizeBytes\":").append(r.sizeBytes).append(",")
+        json.append("\"sizeText\":").append(jsonString(r.sizeText)).append(",")
+        json.append("\"seeders\":").append(r.seeders).append(",")
+        json.append("\"leechers\":").append(r.leechers).append(",")
+        json.append("\"publicationDate\":").append(jsonString(r.publicationDate)).append(",")
+        json.append("\"dateMillis\":").append(r.dateMillis()).append(",")
+        json.append("\"category\":").append(jsonString(r.category)).append(",")
+        json.append("\"fileType\":").append(jsonString(r.fileType())).append(",")
+        json.append("\"infoHash\":").append(jsonString(r.normalizedHash())).append(",")
+        json.append("\"magnetUri\":").append(jsonString(r.magnetUri)).append(",")
+        json.append("\"torrentUrl\":").append(jsonString(r.torrentUrl)).append(",")
+        json.append("\"resultPageUrl\":").append(jsonString(r.resultPageUrl)).append(",")
+        json.append("\"alsoFoundOn\":[")
+        json.append(r.alsoFoundOn.joinToString(",") { jsonString(it) })
+        json.append("]}")
+        return json.toString()
+    }
+
     private fun handleOnlineSearch(context: Context, body: String, output: OutputStream) {
         val query = extractJsonStringField(body, "query") ?: ""
 
         if (query.isBlank()) {
-            sendJson(output, "{\"ok\":true,\"results\":[]}")
+            sendJson(output, "{\"ok\":false,\"error\":\"Empty query\"}")
             return
         }
 
-        val latch = CountDownLatch(1)
-        var results: List<TorrentSearchResult> = emptyList()
+        // A new search replaces any search still running.
+        webSearchJob?.let {
+            it.cancelled = true
+            it.handle?.cancel()
+        }
 
-        OnlineSearchManager.search(
+        val job = WebSearchJob(System.currentTimeMillis().toString(), query.trim())
+        job.total = OnlineSearchManager.allProviders(context)
+            .count { OnlineSearchManager.isProviderEnabled(context, it.name) }
+        webSearchJob = job
+
+        SearchHistory.add(context, query)
+
+        if (job.total == 0) {
+            job.done = true
+            sendJson(output, "{\"ok\":true,\"jobId\":" + jsonString(job.id) + "}")
+            return
+        }
+
+        job.handle = OnlineSearchManager.search(
             context,
             query,
-            onProviderDone = {},
-            onAllDone = { found ->
-                results = found
-                latch.countDown()
+            onProviderDone = { outcome -> job.outcomes.add(outcome) },
+            onUpdate = { partial ->
+                job.results = partial
+                job.version = job.version + 1
+            },
+            onAllDone = { combined ->
+                job.results = combined
+                job.version = job.version + 1
+                job.done = true
             }
         )
+
+        sendJson(output, "{\"ok\":true,\"jobId\":" + jsonString(job.id) + "}")
+    }
+
+    private fun handleOnlineSearchPoll(id: String?, since: String?, output: OutputStream) {
+        val job = webSearchJob
+
+        if (job == null || job.id != id) {
+            sendJson(output, "{\"ok\":true,\"stale\":true,\"done\":true}")
+            return
+        }
+
+        val sinceVersion = since?.toIntOrNull() ?: -1
+        val version = job.version
+        val json = StringBuilder("{\"ok\":true,\"done\":")
+        json.append(job.done || job.cancelled)
+        json.append(",\"cancelled\":").append(job.cancelled)
+        json.append(",\"total\":").append(job.total)
+        json.append(",\"version\":").append(version)
+        json.append(",\"providers\":[")
+        json.append(job.outcomes.joinToString(",") { o ->
+            "{\"name\":" + jsonString(o.providerName) +
+                    ",\"count\":" + o.resultCount +
+                    ",\"ms\":" + o.elapsedMs +
+                    ",\"error\":" + (if (o.error == null) "null" else jsonString(o.error)) + "}"
+        })
+        json.append("]")
+
+        if (version != sinceVersion) {
+            json.append(",\"results\":[")
+            json.append(job.results.joinToString(",") { searchResultJson(it) })
+            json.append("]")
+        }
+
+        json.append("}")
+        sendJson(output, json.toString())
+    }
+
+    private fun handleOnlineSearchCancel(output: OutputStream) {
+        webSearchJob?.let {
+            it.cancelled = true
+            it.handle?.cancel()
+        }
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleOnlineSearchHistory(context: Context, output: OutputStream) {
+        val list = SearchHistory.load(context)
+        sendJson(
+            output,
+            "{\"ok\":true,\"suggestions\":" + SearchHistory.suggestionsEnabled(context) +
+                    ",\"history\":[" + list.joinToString(",") { jsonString(it) } + "]}"
+        )
+    }
+
+    private fun providerJson(context: Context, name: String, custom: Boolean): String {
+        val st = OnlineSearchManager.loadStats(context, name)
+        return "{\"name\":" + jsonString(name) +
+                ",\"custom\":" + custom +
+                ",\"enabled\":" + OnlineSearchManager.isProviderEnabled(context, name) +
+                ",\"favorite\":" + OnlineSearchManager.isFavorite(context, name) +
+                ",\"unavailable\":" + st.unavailable +
+                ",\"tested\":" + (st.lastAttemptMs > 0L) +
+                ",\"lastResponseMs\":" + st.lastResponseMs +
+                ",\"lastSuccessMs\":" + st.lastSuccessMs +
+                ",\"lastError\":" + jsonString(st.lastError) + "}"
+    }
+
+    private fun handleOnlineSearchProviders(context: Context, output: OutputStream) {
+        val builtin = OnlineSearchManager.BUILTIN_PROVIDERS.map { it.name }
+        val custom = OnlineSearchManager.loadCustomProviders(context).map { it.name }
+        val all = builtin.map { Pair(it, false) } + custom.map { Pair(it, true) }
+
+        sendJson(
+            output,
+            "{\"ok\":true,\"providers\":[" +
+                    all.joinToString(",") { providerJson(context, it.first, it.second) } + "]}"
+        )
+    }
+
+    // Body: {"name":"...","field":"enabled"|"favorite","value":"true"|"false"}
+    private fun handleOnlineSearchProviderSet(context: Context, body: String, output: OutputStream) {
+        val name = extractJsonStringField(body, "name") ?: ""
+        val field = extractJsonStringField(body, "field") ?: ""
+        val value = (extractJsonStringField(body, "value") ?: "") == "true"
+
+        val known = OnlineSearchManager.allProviders(context).any { it.name == name }
+
+        if (!known) {
+            sendJson(output, "{\"ok\":false,\"error\":\"Unknown provider\"}")
+            return
+        }
+
+        when (field) {
+            "enabled" -> OnlineSearchManager.setProviderEnabled(context, name, value)
+            "favorite" -> OnlineSearchManager.setFavorite(context, name, value)
+            else -> {
+                sendJson(output, "{\"ok\":false,\"error\":\"Unknown field\"}")
+                return
+            }
+        }
+
+        sendJson(output, "{\"ok\":true}")
+    }
+
+    private fun handleOnlineSearchProviderTest(context: Context, body: String, output: OutputStream) {
+        val name = extractJsonStringField(body, "name") ?: ""
+        val latch = CountDownLatch(1)
+
+        OnlineSearchManager.testProvider(context, name) { latch.countDown() }
 
         val timeoutSeconds = try {
             OnlineSearchManager.loadTimeoutSeconds(context)
@@ -1090,33 +1419,10 @@ object WebUiServer {
             12
         }
 
-        latch.await((timeoutSeconds + 15).toLong(), TimeUnit.SECONDS)
+        latch.await((timeoutSeconds + 10).toLong(), TimeUnit.SECONDS)
 
-        val json = StringBuilder("[")
-        var first = true
-
-        for (r in results) {
-            if (!first) json.append(",")
-            first = false
-
-            json.append("{")
-            json.append("\"name\":").append(jsonString(r.name)).append(",")
-            json.append("\"sourceName\":").append(jsonString(r.sourceName)).append(",")
-            json.append("\"sizeBytes\":").append(r.sizeBytes).append(",")
-            json.append("\"sizeText\":").append(jsonString(r.sizeText)).append(",")
-            json.append("\"seeders\":").append(r.seeders).append(",")
-            json.append("\"leechers\":").append(r.leechers).append(",")
-            json.append("\"publicationDate\":").append(jsonString(r.publicationDate)).append(",")
-            json.append("\"category\":").append(jsonString(r.category)).append(",")
-            json.append("\"infoHash\":").append(jsonString(r.infoHash)).append(",")
-            json.append("\"magnetUri\":").append(jsonString(r.magnetUri)).append(",")
-            json.append("\"torrentUrl\":").append(jsonString(r.torrentUrl)).append(",")
-            json.append("\"resultPageUrl\":").append(jsonString(r.resultPageUrl))
-            json.append("}")
-        }
-
-        json.append("]")
-        sendJson(output, "{\"ok\":true,\"results\":${json}}")
+        val custom = OnlineSearchManager.loadCustomProviders(context).any { it.name == name }
+        sendJson(output, "{\"ok\":true,\"provider\":" + providerJson(context, name, custom) + "}")
     }
 
     // Feature: resolves one online-search result to either a magnet
@@ -2052,16 +2358,52 @@ object WebUiServer {
             return
         }
 
-        val pieceInfo = try {
-            TorrentNative.getTorrentPieces(torrentIndex)
-        } catch (e: Throwable) {
-            "Could not load pieces"
-        }
-
         val pieceSize = try {
             TorrentNative.getTorrentPieceSize(torrentIndex)
         } catch (e: Throwable) {
             ""
+        }
+
+        // Four-state map (downloaded / downloading / missing / skipped),
+        // drawn as a coloured grid by the page. Falls back to the plain
+        // text map if the engine can't give states yet.
+        val stateText = try {
+            TorrentNative.getTorrentPieceStates(torrentIndex)
+        } catch (e: Throwable) {
+            ""
+        }
+
+        if (stateText.startsWith("OK|")) {
+            val newline = stateText.indexOf('\n')
+            val header = stateText.substring(0, if (newline < 0) stateText.length else newline).split("|")
+            val states = if (newline < 0) "" else stateText.substring(newline + 1)
+            val total = header.getOrNull(1)?.toIntOrNull() ?: states.length
+            val completed = header.getOrNull(2)?.toIntOrNull() ?: 0
+            val sizeBytes = header.getOrNull(3) ?: "?"
+            val percent = if (total > 0) (completed.toLong() * 100L / total).toInt() else 0
+
+            val sizeLong = sizeBytes.toLongOrNull() ?: 0L
+            val sizeReadable = when {
+                sizeLong >= 1024L * 1024L * 1024L -> String.format("%.2f GB", sizeLong / (1024.0 * 1024.0 * 1024.0))
+                sizeLong >= 1024L * 1024L -> String.format("%.2f MB", sizeLong / (1024.0 * 1024.0))
+                sizeLong >= 1024L -> String.format("%.2f KB", sizeLong / 1024.0)
+                else -> "$sizeLong B"
+            }
+
+            var text = "Pieces\n\nCompleted: $completed / $total\nProgress: $percent%\nPiece size: $sizeReadable"
+            if (states.length < total) text += "\n\nShowing first ${states.length} of $total pieces."
+
+            sendJson(
+                output,
+                "{\"ok\":true,\"text\":${jsonString(text)},\"states\":${jsonString(states)}}"
+            )
+            return
+        }
+
+        val pieceInfo = try {
+            TorrentNative.getTorrentPieces(torrentIndex)
+        } catch (e: Throwable) {
+            "Could not load pieces"
         }
 
         val text = if (pieceSize.isBlank()) pieceInfo else "$pieceInfo\n\n$pieceSize"
@@ -2257,6 +2599,157 @@ object WebUiServer {
 
     // Feature: Force Recheck / Force Reannounce - same native calls as
     // MainActivity's own buttons (both fire-and-forget, no return value).
+    // Move to Top/Up/Down/Bottom - same TorrentQueue the app's own buttons
+    // use. Body: {"dir":"top|up|down|bottom","selected":"1,2","visible":"1,2,3"}
+    // (native 1-based indexes, resolved to hashes here).
+    // ---- Backup & Restore (same BackupManager as the app's own screen) ----
+
+    private fun webAppVersionLabel(context: Context): String {
+        return try {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION") info.versionCode.toLong()
+            }
+            "${info.versionName} ($code)"
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun handleBackupDownload(context: Context, output: OutputStream) {
+        try {
+            try {
+                TorrentNative.saveResumeData(2500)
+            } catch (_: Throwable) {
+            }
+
+            val bos = java.io.ByteArrayOutputStream()
+            BackupManager.createBackup(context, bos, webAppVersionLabel(context))
+            val bytes = bos.toByteArray()
+
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                .format(java.util.Date())
+
+            val header = "HTTP/1.1 200 OK\r\n" +
+                    "Content-Type: application/zip\r\n" +
+                    "Content-Disposition: attachment; filename=\"TorrentOr-backup-$stamp.zip\"\r\n" +
+                    "Content-Length: ${bytes.size}\r\n" +
+                    "Cache-Control: no-store\r\n" +
+                    "Connection: close\r\n\r\n"
+            output.write(header.toByteArray(StandardCharsets.UTF_8))
+            output.write(bytes)
+            output.flush()
+        } catch (e: Throwable) {
+            sendServerError(output, e.message ?: "Backup failed")
+        }
+    }
+
+    private fun handleRestorePreview(context: Context, body: ByteArray, output: OutputStream) {
+        try {
+            if (body.isEmpty()) {
+                sendJson(output, "{\"ok\":false,\"error\":\"No file received\"}")
+                return
+            }
+
+            val p = BackupManager.readPreview(context, java.io.ByteArrayInputStream(body))
+
+            sendJson(
+                output,
+                "{\"ok\":true," +
+                    "\"createdAt\":${jsonString(BackupManager.formatDate(p.createdAt))}," +
+                    "\"appVersion\":${jsonString(p.appVersion)}," +
+                    "\"torrents\":${p.torrentCount}," +
+                    "\"resume\":${p.resumeCount}," +
+                    "\"settings\":${p.settingsFileCount}}"
+            )
+        } catch (e: BackupManager.BackupException) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Invalid backup")}}")
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Could not read backup")}}")
+        }
+    }
+
+    private fun handleRestore(context: Context, query: String, body: ByteArray, output: OutputStream) {
+        try {
+            if (body.isEmpty()) {
+                sendJson(output, "{\"ok\":false,\"error\":\"No file received\"}")
+                return
+            }
+
+            val replace = query.split("&").any { it == "mode=replace" }
+
+            val r = BackupManager.restore(context, java.io.ByteArrayInputStream(body), replace)
+
+            val intent = Intent(context, TorrentService::class.java)
+            intent.putExtra("ACTION", "RESTORE_RELOAD")
+            intent.putExtra("REPLACE", replace)
+            startTorrentService(context, intent)
+
+            sendJson(
+                output,
+                "{\"ok\":true," +
+                    "\"replace\":$replace," +
+                    "\"inBackup\":${r.torrentsInBackup}," +
+                    "\"added\":${r.torrentsAdded}," +
+                    "\"alreadyPresent\":${r.torrentsAlreadyPresent}," +
+                    "\"skipped\":${r.torrentsSkipped}," +
+                    "\"resume\":${r.resumeFiles}," +
+                    "\"settings\":${r.settingsFiles}}"
+            )
+        } catch (e: BackupManager.BackupException) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Restore failed")}}")
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "Restore failed")}}")
+        }
+    }
+
+    private fun handleQueueMove(context: Context, body: String, output: OutputStream) {
+        val dir = extractJsonStringField(body, "dir") ?: ""
+
+        fun hashes(field: String): List<String> =
+            (extractJsonStringField(body, field) ?: "")
+                .split(",")
+                .mapNotNull { it.trim().toIntOrNull() }
+                .map {
+                    try {
+                        TorrentNative.getTorrentHash(it)
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                }
+
+        try {
+            val raw = TorrentNative.getDetailedStatus()
+            val count = if (raw.isBlank() || raw == "No torrents" || raw == "Engine not ready") {
+                0
+            } else {
+                raw.lines().count { it.isNotBlank() }
+            }
+
+            val all = (1..count).map {
+                try {
+                    TorrentNative.getTorrentHash(it)
+                } catch (_: Throwable) {
+                    ""
+                }
+            }
+
+            val changed = TorrentQueue.move(
+                context,
+                dir,
+                all,
+                hashes("selected").toSet(),
+                hashes("visible").toSet()
+            )
+
+            sendJson(output, "{\"ok\":true,\"changed\":$changed}")
+        } catch (e: Throwable) {
+            sendJson(output, "{\"ok\":false,\"error\":${jsonString(e.message ?: "failed")}}")
+        }
+    }
+
     private fun handleForceAction(kind: String, torrentIndex: Int?, output: OutputStream) {
         if (torrentIndex == null) {
             sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
@@ -2311,6 +2804,7 @@ object WebUiServer {
     // getTorrentFileSwarm themselves return for anything not ready yet.
     private fun buildFilesJsonArrayWithProgress(context: Context, torrentIndex: Int, fileData: String): String {
         val progressByIndex = mutableMapOf<Int, Int>()
+        val downloadedByIndex = mutableMapOf<Int, Long>()
 
         val progressData = try {
             TorrentNative.getTorrentFileProgress(torrentIndex)
@@ -2328,9 +2822,18 @@ object WebUiServer {
             val percent = parts[4].toIntOrNull() ?: continue
 
             progressByIndex[fileIndex] = percent
+            downloadedByIndex[fileIndex] = parts[2].toLongOrNull() ?: 0L
         }
 
-        data class Swarm(val seeds: Int, val peers: Int, val totalSeeds: Int, val totalPeers: Int)
+        data class Swarm(
+            val seeds: Int,
+            val peers: Int,
+            val totalSeeds: Int,
+            val totalPeers: Int,
+            val availability: Int,
+            val copiesMilli: Int,
+            val uploading: Int
+        )
         val swarmByIndex = mutableMapOf<Int, Swarm>()
 
         val swarmData = try {
@@ -2342,7 +2845,7 @@ object WebUiServer {
         for (line in swarmData.split("\n")) {
             if (line.isBlank()) continue
 
-            val parts = line.split("|", limit = 6)
+            val parts = line.split("|", limit = 8)
             if (parts.size < 6) continue
 
             val fileIndex = parts[0].toIntOrNull() ?: continue
@@ -2350,8 +2853,12 @@ object WebUiServer {
             val peers = parts[2].toIntOrNull() ?: 0
             val totalSeeds = parts[3].toIntOrNull() ?: 0
             val totalPeers = parts[4].toIntOrNull() ?: 0
+            val availability = parts.getOrNull(6)?.toIntOrNull() ?: -1
+            val copiesMilli = parts.getOrNull(7)?.toIntOrNull() ?: -1
 
-            swarmByIndex[fileIndex] = Swarm(seeds, peers, totalSeeds, totalPeers)
+            val uploading = parts[5].toIntOrNull() ?: 0
+
+            swarmByIndex[fileIndex] = Swarm(seeds, peers, totalSeeds, totalPeers, availability, copiesMilli, uploading)
         }
 
         val savedSelection = getSavedFileSelectionForTorrent(context, torrentIndex)
@@ -2379,10 +2886,14 @@ object WebUiServer {
                 .append(",\"name\":").append(jsonString(name))
                 .append(",\"size\":").append(size)
                 .append(",\"percent\":").append(percent)
+                .append(",\"downloaded\":").append(downloadedByIndex[index] ?: 0L)
+                .append(",\"uploading\":").append(swarm?.uploading ?: 0)
                 .append(",\"seeds\":").append(swarm?.seeds ?: 0)
                 .append(",\"peers\":").append(swarm?.peers ?: 0)
                 .append(",\"totalSeeds\":").append(swarm?.totalSeeds ?: 0)
                 .append(",\"totalPeers\":").append(swarm?.totalPeers ?: 0)
+                .append(",\"availability\":").append(swarm?.availability ?: -1)
+                .append(",\"copiesMilli\":").append(swarm?.copiesMilli ?: -1)
                 .append(",\"selected\":").append(selected)
                 .append("}")
         }
@@ -3038,7 +3549,7 @@ object WebUiServer {
   .actions button { padding: 8px 12px; font-size: 13px; }
   .empty { color: var(--text-dim); padding: 32px 0; text-align: center; }
   .status { font-size: 12px; color: var(--text-dim); margin-top: 24px; text-align: center; }
-  #uploadPanel { display: none; }
+  #uploadPanel { display: none; z-index: 40; }
   #uploadFileList label { display: block; font-size: 14px; padding: 4px 0; }
   pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -3118,6 +3629,8 @@ object WebUiServer {
     <button id="globalStatsBtn" class="secondary">Global Statistics</button>
     <button id="storageBtn" class="secondary">Storage Space</button>
     <button id="executionLogBtn" class="secondary">Execution Log</button>
+    <button id="notificationsBtn" class="secondary">Notifications</button>
+    <button id="backupBtn" class="secondary">Backup &amp; Restore</button>
     <button id="onlineSearchBtn" class="secondary">Online Search</button>
     <button id="rssBtn" class="secondary">RSS Feeds</button>
     <button id="saveFolderBtn" class="secondary">Save Folder</button>
@@ -3206,6 +3719,7 @@ object WebUiServer {
     <span id="sortModeIcon" class="rowIcon"></span>
     <select id="sortModeSelect">
       <option value="None">Sort: None</option>
+      <option value="Queue Order">Sort: Queue Order</option>
       <option value="Name (A-Z)">Sort: Name (A-Z)</option>
       <option value="Name (Z-A)">Sort: Name (Z-A)</option>
       <option value="Size (Largest First)">Sort: Size (Largest First)</option>
@@ -3240,6 +3754,47 @@ object WebUiServer {
     </div>
   </div>
 
+  <!-- Feature: Notification Settings - same options as the app's own
+       Notifications screen (NotificationSettings). -->
+  <div class="overlayPanel" id="notificationsPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Notification Settings</div>
+      <button class="secondary" onclick="closeNotifications()">Close</button>
+    </div>
+    <div class="meta">The ongoing "TorrentOr is running" notification is not affected by anything here. These notifications appear on the phone.</div>
+    <div id="notificationsBody"></div>
+  </div>
+
+  <!-- Backup & Restore - same ZIP format and logic as the app's own
+       Backup & Restore screen (BackupManager). -->
+  <div class="overlayPanel" id="backupPanel" style="display:none;">
+    <div class="overlayHeader">
+      <div class="name">Backup &amp; Restore</div>
+      <button class="secondary" onclick="closeBackup()">Close</button>
+    </div>
+    <div class="meta">A backup is one .zip with your torrent list, per-torrent settings, all app settings and libtorrent progress data. Downloaded files are not included. A backup made here can be restored in the app and the other way round.</div>
+    <div class="row">
+      <button id="backupCreateBtn">Create Backup (download)</button>
+    </div>
+    <div class="meta" style="margin-top:14px;">Restore from a backup file:</div>
+    <div class="row">
+      <input type="file" id="backupFileInput" accept=".zip,application/zip">
+    </div>
+    <div id="backupPreview" class="meta"></div>
+    <div id="backupRestoreControls" style="display:none;">
+      <div class="row">
+        <label><input type="radio" name="backupMode" value="merge" checked> Merge - add missing torrents and settings, keep what is here</label>
+      </div>
+      <div class="row">
+        <label><input type="radio" name="backupMode" value="replace"> Replace - make this device match the backup</label>
+      </div>
+      <div class="row">
+        <button id="backupRestoreBtn">Restore</button>
+      </div>
+    </div>
+    <div id="backupStatus" class="meta"></div>
+  </div>
+
   <!-- Feature: Online Search - same multi-provider search as the app's
        own Online Search screen (OnlineSearchManager), separate from the
        "already added" search above. Hidden until the Online Search
@@ -3251,21 +3806,58 @@ object WebUiServer {
     </div>
     <div class="meta">Searches multiple providers. This is separate from the search box above, which only searches torrents already in TorrentOr.</div>
     <div class="row">
-      <input type="text" id="onlineSearchInput" placeholder="Search online, e.g. ubuntu 24.04">
+      <input type="text" id="onlineSearchInput" list="osSuggestions" autocomplete="off" placeholder="Search online, e.g. ubuntu 24.04">
+      <datalist id="osSuggestions"></datalist>
       <button id="onlineSearchGoBtn">Search</button>
+      <button id="onlineSearchCancelBtn" class="secondary" disabled>Cancel</button>
     </div>
     <div class="row">
       <select id="onlineSearchSortSelect">
-        <option value="Seeders">Sort: Seeders</option>
-        <option value="Name">Sort: Name</option>
-        <option value="Size">Sort: Size</option>
+        <option value="Relevance">Sort: Relevance</option>
+        <option value="Seeders" selected>Sort: Seeders</option>
         <option value="Leechers">Sort: Leechers</option>
-        <option value="Age">Sort: Age</option>
+        <option value="Best ratio">Sort: Best ratio</option>
+        <option value="Largest">Sort: Largest</option>
+        <option value="Smallest">Sort: Smallest</option>
+        <option value="Newest">Sort: Newest</option>
+        <option value="Oldest">Sort: Oldest</option>
+        <option value="Provider">Sort: Provider</option>
+        <option value="Name">Sort: Name</option>
       </select>
-      <select id="onlineSearchProviderSelect">
-        <option value="All">Provider: All</option>
-      </select>
+      <button id="osFiltersBtn" class="secondary">Filters</button>
+      <button id="osHistoryBtn" class="secondary">History</button>
+      <button id="osProvidersBtn" class="secondary" data-icon="settings">Providers</button>
     </div>
+    <div id="osFiltersBox" class="card" style="display:none;">
+      <div class="meta">Empty = no limit. Results with an unknown value for a field are not hidden by that field's limit.</div>
+      <div class="row">
+        <input type="number" min="0" id="osMinSeeders" placeholder="Min seeders">
+        <input type="number" min="0" id="osMaxLeechers" placeholder="Max leechers">
+      </div>
+      <div class="row">
+        <input type="number" min="0" id="osMinSize" placeholder="Min size (MB)">
+        <input type="number" min="0" id="osMaxSize" placeholder="Max size (MB)">
+      </div>
+      <div class="row">
+        <input type="number" min="0" id="osMinHealth" placeholder="Min availability (seeders + leechers)">
+      </div>
+      <div class="row">
+        <select id="osCategory"><option value="">Category: any</option></select>
+        <select id="osFileType">
+          <option value="">File type: any</option>
+          <option>Video</option><option>Audio</option><option>Books</option>
+          <option>Games</option><option>Software</option><option>Other</option>
+        </select>
+      </div>
+      <div class="meta">Providers (none checked = all):</div>
+      <div id="osProviderChecks"></div>
+      <div class="actions">
+        <button class="secondary" id="osFavOnlyBtn">Favorites only</button>
+        <button class="secondary" id="osResetFiltersBtn">Reset filters</button>
+      </div>
+    </div>
+    <div id="osHistoryBox" class="card" style="display:none;"></div>
+    <div id="osProvidersBox" class="card" style="display:none;"></div>
     <div class="meta" id="onlineSearchStatus">Enter a search and tap Search.</div>
     <div id="onlineSearchResults"></div>
   </div>
@@ -3275,13 +3867,17 @@ object WebUiServer {
        Resume/Remove Selected), looping the same single-torrent calls
        the app itself loops over selectedTorrents. Hidden until Select
        Torrents is turned on. -->
-  <div class="row" id="selectActionsRow" style="display:none;flex-wrap:wrap;">
+  <div class="row" id="selectActionsRow" style="display:none;flex-wrap:wrap;position:sticky;top:0;z-index:25;background:var(--bg);padding:8px 0;">
     <button class="secondary" data-icon="selectall" onclick="selectAllVisibleTorrents()">Select All</button>
     <button class="secondary" data-icon="selectnone" onclick="selectNoneTorrents()">Select None</button>
     <button class="secondary" data-icon="recheck" onclick="batchAction('recheck')">Force Recheck Selected</button>
     <button class="secondary" data-icon="reannounce" onclick="batchAction('reannounce')">Force Reannounce Selected</button>
     <button class="secondary" data-icon="pause" onclick="batchAction('pause')">Pause Selected</button>
     <button class="secondary" data-icon="play" onclick="batchAction('resume')">Resume Selected</button>
+    <button class="secondary" onclick="queueMove('top')">To Top</button>
+    <button class="secondary" onclick="queueMove('up')">Up</button>
+    <button class="secondary" onclick="queueMove('down')">Down</button>
+    <button class="secondary" onclick="queueMove('bottom')">To Bottom</button>
     <button class="danger" data-icon="trash" onclick="batchRemove(false)">Remove Selected</button>
     <button class="danger" data-icon="trash" onclick="batchRemove(true)">Remove Selected + Files</button>
   </div>
@@ -3328,7 +3924,7 @@ object WebUiServer {
   <div class="status" id="statusLine">Loading...</div>
 
 <script>
-const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#FFCA28",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#FFCA28",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#FFCA28","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFCA28",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#FFCA28",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#FFCA28",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#FFCA28",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#FFCA28",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#FFCA28",null,0],["M17 2v4",null,"#FFCA28",1.6],["M15 4h4",null,"#FFCA28",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]]};
+const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#4DA3FF",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#4DA3FF",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"settings":[["M12 2.5v3",null,"#90A4AE",3],["M12 18.5v3",null,"#90A4AE",3],["M2.5 12h3",null,"#90A4AE",3],["M18.5 12h3",null,"#90A4AE",3],["M5.3 5.3l2.1 2.1",null,"#90A4AE",3],["M16.6 16.6l2.1 2.1",null,"#90A4AE",3],["M18.7 5.3l-2.1 2.1",null,"#90A4AE",3],["M7.4 16.6l-2.1 2.1",null,"#90A4AE",3],["M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0z",null,"#78909C",3],["M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z","#FFA726",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#4DA3FF","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#4DA3FF",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#4DA3FF",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#4DA3FF",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#4DA3FF",null,0],["M17 2v4",null,"#4DA3FF",1.6],["M15 4h4",null,"#4DA3FF",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]]};
 function iconSvg(name) {
   const layers = ICONS[name];
   if (!layers) return '';
@@ -3349,6 +3945,8 @@ function setBtnLabel(btn, iconName, label) {
     globalStatsBtn: ['statistics', 'Global Statistics'],
     storageBtn: ['storage', 'Storage Space'],
     executionLogBtn: ['log', 'Execution Log'],
+    notificationsBtn: ['comment', 'Notifications'],
+    backupBtn: ['save', 'Backup & Restore'],
     onlineSearchBtn: ['search', 'Online Search'],
     rssBtn: ['rss', 'RSS Feeds'],
     saveFolderBtn: ['folder', 'Save Folder']
@@ -3529,7 +4127,7 @@ function sampleGlobalSpeed(torrents) {
 // SpeedGraphView.onDraw: rounded dark panel (#1C1F26), a light grid
 // (#2A2E37), and two gradient-filled lines, the second series drawn
 // first so the (usually larger) first series' line/fill sits on top.
-function drawLineAreaGraph(canvasId, seriesA, seriesB) {
+function drawLineAreaGraph(canvasId, seriesA, seriesB, colorA, colorB) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return;
 
@@ -3568,8 +4166,8 @@ function drawLineAreaGraph(canvasId, seriesA, seriesB) {
   const maxValue = Math.max(1, ...seriesA, ...seriesB);
 
   // seriesB (upload / peers) drawn first, seriesA (download / seeds) on top.
-  drawGraphSeries(ctx, seriesB, maxValue, w, h, '#B794F6');
-  drawGraphSeries(ctx, seriesA, maxValue, w, h, '#4FD1C5');
+  drawGraphSeries(ctx, seriesB, maxValue, w, h, colorB || '#B794F6');
+  drawGraphSeries(ctx, seriesA, maxValue, w, h, colorA || '#4FD1C5');
 }
 
 function roundRectPath(ctx, x, y, w, h, r) {
@@ -3647,7 +4245,7 @@ function sampleSwarmHealth(torrents, torrentIndex) {
 }
 
 function drawSwarmHealthGraph() {
-  drawLineAreaGraph('swarmHealthCanvas', swarmHealthHistory.seeds, swarmHealthHistory.peers);
+  drawLineAreaGraph('swarmHealthCanvas', swarmHealthHistory.seeds, swarmHealthHistory.peers, '#4CD964', '#4DA3FF');
 }
 
 // Keeps the open file browser's per-file percent/progress bars moving
@@ -3687,18 +4285,21 @@ async function refreshFilesPanelProgress() {
       const textEl = document.getElementById('ptext_' + rowId);
       const barEl = document.getElementById('pbar_' + rowId);
 
-      if (textEl) textEl.textContent = percent + '%';
+      // One sample per file per tick, shared by whichever tab is showing.
+      const info = fileInfoParts(openFilesIndex, f, true);
+
+      if (textEl) textEl.textContent = info.progress;
       if (barEl) barEl.style.width = percent + '%';
+
+      const availEl = document.getElementById('pavail_' + rowId);
+      if (availEl) availEl.textContent = info.swarm;
 
       // Priority tab's own Seeds/Peers text, if that tab happens to be
       // open right now - checkboxes are never touched here, only this
       // text, so an in-progress selection the user hasn't applied yet
       // is never disturbed by this 1-second poll.
       const swarmEl = document.getElementById('pswarm_' + rowId);
-      if (swarmEl) {
-        swarmEl.textContent = 'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
-          '  Peers ' + (Number(f.peers) || 0) + ' (' + (Number(f.totalPeers) || 0) + ')';
-      }
+      if (swarmEl) swarmEl.textContent = info.progress + '\n' + info.swarm;
     });
   } catch (e) {
     // Transient hiccup - leave the panel as it was, same as the main list.
@@ -3761,6 +4362,7 @@ function sortTorrents(torrents) {
   function byStatus(a, b) { return (a.state || '').toLowerCase().localeCompare((b.state || '').toLowerCase()); }
 
   switch (sortMode) {
+    case 'Queue Order': return list.sort(function(a, b) { return (a.queuePos === undefined ? 1000000 : a.queuePos) - (b.queuePos === undefined ? 1000000 : b.queuePos); });
     case 'Name (A-Z)': return list.sort(byName);
     case 'Name (Z-A)': return list.sort(function(a, b) { return byName(b, a); });
     case 'Size (Largest First)': return list.sort(function(a, b) { return bySize(b, a); });
@@ -3791,6 +4393,9 @@ document.getElementById('sortModeSelect').addEventListener('change', function(e)
 
 function render(torrents) {
   lastTorrents = torrents;
+  // Don't rebuild the cards in the middle of a long-press, or the touch
+  // events would be lost with the old card (see enterSelectModeWith below).
+  if (longPressActive) return;
   const list = document.getElementById('list');
   const visible = sortTorrents(torrents.filter(torrentMatchesFilter));
 
@@ -3810,7 +4415,7 @@ function render(torrents) {
           ' onchange="toggleTorrentSelected(' + t.index + ', this.checked)"> Select</label>'
       : '';
 
-    return '<div class="card">' +
+    return '<div class="card" data-tindex="' + t.index + '">' +
       checkbox +
       '<div class="name">' + escapeHtml(t.name) + '</div>' +
       '<div class="meta">' + escapeHtml(t.state) + ' &middot; ' + t.percent + '% &middot; &darr; ' +
@@ -3874,6 +4479,48 @@ function selectNoneTorrents() {
   render(lastTorrents);
 }
 
+// Long-press a torrent card to start selecting (the Select Torrents
+// button does the same without a torrent ticked). The selection bar
+// stays pinned at the top of the page while scrolling.
+var longPressActive = false;
+var longPressTimer = null;
+
+function enterSelectModeWith(index) {
+  selectMode = true;
+  selectedTorrents = new Set([index]);
+  setBtnLabel(document.getElementById('selectModeBtn'), 'select', 'Exit Select Mode');
+  document.getElementById('selectActionsRow').style.display = 'flex';
+  render(lastTorrents);
+}
+
+(function() {
+  const listEl = document.getElementById('list');
+
+  function cancelPress() {
+    longPressActive = false;
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  }
+
+  listEl.addEventListener('touchstart', function(e) {
+    if (selectMode) return;
+    if (e.target.closest('button, a, input, video, audio')) return;
+    const card = e.target.closest('.card[data-tindex]');
+    if (!card) return;
+
+    const index = Number(card.dataset.tindex);
+    longPressActive = true;
+    longPressTimer = setTimeout(function() {
+      longPressTimer = null;
+      longPressActive = false;
+      enterSelectModeWith(index);
+    }, 600);
+  }, { passive: true });
+
+  ['touchend', 'touchmove', 'touchcancel'].forEach(function(ev) {
+    listEl.addEventListener(ev, cancelPress, { passive: true });
+  });
+})();
+
 document.getElementById('selectModeBtn').addEventListener('click', function() {
   selectMode = !selectMode;
   selectedTorrents.clear();
@@ -3887,6 +4534,34 @@ document.getElementById('selectModeBtn').addEventListener('click', function() {
 // Remove, none of these change the list, so order doesn't matter) the
 // app itself does, just calling the Web UI's own single-torrent
 // endpoints instead of the native functions directly.
+// Move to Top / Up / Down / To Bottom for the selected torrents - the
+// server keeps the order (shared with the app) and "Queue Order" sort
+// shows it, so switch to that sort if another one is active.
+async function queueMove(dir) {
+  if (selectedTorrents.size === 0) { alert('No torrents selected'); return; }
+
+  const visible = sortTorrents(lastTorrents.filter(torrentMatchesFilter)).map(function(t) { return t.index; });
+
+  try {
+    await api('/api/queue_move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dir: dir,
+        selected: Array.from(selectedTorrents).join(','),
+        visible: visible.join(',')
+      })
+    });
+  } catch (e) {}
+
+  if (sortMode !== 'Queue Order') {
+    sortMode = 'Queue Order';
+    document.getElementById('sortModeSelect').value = 'Queue Order';
+  }
+
+  refresh();
+}
+
 async function batchAction(kind) {
   if (selectedTorrents.size === 0) { alert('No torrents selected'); return; }
 
@@ -3950,6 +4625,8 @@ function closeAllFeaturePanels() {
   closeStorage();
   closeExecutionLog();
   closeOnlineSearch();
+  closeNotifications();
+  closeBackup();
   closeSaveFolder();
   closeRss();
 
@@ -4173,6 +4850,216 @@ async function copyExecutionLog() {
 }
 
 // ---------------------------------------------------------------------
+// Feature: "Notifications" - same settings as the app's Notifications
+// screen (NotificationSettings prefs on the phone).
+// ---- Backup & Restore ----
+var backupFileBytes = null;
+
+document.getElementById('backupBtn').addEventListener('click', function() {
+  const panel = document.getElementById('backupPanel');
+  if (panel.style.display === 'block') closeBackup(); else openBackup();
+});
+
+function openBackup() {
+  closeAllFeaturePanels();
+  document.getElementById('backupPanel').style.display = 'block';
+  document.getElementById('backupStatus').textContent = '';
+}
+
+function closeBackup() {
+  document.getElementById('backupPanel').style.display = 'none';
+}
+
+function setBackupStatus(text) {
+  document.getElementById('backupStatus').textContent = text;
+}
+
+document.getElementById('backupCreateBtn').addEventListener('click', async function() {
+  setBackupStatus('Creating backup...');
+  try {
+    const res = await api('/api/backup');
+    if (!res.ok) { setBackupStatus('Backup failed'); return; }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const pad = function(n) { return (n < 10 ? '0' : '') + n; };
+    a.href = url;
+    a.download = 'TorrentOr-backup-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+      '-' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
+    setBackupStatus('Backup downloaded (' + Math.round(blob.size / 1024) + ' KB).');
+  } catch (e) {
+    setBackupStatus('Backup failed');
+  }
+});
+
+document.getElementById('backupFileInput').addEventListener('change', async function() {
+  const file = this.files && this.files[0];
+  backupFileBytes = null;
+  document.getElementById('backupRestoreControls').style.display = 'none';
+  document.getElementById('backupPreview').textContent = '';
+  if (!file) return;
+
+  setBackupStatus('Reading backup...');
+  try {
+    const bytes = await file.arrayBuffer();
+    const res = await api('/api/restore_preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: bytes
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      setBackupStatus('Cannot restore: ' + (data.error || 'invalid backup'));
+      return;
+    }
+
+    backupFileBytes = bytes;
+    document.getElementById('backupPreview').textContent =
+      'Created: ' + data.createdAt + '  |  App version: ' + data.appVersion +
+      '  |  Torrents: ' + data.torrents + '  |  Progress data: ' + data.resume +
+      '  |  Settings groups: ' + data.settings;
+    document.getElementById('backupRestoreControls').style.display = 'block';
+    setBackupStatus('');
+  } catch (e) {
+    setBackupStatus('Could not read the backup');
+  }
+});
+
+document.getElementById('backupRestoreBtn').addEventListener('click', async function() {
+  if (!backupFileBytes) return;
+
+  const replace = document.querySelector('input[name="backupMode"]:checked').value === 'replace';
+
+  if (replace && !confirm('Replace everything? All torrents currently in TorrentOr are removed from the app (their downloaded files stay on disk) and settings are overwritten by the backup.')) {
+    return;
+  }
+
+  setBackupStatus('Restoring...');
+  try {
+    const res = await api('/api/restore?mode=' + (replace ? 'replace' : 'merge'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: backupFileBytes
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      setBackupStatus('Restore failed: ' + (data.error || 'unknown error'));
+      return;
+    }
+
+    let msg = 'Restore complete (' + (data.replace ? 'Replace' : 'Merge') + '). Torrents in backup: ' +
+      data.inBackup + ', added: ' + data.added;
+    if (!data.replace) msg += ', already present: ' + data.alreadyPresent;
+    if (data.skipped > 0) msg += ', skipped (.torrent file missing): ' + data.skipped;
+    msg += ', progress data restored: ' + data.resume + '.';
+    setBackupStatus(msg);
+
+    backupFileBytes = null;
+    document.getElementById('backupRestoreControls').style.display = 'none';
+    document.getElementById('backupFileInput').value = '';
+    setTimeout(function() { try { refresh(); } catch (e) {} }, 1500);
+  } catch (e) {
+    setBackupStatus('Restore failed');
+  }
+});
+
+let notificationsOpen = false;
+let notificationSettings = null;
+
+document.getElementById('notificationsBtn').addEventListener('click', function() {
+  if (notificationsOpen) closeNotifications(); else openNotifications();
+});
+
+function openNotifications() {
+  closeAllFeaturePanels();
+  notificationsOpen = true;
+  document.getElementById('notificationsPanel').style.display = 'block';
+  loadNotificationSettings();
+}
+
+function closeNotifications() {
+  notificationsOpen = false;
+  document.getElementById('notificationsPanel').style.display = 'none';
+}
+
+async function loadNotificationSettings() {
+  try {
+    const res = await api('/api/notification_settings');
+    const data = await res.json();
+    if (!data.ok) return;
+    notificationSettings = data;
+    renderNotificationSettings();
+  } catch (e) {
+    document.getElementById('notificationsBody').innerHTML = '<div class="empty">Could not load settings</div>';
+  }
+}
+
+async function setNotificationField(field, value) {
+  try {
+    await api('/api/notification_settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field: field, value: String(value) })
+    });
+  } catch (e) {}
+  loadNotificationSettings();
+}
+
+function renderNotificationSettings() {
+  const d = notificationSettings;
+  if (!d) return;
+
+  function box(label, checked, field) {
+    return '<label style="display:block;margin:6px 0;"><input type="checkbox"' + (checked ? ' checked' : '') +
+      ' onchange="setNotificationField(\'' + field + '\', this.checked)"> ' + escapeHtml(label) + '</label>';
+  }
+
+  let html = '<div class="card"><div class="name">Notification types</div>';
+  d.types.forEach(function(t) { html += box(t.label, t.enabled, 'type:' + t.id); });
+  html += '</div>';
+
+  html += '<div class="card"><div class="name">Progress notifications</div>' +
+    '<div class="meta">One live notification per downloading torrent with progress, speeds, size, ETA and Pause/Resume, Stop and Open buttons. Stop pauses the torrent and hides its notification until it runs again.</div>' +
+    box('Show a progress notification for each torrent', d.progress, 'progress') +
+    '<div class="row"><select onchange="setNotificationField(\'interval\', this.value)">' +
+    d.intervals.map(function(s) {
+      return '<option value="' + s + '"' + (s === d.interval ? ' selected' : '') + '>Update every ' + s + ' s</option>';
+    }).join('') + '</select></div></div>';
+
+  html += '<div class="card"><div class="name">Sound</div>' +
+    box('Play sound for alerts', d.sound, 'sound') +
+    box('Silent mode (no sound or vibration for any alert)', d.silent, 'silent') +
+    '<div class="meta">Progress notifications are always silent.</div></div>';
+
+  html += '<div class="card"><div class="name">Per torrent</div>' +
+    '<div class="meta">Unchecked torrents get no progress or alert notifications at all.</div>';
+  if (!d.torrents.length) {
+    html += '<div class="meta">No torrents yet.</div>';
+  } else {
+    d.torrents.forEach(function(t, i) {
+      html += '<label style="display:block;margin:6px 0;"><input type="checkbox"' + (t.enabled ? ' checked' : '') +
+        ' onchange="setTorrentNotification(' + i + ', this.checked)"> ' + escapeHtml(t.name) + '</label>';
+    });
+  }
+  html += '</div>';
+
+  document.getElementById('notificationsBody').innerHTML = html;
+}
+
+function setTorrentNotification(i, enabled) {
+  const t = notificationSettings && notificationSettings.torrents[i];
+  if (!t) return;
+  setNotificationField('torrent:' + t.hash, enabled);
+}
+
+// ---------------------------------------------------------------------
 // Feature: "Online Search" - same multi-provider search as the app's
 // own Online Search screen (OnlineSearchManager), with the same sort
 // modes, provider filter, and Add flow that resolves a result (without
@@ -4180,6 +5067,47 @@ async function copyExecutionLog() {
 // flow as every other add path in this Web UI.
 let onlineSearchResults = [];
 let onlineSearchOpen = false;
+let onlineSearchJobId = null;
+let onlineSearchVersion = -1;
+let onlineSearchTimer = null;
+let onlineSearchPolling = false;
+let onlineSearchProvidersInfo = [];
+const OS_FILTER_KEY = 'torrentor_os_filters';
+const OS_SORT_KEY = 'torrentor_os_sort';
+
+function osDefaultFilters() {
+  return { minSeeders: 0, maxLeechers: 0, minSizeMb: 0, maxSizeMb: 0, minHealth: 0, providers: [], category: '', fileType: '' };
+}
+
+function osLoadFilters() {
+  try {
+    const o = JSON.parse(localStorage.getItem(OS_FILTER_KEY) || '{}');
+    const f = osDefaultFilters();
+    f.minSeeders = Math.max(0, parseInt(o.minSeeders) || 0);
+    f.maxLeechers = Math.max(0, parseInt(o.maxLeechers) || 0);
+    f.minSizeMb = Math.max(0, parseInt(o.minSizeMb) || 0);
+    f.maxSizeMb = Math.max(0, parseInt(o.maxSizeMb) || 0);
+    f.minHealth = Math.max(0, parseInt(o.minHealth) || 0);
+    f.providers = Array.isArray(o.providers) ? o.providers : [];
+    f.category = o.category || '';
+    f.fileType = o.fileType || '';
+    return f;
+  } catch (e) {
+    return osDefaultFilters();
+  }
+}
+
+let osFilters = osLoadFilters();
+
+function osSaveFilters() {
+  try { localStorage.setItem(OS_FILTER_KEY, JSON.stringify(osFilters)); } catch (e) {}
+}
+
+function osFiltersActive() {
+  const f = osFilters;
+  return f.minSeeders > 0 || f.maxLeechers > 0 || f.minSizeMb > 0 || f.maxSizeMb > 0 ||
+    f.minHealth > 0 || f.providers.length > 0 || !!f.category || !!f.fileType;
+}
 
 document.getElementById('onlineSearchBtn').addEventListener('click', function() {
   if (onlineSearchOpen) closeOnlineSearch(); else openOnlineSearch();
@@ -4189,6 +5117,8 @@ function openOnlineSearch() {
   closeAllFeaturePanels();
   onlineSearchOpen = true;
   document.getElementById('onlineSearchPanel').style.display = 'block';
+  osRefreshHistory(false);
+  osLoadProviders();
 }
 
 function closeOnlineSearch() {
@@ -4196,20 +5126,292 @@ function closeOnlineSearch() {
   document.getElementById('onlineSearchPanel').style.display = 'none';
 }
 
-document.getElementById('onlineSearchGoBtn').addEventListener('click', runOnlineSearch);
+(function() {
+  try {
+    const saved = localStorage.getItem(OS_SORT_KEY);
+    const sel = document.getElementById('onlineSearchSortSelect');
+    if (saved && Array.from(sel.options).some(function(o) { return o.value === saved; })) sel.value = saved;
+  } catch (e) {}
+})();
+
+document.getElementById('onlineSearchGoBtn').addEventListener('click', function() { runOnlineSearch(); });
+document.getElementById('onlineSearchCancelBtn').addEventListener('click', cancelOnlineSearch);
 document.getElementById('onlineSearchInput').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') runOnlineSearch();
 });
-document.getElementById('onlineSearchSortSelect').addEventListener('change', renderOnlineSearchResults);
-document.getElementById('onlineSearchProviderSelect').addEventListener('change', renderOnlineSearchResults);
+document.getElementById('onlineSearchSortSelect').addEventListener('change', function() {
+  try { localStorage.setItem(OS_SORT_KEY, this.value); } catch (e) {}
+  renderOnlineSearchResults();
+});
 
-async function runOnlineSearch() {
-  const query = document.getElementById('onlineSearchInput').value.trim();
+function osToggleBox(id, loader) {
+  const el = document.getElementById(id);
+  const show = el.style.display === 'none';
+  ['osFiltersBox', 'osHistoryBox', 'osProvidersBox'].forEach(function(other) {
+    document.getElementById(other).style.display = 'none';
+  });
+  if (show) {
+    el.style.display = 'block';
+    if (loader) loader();
+  }
+}
+
+document.getElementById('osFiltersBtn').addEventListener('click', function() {
+  osToggleBox('osFiltersBox', osFillFilterControls);
+});
+document.getElementById('osHistoryBtn').addEventListener('click', function() {
+  osToggleBox('osHistoryBox', function() { osRefreshHistory(true); });
+});
+document.getElementById('osProvidersBtn').addEventListener('click', function() {
+  osToggleBox('osProvidersBox', osLoadProviders);
+});
+
+function osProviderNames() {
+  const names = onlineSearchProvidersInfo.map(function(p) { return p.name; });
+  onlineSearchResults.forEach(function(r) {
+    if (names.indexOf(r.sourceName) === -1) names.push(r.sourceName);
+  });
+  return names;
+}
+
+function osFillFilterControls() {
+  const f = osFilters;
+  document.getElementById('osMinSeeders').value = f.minSeeders || '';
+  document.getElementById('osMaxLeechers').value = f.maxLeechers || '';
+  document.getElementById('osMinSize').value = f.minSizeMb || '';
+  document.getElementById('osMaxSize').value = f.maxSizeMb || '';
+  document.getElementById('osMinHealth').value = f.minHealth || '';
+  document.getElementById('osFileType').value = f.fileType;
+  osUpdateCategoryOptions();
+
+  const box = document.getElementById('osProviderChecks');
+  box.innerHTML = osProviderNames().map(function(n, i) {
+    const info = onlineSearchProvidersInfo.filter(function(p) { return p.name === n; })[0];
+    const star = info && info.favorite ? '★ ' : '';
+    const bad = info && info.unavailable ? ' (unavailable)' : '';
+    return '<label style="display:inline-block;margin:4px 12px 4px 0;">' +
+      '<input type="checkbox" data-osprov="' + i + '"' + (f.providers.indexOf(n) !== -1 ? ' checked' : '') + '> ' +
+      escapeHtml(star + n + bad) + '</label>';
+  }).join('');
+
+  Array.from(box.querySelectorAll('input[data-osprov]')).forEach(function(cb) {
+    cb.addEventListener('change', osReadFilterControls);
+  });
+}
+
+function osUpdateCategoryOptions() {
+  const sel = document.getElementById('osCategory');
+  const current = osFilters.category;
+  const cats = Array.from(new Set(onlineSearchResults.map(function(r) {
+    return (r.category || '').trim() || 'Uncategorized';
+  }))).sort();
+  if (current && cats.indexOf(current) === -1) cats.push(current);
+  sel.innerHTML = '<option value="">Category: any</option>' + cats.map(function(c) {
+    return '<option value="' + escapeHtml(c) + '">Category: ' + escapeHtml(c) + '</option>';
+  }).join('');
+  sel.value = current;
+}
+
+function osReadFilterControls() {
+  function num(id) { return Math.max(0, parseInt(document.getElementById(id).value) || 0); }
+  const names = osProviderNames();
+  const chosen = [];
+  Array.from(document.querySelectorAll('#osProviderChecks input[data-osprov]')).forEach(function(cb) {
+    if (cb.checked) chosen.push(names[parseInt(cb.getAttribute('data-osprov'))]);
+  });
+
+  osFilters = {
+    minSeeders: num('osMinSeeders'),
+    maxLeechers: num('osMaxLeechers'),
+    minSizeMb: num('osMinSize'),
+    maxSizeMb: num('osMaxSize'),
+    minHealth: num('osMinHealth'),
+    providers: chosen,
+    category: document.getElementById('osCategory').value,
+    fileType: document.getElementById('osFileType').value
+  };
+  osSaveFilters();
+  osUpdateFiltersButton();
+  renderOnlineSearchResults();
+}
+
+['osMinSeeders', 'osMaxLeechers', 'osMinSize', 'osMaxSize', 'osMinHealth'].forEach(function(id) {
+  document.getElementById(id).addEventListener('input', osReadFilterControls);
+});
+document.getElementById('osCategory').addEventListener('change', osReadFilterControls);
+document.getElementById('osFileType').addEventListener('change', osReadFilterControls);
+document.getElementById('osResetFiltersBtn').addEventListener('click', function() {
+  osFilters = osDefaultFilters();
+  osSaveFilters();
+  osFillFilterControls();
+  osUpdateFiltersButton();
+  renderOnlineSearchResults();
+});
+document.getElementById('osFavOnlyBtn').addEventListener('click', function() {
+  osFilters.providers = onlineSearchProvidersInfo.filter(function(p) { return p.favorite; }).map(function(p) { return p.name; });
+  osSaveFilters();
+  osFillFilterControls();
+  osUpdateFiltersButton();
+  renderOnlineSearchResults();
+});
+
+function osUpdateFiltersButton() {
+  document.getElementById('osFiltersBtn').textContent = osFiltersActive() ? 'Filters (on)' : 'Filters';
+}
+osUpdateFiltersButton();
+
+async function osRefreshHistory(render) {
+  try {
+    const res = await api('/api/online_search_history');
+    const data = await res.json();
+    if (!data.ok) return;
+    window.__osHistory = data.history || [];
+
+    const dl = document.getElementById('osSuggestions');
+    dl.innerHTML = data.suggestions ? window.__osHistory.map(function(q) {
+      return '<option value="' + escapeHtml(q) + '"></option>';
+    }).join('') : '';
+
+    if (render) osRenderHistory();
+  } catch (e) {}
+}
+
+function osRenderHistory() {
+  const box = document.getElementById('osHistoryBox');
+  const list = window.__osHistory || [];
+  if (list.length === 0) { box.innerHTML = '<div class="meta">No search history yet.</div>'; return; }
+
+  box.innerHTML = list.map(function(q, i) {
+    return '<div class="row"><button class="secondary" style="flex:1;text-align:left;" onclick="osHistoryRun(' + i + ')">' +
+      escapeHtml(q) + '</button><button class="secondary" onclick="osHistoryRemove(' + i + ')">✕</button></div>';
+  }).join('') + '<div class="actions"><button class="secondary" onclick="osHistoryClear()">Clear all</button></div>';
+}
+
+function osHistoryRun(i) {
+  const q = (window.__osHistory || [])[i];
+  if (!q) return;
+  document.getElementById('osHistoryBox').style.display = 'none';
+  runOnlineSearch(q);
+}
+
+async function osHistoryRemove(i) {
+  const q = (window.__osHistory || [])[i];
+  if (q === undefined) return;
+  try {
+    await api('/api/online_search_history_remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q })
+    });
+  } catch (e) {}
+  osRefreshHistory(true);
+}
+
+async function osHistoryClear() {
+  try { await api('/api/online_search_history_clear', { method: 'POST' }); } catch (e) {}
+  osRefreshHistory(true);
+}
+
+function osAgo(ms) {
+  if (!ms) return 'never';
+  const sec = Math.floor((Date.now() - ms) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' h ago';
+  return Math.floor(sec / 86400) + ' d ago';
+}
+
+async function osLoadProviders() {
+  try {
+    const res = await api('/api/online_search_providers');
+    const data = await res.json();
+    if (!data.ok) return;
+    onlineSearchProvidersInfo = (data.providers || []).slice().sort(function(a, b) {
+      return (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0);
+    });
+    osRenderProviders();
+  } catch (e) {}
+}
+
+function osRenderProviders() {
+  const box = document.getElementById('osProvidersBox');
+  box.innerHTML = onlineSearchProvidersInfo.map(function(p, i) {
+    let status;
+    if (!p.tested) status = 'Not tested yet';
+    else if (p.unavailable) status = 'UNAVAILABLE: ' + p.lastError + ' (response ' + p.lastResponseMs + ' ms) - last success ' + osAgo(p.lastSuccessMs);
+    else status = 'Working, ' + p.lastResponseMs + ' ms - last success ' + osAgo(p.lastSuccessMs);
+
+    return '<div class="card"><label><input type="checkbox" onchange="osProviderToggle(' + i + ', \'enabled\', this.checked)"' +
+      (p.enabled ? ' checked' : '') + '> <b>' + escapeHtml(p.name) + '</b></label>' +
+      '<div class="meta"' + (p.unavailable ? ' style="color:#ff7878;"' : '') + '>' + escapeHtml(status) + '</div>' +
+      '<div class="actions">' +
+        '<button class="secondary" onclick="osProviderToggle(' + i + ', \'favorite\', ' + (!p.favorite) + ')">' + (p.favorite ? '★ Favorite' : '☆ Favorite') + '</button>' +
+        '<button class="secondary" id="osTestBtn' + i + '" onclick="osProviderTest(' + i + ')">Test</button>' +
+      '</div></div>';
+  }).join('');
+}
+
+async function osProviderToggle(i, field, value) {
+  const p = onlineSearchProvidersInfo[i];
+  if (!p) return;
+  try {
+    await api('/api/online_search_provider_set', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: p.name, field: field, value: String(value) })
+    });
+  } catch (e) {}
+  osLoadProviders();
+}
+
+let osTesting = false;
+
+// Keeps "last success: N min ago" and results of searches/tests current
+// while the Providers box is open.
+setInterval(function() {
+  const box = document.getElementById('osProvidersBox');
+  if (onlineSearchOpen && box && box.style.display !== 'none' && !osTesting) osLoadProviders();
+}, 2000);
+
+async function osProviderTest(i) {
+  const p = onlineSearchProvidersInfo[i];
+  if (!p) return;
+  osTesting = true;
+  const btn = document.getElementById('osTestBtn' + i);
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing...'; }
+  try {
+    const res = await api('/api/online_search_provider_test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: p.name })
+    });
+    const data = await res.json();
+    if (data.ok && data.provider) {
+      onlineSearchProvidersInfo[i] = data.provider;
+    }
+  } catch (e) {}
+  osTesting = false;
+  osRenderProviders();
+}
+
+function osStopPolling() {
+  if (onlineSearchTimer) { clearInterval(onlineSearchTimer); onlineSearchTimer = null; }
+  document.getElementById('onlineSearchCancelBtn').disabled = true;
+}
+
+async function runOnlineSearch(queryOverride) {
+  const input = document.getElementById('onlineSearchInput');
+  if (typeof queryOverride === 'string') input.value = queryOverride;
+  const query = input.value.trim();
   const statusEl = document.getElementById('onlineSearchStatus');
   if (!query) { statusEl.textContent = 'Enter a search and tap Search.'; return; }
 
+  osStopPolling();
+  onlineSearchResults = [];
+  onlineSearchVersion = -1;
+  onlineSearchJobId = null;
   statusEl.textContent = 'Searching...';
-  document.getElementById('onlineSearchResults').innerHTML = '';
+  renderOnlineSearchResults();
 
   try {
     const res = await api('/api/online_search', {
@@ -4218,60 +5420,168 @@ async function runOnlineSearch() {
       body: JSON.stringify({ query: query })
     });
     const data = await res.json();
-    onlineSearchResults = (data.ok ? data.results : []) || [];
+    if (!data.ok) { statusEl.textContent = data.error || 'Search failed'; return; }
 
-    const providerSelect = document.getElementById('onlineSearchProviderSelect');
-    const current = providerSelect.value;
-    const providers = Array.from(new Set(onlineSearchResults.map(function(r) { return r.sourceName; }))).sort();
-    providerSelect.innerHTML = '<option value="All">Provider: All</option>' +
-      providers.map(function(p) { return '<option value="' + escapeHtml(p) + '">Provider: ' + escapeHtml(p) + '</option>'; }).join('');
-    providerSelect.value = providers.indexOf(current) !== -1 ? current : 'All';
-
-    statusEl.textContent = onlineSearchResults.length + ' result(s) for "' + query + '"';
-    renderOnlineSearchResults();
+    onlineSearchJobId = data.jobId;
+    document.getElementById('onlineSearchCancelBtn').disabled = false;
+    onlineSearchTimer = setInterval(pollOnlineSearch, 700);
+    pollOnlineSearch();
+    osRefreshHistory(false);
   } catch (e) {
     statusEl.textContent = 'Search failed';
   }
 }
 
-// Mirrors the app's applySortAndFilter(): provider filter first, then
-// one of Name/Size/Leechers/Age/Seeders (default Seeders).
-function renderOnlineSearchResults() {
-  const providerFilter = document.getElementById('onlineSearchProviderSelect').value;
-  const sort = document.getElementById('onlineSearchSortSelect').value;
+async function pollOnlineSearch() {
+  if (!onlineSearchJobId || onlineSearchPolling) return;
+  onlineSearchPolling = true;
+  const statusEl = document.getElementById('onlineSearchStatus');
 
-  let list = onlineSearchResults.slice();
-  if (providerFilter !== 'All') list = list.filter(function(r) { return r.sourceName === providerFilter; });
+  try {
+    const res = await api('/api/online_search_poll?id=' + encodeURIComponent(onlineSearchJobId) + '&v=' + onlineSearchVersion);
+    const d = await res.json();
 
-  switch (sort) {
-    case 'Name':
-      list.sort(function(a, b) { return a.name.toLowerCase().localeCompare(b.name.toLowerCase()); });
-      break;
-    case 'Size':
-      list.sort(function(a, b) { return (b.sizeBytes || 0) - (a.sizeBytes || 0); });
-      break;
-    case 'Leechers':
-      list.sort(function(a, b) { return (b.leechers || -1) - (a.leechers || -1); });
-      break;
-    case 'Age':
-      list.sort(function(a, b) { return (b.publicationDate || '').localeCompare(a.publicationDate || ''); });
-      break;
-    default: // Seeders
-      list.sort(function(a, b) { return (b.seeders || -1) - (a.seeders || -1); });
+    if (d.stale) { osStopPolling(); return; }
+
+    if (d.results) {
+      onlineSearchResults = d.results;
+      onlineSearchVersion = d.version;
+      osUpdateCategoryOptions();
+      renderOnlineSearchResults();
+    }
+
+    const finished = (d.providers || []).length;
+    const failed = (d.providers || []).filter(function(p) { return p.error; })
+      .map(function(p) { return p.name + ' (' + p.error + ')'; });
+    let text = onlineSearchResults.length + ' result(s) - ' + finished + '/' + d.total + ' providers done';
+    if (failed.length) text += ' - failed: ' + failed.join(', ');
+    if (d.total === 0) text = 'No providers are enabled. Use Providers above.';
+    statusEl.textContent = (d.done ? 'Done: ' : 'Searching: ') + text;
+
+    if (d.done) osStopPolling();
+  } catch (e) {
+  } finally {
+    onlineSearchPolling = false;
   }
+}
+
+async function cancelOnlineSearch() {
+  osStopPolling();
+  try { await api('/api/online_search_cancel', { method: 'POST' }); } catch (e) {}
+  document.getElementById('onlineSearchStatus').textContent =
+    'Search cancelled. ' + onlineSearchResults.length + ' result(s) found so far.';
+}
+
+function osMatches(r) {
+  const f = osFilters;
+  if (f.providers.length) {
+    const inSet = f.providers.indexOf(r.sourceName) !== -1 ||
+      (r.alsoFoundOn || []).some(function(n) { return f.providers.indexOf(n) !== -1; });
+    if (!inSet) return false;
+  }
+  if (f.minSeeders > 0 && r.seeders >= 0 && r.seeders < f.minSeeders) return false;
+  if (f.maxLeechers > 0 && r.leechers >= 0 && r.leechers > f.maxLeechers) return false;
+  if (r.sizeBytes > 0) {
+    const mb = Math.floor(r.sizeBytes / 1048576);
+    if (f.minSizeMb > 0 && mb < f.minSizeMb) return false;
+    if (f.maxSizeMb > 0 && mb > f.maxSizeMb) return false;
+  }
+  if (f.minHealth > 0 && (r.seeders >= 0 || r.leechers >= 0)) {
+    if (Math.max(r.seeders, 0) + Math.max(r.leechers, 0) < f.minHealth) return false;
+  }
+  if (f.category) {
+    const c = (r.category || '').trim() || 'Uncategorized';
+    if (c.toLowerCase() !== f.category.toLowerCase()) return false;
+  }
+  if (f.fileType && r.fileType !== f.fileType) return false;
+  return true;
+}
+
+function osRelevance(query, name) {
+  const words = query.toLowerCase().split(/[^a-z0-9]+/).filter(function(w) { return w; });
+  if (!words.length) return 0;
+  const n = name.toLowerCase();
+  const nWords = n.split(/[^a-z0-9]+/).filter(function(w) { return w; });
+  let score = 0;
+  words.forEach(function(w) {
+    if (nWords.indexOf(w) !== -1) score += 1;
+    else if (n.indexOf(w) !== -1) score += 0.6;
+  });
+  score /= words.length;
+  if (n.indexOf(words.join(' ')) !== -1) score += 0.5;
+  if (n.indexOf(words[0]) === 0) score += 0.1;
+  return score;
+}
+
+// Same ordering rules as the app: unknown values (-1 / 0) always last,
+// ties broken by seeders then name.
+function osSort(list, mode, query, favorites) {
+  const rel = {};
+  function relOf(r) {
+    const k = r.name;
+    if (rel[k] === undefined) rel[k] = osRelevance(query, r.name);
+    return rel[k];
+  }
+  function ratio(r) { return r.seeders < 0 ? -1 : r.seeders / (Math.max(r.leechers, 0) + 1); }
+  function ascUnknownLast(x, y) {
+    if (x <= 0 && y <= 0) return 0;
+    if (x <= 0) return 1;
+    if (y <= 0) return -1;
+    return x - y;
+  }
+
+  list.sort(function(a, b) {
+    let c = 0;
+    switch (mode) {
+      case 'Relevance': c = relOf(b) - relOf(a); break;
+      case 'Leechers': c = b.leechers - a.leechers; break;
+      case 'Best ratio': c = ratio(b) - ratio(a); break;
+      case 'Largest': c = (b.sizeBytes || 0) - (a.sizeBytes || 0); break;
+      case 'Smallest': c = ascUnknownLast(a.sizeBytes || 0, b.sizeBytes || 0); break;
+      case 'Newest': c = (b.dateMillis || 0) - (a.dateMillis || 0); break;
+      case 'Oldest': c = ascUnknownLast(a.dateMillis || 0, b.dateMillis || 0); break;
+      case 'Provider': {
+        const fa = favorites.indexOf(a.sourceName) !== -1 ? 0 : 1;
+        const fb = favorites.indexOf(b.sourceName) !== -1 ? 0 : 1;
+        c = fa !== fb ? fa - fb : a.sourceName.toLowerCase().localeCompare(b.sourceName.toLowerCase());
+        break;
+      }
+      case 'Name': c = a.name.toLowerCase().localeCompare(b.name.toLowerCase()); break;
+      default: c = b.seeders - a.seeders;
+    }
+    if (c !== 0) return c;
+    c = b.seeders - a.seeders;
+    if (c !== 0) return c;
+    return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+  });
+  return list;
+}
+
+function renderOnlineSearchResults() {
+  const sort = document.getElementById('onlineSearchSortSelect').value;
+  const favorites = onlineSearchProvidersInfo.filter(function(p) { return p.favorite; }).map(function(p) { return p.name; });
+
+  let list = onlineSearchResults.filter(osMatches);
+  list = osSort(list, sort, document.getElementById('onlineSearchInput').value, favorites);
 
   const container = document.getElementById('onlineSearchResults');
   if (list.length === 0) {
-    container.innerHTML = '<div class="empty">No results</div>';
+    container.innerHTML = '<div class="empty">' +
+      (onlineSearchResults.length ? 'No results match the current filters' : 'No results') + '</div>';
+    window.__onlineSearchVisible = [];
     return;
   }
 
   container.innerHTML = list.map(function(r, i) {
     const bits = [];
     if (r.sizeText) bits.push(escapeHtml(r.sizeText));
+    else if (r.sizeBytes > 0) bits.push(Math.floor(r.sizeBytes / 1048576) + ' MB');
     if (r.seeders >= 0) bits.push('Seeds ' + r.seeders);
-    if (r.leechers >= 0) bits.push('Peers ' + r.leechers);
-    if (r.sourceName) bits.push(escapeHtml(r.sourceName));
+    if (r.leechers >= 0) bits.push('Leechers ' + r.leechers);
+    if (r.sourceName) {
+      bits.push(escapeHtml(r.sourceName) +
+        ((r.alsoFoundOn || []).length ? ' (also: ' + escapeHtml(r.alsoFoundOn.join(', ')) + ')' : ''));
+    }
     if (r.publicationDate) bits.push(escapeHtml(r.publicationDate));
 
     const canAdd = !!(r.magnetUri || r.torrentUrl || r.resultPageUrl);
@@ -4279,6 +5589,7 @@ function renderOnlineSearchResults() {
     return '<div class="card">' +
       '<div class="name">' + escapeHtml(r.name) + '</div>' +
       '<div class="meta">' + bits.join(' &middot; ') + '</div>' +
+      (r.infoHash ? '<div class="meta">Hash: ' + escapeHtml(r.infoHash) + '</div>' : '') +
       '<div class="actions">' +
         '<button' + (canAdd ? '' : ' disabled') + ' onclick="onlineSearchAdd(' + i + ')">Add</button>' +
         (r.resultPageUrl ? '<button class="secondary" onclick="openOnlineSearchResultPage(' + i + ')">Open Page</button>' : '') +
@@ -4287,8 +5598,7 @@ function renderOnlineSearchResults() {
   }).join('');
 
   // Stash the filtered/sorted list so onlineSearchAdd(i) can look up the
-  // same result the user is looking at, regardless of provider filter
-  // or sort order.
+  // same result the user is looking at, regardless of filters or sort.
   window.__onlineSearchVisible = list;
 }
 
@@ -5117,12 +6427,14 @@ function renderFilesPanel() {
   let body;
   if (openFilesTab === 'priority') {
     const rows = lastFilesList.map(function(f) { return renderPriorityRow(index, f); }).join('');
-    body = rows +
-      '<div class="actions" style="margin-top:8px;">' +
+    // The action buttons sit above the list and stay pinned while
+    // scrolling, so a long file list never has to be scrolled to the end.
+    body = '<div class="actions" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:0;">' +
         '<button class="secondary" onclick="setAllPriorityChecks(true)">Select All</button>' +
         '<button class="secondary" onclick="setAllPriorityChecks(false)">Select None</button>' +
         '<button onclick="applyFilePriorities(' + index + ')">Apply</button>' +
-      '</div>';
+        '<button class="secondary" onclick="toggleFiles(' + index + ')">Close</button>' +
+      '</div>' + rows;
   } else if (openFilesTab === 'swarmhealth') {
     // Feature: a small live Seeds/Peers graph above the swarm health
     // text - the app has no such graph (swarm health is text-only
@@ -5131,10 +6443,22 @@ function renderFilesPanel() {
     // smooth gradient-filled lines) so it reads as part of the same app.
     body = '<canvas id="swarmHealthCanvas" width="600" height="140" style="width:100%;height:140px;display:block;margin-bottom:8px;"></canvas>' +
       '<pre id="tabText" style="white-space:pre-wrap;max-height:300px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
+  } else if (openFilesTab === 'pieces') {
+    body = '<pre id="tabText" style="white-space:pre-wrap;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>' +
+      '<div class="meta" style="margin-top:8px;">' +
+        '<span style="color:#4DA3FF;">&#9632;</span> downloaded &nbsp; ' +
+        '<span style="color:#4CD964;">&#9632;</span> downloading &nbsp; ' +
+        '<span style="color:#6B7686;">&#9632;</span> missing &nbsp; ' +
+        '<span style="color:#2C3442;">&#9632;</span> skipped (file not selected)' +
+      '</div>' +
+      '<canvas id="piecesCanvas" width="600" height="10" style="width:100%;display:block;margin-top:6px;"></canvas>';
   } else if (textTabEndpoints[openFilesTab]) {
     body = '<pre id="tabText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
   } else {
-    body = lastFilesList.map(function(f) { return renderFileRow(index, f); }).join('');
+    body = '<div class="actions" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:0;">' +
+        '<button class="secondary" onclick="toggleFiles(' + index + ')">Close</button>' +
+      '</div>' +
+      lastFilesList.map(function(f) { return renderFileRow(index, f); }).join('');
   }
 
   const forceButtons = (openFilesTab === 'general')
@@ -5175,8 +6499,14 @@ function renderFilesPanel() {
       '</div>'
     : '';
 
+  // Priority and Files tabs carry Close at the top (above); the other
+  // tabs keep it at the bottom.
+  const bottomClose = (openFilesTab === 'priority' || !(textTabEndpoints[openFilesTab] || openFilesTab === 'swarmhealth'))
+    ? ''
+    : '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
+
   panel.innerHTML = '<div class="name">Files</div>' + tabs + body + forceButtons + detailActions + saveFolderRow +
-    '<div class="actions"><button class="secondary" onclick="toggleFiles(' + index + ')">Close</button></div>';
+    bottomClose;
 
   if (openFilesTab === 'swarmhealth') {
     swarmHealthHistory = { seeds: [], peers: [] };
@@ -5382,10 +6712,68 @@ async function loadTextTab(index, tab) {
     const data = await res.json();
     const el = document.getElementById('tabText');
     if (!el || openFilesIndex !== index || openFilesTab !== tab) return;
-    el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
+    if (tab === 'swarmhealth' && data.ok) {
+      el.innerHTML = colorSwarmText(data.text || '');
+    } else {
+      el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
+    }
+    if (tab === 'pieces') drawPieceMap(data.states || '');
   } catch (e) {
     const el = document.getElementById('tabText');
     if (el && openFilesIndex === index && openFilesTab === tab) el.textContent = 'Could not load';
+  }
+}
+
+// Swarm Health text with the Health word and the bar coloured by level.
+function colorSwarmText(text) {
+  function esc(t) {
+    return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  const m = text.match(/Health: (Critical|Weak|Healthy|Excellent)/);
+  if (!m) return esc(text);
+
+  const colors = { Critical: '#FF5252', Weak: '#FFA726', Healthy: '#C0CA33', Excellent: '#4CD964' };
+  const color = colors[m[1]];
+
+  return text.split('\n').map(function(line) {
+    if (line.indexOf('Health: ') === 0) {
+      return 'Health: <span style="color:' + color + ';font-weight:bold;">' + esc(m[1]) + '</span>';
+    }
+    if (line.length >= 6 && line.replace(/[\u2588\u2591]/g, '') === '') {
+      const filled = line.replace(/\u2591/g, '').length;
+      return '<span style="color:' + color + ';">' + line.substring(0, filled) + '</span>' +
+             '<span style="color:#3A4150;">' + line.substring(filled) + '</span>';
+    }
+    return esc(line);
+  }).join('\n');
+}
+
+// Four-state piece map on a canvas: one square per piece.
+function drawPieceMap(states) {
+  const canvas = document.getElementById('piecesCanvas');
+  if (!canvas) return;
+
+  const n = states.length;
+  const cell = 8;
+  const gap = 2;
+  const step = cell + gap;
+  const cols = Math.max(1, Math.floor((canvas.clientWidth || 300) / step));
+  const rows = Math.max(1, Math.ceil(n / cols));
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width = Math.floor(cols * step * dpr);
+  canvas.height = Math.floor(rows * step * dpr);
+  canvas.style.height = (rows * step) + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const colors = { '2': '#4DA3FF', '1': '#4CD964', '0': '#6B7686', 'x': '#2C3442' };
+
+  for (let p = 0; p < n; p++) {
+    ctx.fillStyle = colors[states[p]] || colors['0'];
+    ctx.fillRect((p % cols) * step, Math.floor(p / cols) * step, cell, cell);
   }
 }
 
@@ -5481,6 +6869,7 @@ function renderFileRow(torrentIndex, f) {
   }
 
   const percent = Number(f.percent) || 0;
+  const info = fileInfoParts(torrentIndex, f, true);
 
   // ptext_/pbar_ get updated in place every second (see
   // refreshFilesPanelProgress) rather than by re-rendering the whole
@@ -5490,7 +6879,8 @@ function renderFileRow(torrentIndex, f) {
   // auto-refreshed torrent list.
   return '<div class="card" style="margin:8px 0;" data-file-index="' + f.index + '">' +
     '<div class="meta">' + fileTypeIcon(f.name) + ' ' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')</div>' +
-    '<div class="meta" id="ptext_' + rowId + '">' + percent + '%</div>' +
+    '<div class="meta" id="ptext_' + rowId + '">' + escapeHtml(info.progress) + '</div>' +
+    '<div class="meta" id="pavail_' + rowId + '">' + escapeHtml(info.swarm) + '</div>' +
     '<div class="bar"><div class="fill" id="pbar_' + rowId + '" style="width:' + percent + '%"></div></div>' +
     '<div class="actions">' + actionBtn +
       '<button class="secondary" onclick="window.location.href=\'' + downloadUrl + '\'">Download</button>' +
@@ -5509,17 +6899,76 @@ function renderFileRow(torrentIndex, f) {
 function renderPriorityRow(torrentIndex, f) {
   const rowId = 'frow_' + torrentIndex + '_' + f.index;
   const checked = f.selected !== false;
+  const info = fileInfoParts(torrentIndex, f, true);
 
   return '<div class="card" style="margin:8px 0;" data-file-index="' + f.index + '">' +
     '<label class="meta">' +
       '<input type="checkbox" class="priorityCheck" data-index="' + f.index + '"' + (checked ? ' checked' : '') + '> ' +
       fileTypeIcon(f.name) + ' ' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')' +
     '</label>' +
-    '<div class="meta" id="pswarm_' + rowId + '">' +
-      'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
-      '  Peers ' + (Number(f.peers) || 0) + ' (' + (Number(f.totalPeers) || 0) + ')' +
+    '<div class="meta" style="white-space:pre-line;" id="pswarm_' + rowId + '">' +
+      escapeHtml(info.progress + '\n' + info.swarm) +
     '</div>' +
   '</div>';
+}
+
+// Same two lines as the app's own Files tab for each file:
+//   Progress: P%  |  done / total  |  down speed  |  ETA
+//   Seeds a (b)  Peers c (d)  |  Uploading to N peers  |  Availability  |  Copies
+// libtorrent has no per-file rate, so (like the app) speed and ETA are
+// estimated from how many bytes of the file arrived since the last
+// sample. update = true takes a new sample; call it once per file per
+// refresh tick.
+var fileRateSamples = {};
+
+function formatFileEta(seconds) {
+  if (seconds <= 0) return '--';
+  const mins = Math.floor(seconds / 60);
+  const hrs = Math.floor(mins / 60);
+  const days = Math.floor(hrs / 24);
+  if (days > 0) return days + 'd ' + (hrs % 24) + 'h';
+  if (hrs > 0) return hrs + 'h ' + (mins % 60) + 'm';
+  return mins + 'm';
+}
+
+function fileInfoParts(torrentIndex, f, update) {
+  const key = torrentIndex + '_' + f.index;
+  const now = Date.now();
+  const size = Number(f.size) || 0;
+  const downloaded = Number(f.downloaded) || 0;
+  const remaining = size - downloaded;
+  const prev = fileRateSamples[key];
+
+  if (update) fileRateSamples[key] = { bytes: downloaded, time: now };
+
+  let bytesPerSecond = 0;
+  if (prev && (now - prev.time) < 6000) {
+    const deltaBytes = downloaded - prev.bytes;
+    const deltaSeconds = (now - prev.time) / 1000;
+    if (deltaBytes > 0 && deltaSeconds > 0) bytesPerSecond = deltaBytes / deltaSeconds;
+  }
+
+  const eta = (remaining <= 0 || bytesPerSecond <= 0) ? '--' : formatFileEta(Math.floor(remaining / bytesPerSecond));
+  const uploading = Number(f.uploading) || 0;
+  const sep = '  \u2022  ';
+
+  return {
+    progress: 'Progress: ' + (Number(f.percent) || 0) + '%' + sep +
+      formatSize(downloaded) + ' / ' + formatSize(size) + sep +
+      '\u2193 ' + formatSize(Math.floor(bytesPerSecond)) + '/s' + sep + 'ETA: ' + eta,
+    swarm: 'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
+      '  Peers ' + (Number(f.peers) || 0) + ' (' + (Number(f.totalPeers) || 0) + ')' +
+      sep + 'Uploading to ' + uploading + (uploading === 1 ? ' peer' : ' peers') +
+      sep + fileAvailabilityText(f)
+  };
+}
+
+// % of this file's pieces that we or a connected peer has (-1 = unknown).
+function fileAvailabilityText(f) {
+  const a = (f.availability === undefined || f.availability === null) ? -1 : Number(f.availability);
+  const c = (f.copiesMilli === undefined || f.copiesMilli === null) ? -1 : Number(f.copiesMilli);
+  return (a < 0 ? 'Availability --' : 'Availability ' + a + '%') +
+    '  \u2022  ' + (c < 0 ? 'Copies --' : 'Copies ' + (c / 1000).toFixed(3));
 }
 
 // Closes whichever viewer (video/audio/text/image) is currently open in

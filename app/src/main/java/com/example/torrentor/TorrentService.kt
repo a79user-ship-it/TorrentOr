@@ -54,6 +54,9 @@ class TorrentService : Service() {
         var networkBlockedReason: String? = null
     }
 
+    // Per-torrent progress + event notifications (see TorrentNotifier.kt).
+    private val notifier by lazy { TorrentNotifier(applicationContext) }
+
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var lastNetworkCaps: NetworkCapabilities? = null
 
@@ -87,10 +90,19 @@ class TorrentService : Service() {
         applySavedConnectionSettings()
         applySavedGlobalSpeedLimits()
 
+        // Fast-resume files (see TorrentNative.saveResumeData): must be set
+        // before torrents are re-added below so they can use them.
+        try {
+            TorrentNative.setResumeDataDir(resumeDataDir().absolutePath)
+        } catch (_: Throwable) {
+        }
+
         TorrentNative.startSession(getGlobalSaveFolder())
 
         restoreSavedTorrents()
         startUpdates()
+        startNotifierLoop()
+        startResumeSaver()
         startNetworkWatcher()
 
         // Feature: Web UI. Off by default - only starts here if the user
@@ -106,6 +118,14 @@ class TorrentService : Service() {
     }
 
     override fun onDestroy() {
+        // Last chance to record what is on disk, so the next start does not
+        // have to re-check every file (bounded wait; failures are ignored).
+        try {
+            resumeSaver?.shutdownNow()
+            TorrentNative.saveResumeData(2500)
+        } catch (_: Throwable) {
+        }
+
         stopNetworkWatcher()
         releaseUpnpMulticastLock()
         WebUiServer.stop()
@@ -511,9 +531,39 @@ class TorrentService : Service() {
                 applyNetworkPolicy()
             }
 
+            action == "RESTORE_RELOAD" -> {
+                reloadAfterRestore(intent.getBooleanExtra("REPLACE", false))
+            }
+
             action == "CONNECTION_SETTINGS_CHANGED" -> {
                 val upnpEnabled = intent.getBooleanExtra("UPNP_ENABLED", true)
                 updateUpnpMulticastLock(upnpEnabled)
+            }
+
+            action == TorrentNotifier.ACTION_PAUSE ||
+                    action == TorrentNotifier.ACTION_RESUME ||
+                    action == TorrentNotifier.ACTION_STOP -> {
+                // Buttons on a torrent's progress notification. Resolved by
+                // info-hash (never by list position), then the same pause /
+                // resume the app's own buttons do.
+                val index = findIndexByHash(actionHash)
+
+                if (index > 0) {
+                    val hash = getBestHashForIndex(index, actionHash, actionMagnet)
+
+                    if (action == TorrentNotifier.ACTION_RESUME) {
+                        TorrentNative.resumeTorrent(index)
+                        if (isGoodHash(hash)) removePausedHash(hash)
+                    } else {
+                        TorrentNative.pauseTorrent(index)
+                        if (isGoodHash(hash)) savePausedHash(hash)
+                    }
+
+                    if (action == TorrentNotifier.ACTION_STOP) {
+                        // Stop = pause it and stop notifying until it runs again.
+                        notifier.stop(actionHash)
+                    }
+                }
             }
 
             action == "PAUSE_ALL" -> {
@@ -1252,6 +1302,32 @@ class TorrentService : Service() {
         }
     }
 
+    // 1-based native index of the torrent with this info-hash, or -1.
+    private fun findIndexByHash(hash: String): Int {
+        val target = normalizeHashForKey(hash)
+        if (target.isBlank()) return -1
+
+        val status = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+
+        val count = status.lines().count { it.isNotBlank() }
+
+        for (i in 1..count) {
+            val h = try {
+                TorrentNative.getTorrentHash(i)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (isGoodHash(h) && normalizeHashForKey(h) == target) return i
+        }
+
+        return -1
+    }
+
     private fun isGoodHash(hash: String): Boolean {
         return hash.isNotBlank() &&
                 hash != "Hash not ready" &&
@@ -1902,35 +1978,8 @@ class TorrentService : Service() {
     // "TorrentOr is running" one) the moment a torrent finishes. Tapping it
     // opens the app, same as tapping the app icon.
     private fun showTorrentCompleteNotification(name: String, hash: String) {
-        try {
-            val openIntent = Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("COMPLETED_TORRENT_HASH", hash)
-            }
-
-            val pendingIntent = PendingIntent.getActivity(
-                this,
-                hash.hashCode(),
-                openIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-
-            val notification = NotificationCompat.Builder(this, "torrent_complete")
-                .setContentTitle("Download complete")
-                .setContentText(name)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(name))
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentIntent(pendingIntent)
-                .setAutoCancel(true)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .build()
-
-            NotificationManagerCompat.from(this).notify(hash.hashCode(), notification)
-        } catch (e: SecurityException) {
-            // POST_NOTIFICATIONS not granted - the ongoing service
-            // notification still works, this one is just skipped.
-        } catch (e: Throwable) {
-        }
+        // Honors Notification Settings (type on/off, sound/silent, per-torrent off).
+        notifier.completed(name, hash)
     }
 
     // Low Disk Space Warning. A simple StatFs check against a configurable
@@ -1971,28 +2020,7 @@ class TorrentService : Service() {
                     // "episode" (lowSpaceWarned resets once space recovers
                     // above the threshold), so it doesn't repeat every
                     // 3-second poll while space stays low.
-                    try {
-                        val notification =
-                            NotificationCompat.Builder(this, "low_space_warning")
-                                .setContentTitle("Low disk space")
-                                .setContentText(
-                                    "Only $mbFree MB free - downloads may fail " +
-                                            "if space runs out"
-                                )
-                                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                                .setAutoCancel(true)
-                                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                                .build()
-
-                        NotificationManagerCompat.from(this).notify(
-                            LOW_SPACE_NOTIFICATION_ID,
-                            notification
-                        )
-                    } catch (e: SecurityException) {
-                        // POST_NOTIFICATIONS not granted - the Execution
-                        // Log warning above still recorded it.
-                    } catch (e: Throwable) {
-                    }
+                    notifier.lowStorage(mbFree)
                 }
             } else {
                 lowSpaceWarned = false
@@ -2000,6 +2028,99 @@ class TorrentService : Service() {
         } catch (_: Throwable) {
             // Not fatal - a storage read error should never crash the update loop.
         }
+    }
+
+    private var resumeSaver: java.util.concurrent.ScheduledExecutorService? = null
+
+    private fun resumeDataDir(): File {
+        val dir = File(filesDir, "resume_data")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    // Backup restore stages its resume files here; they are moved into
+    // resume_data only after the old torrents are removed (see
+    // reloadAfterRestore) so removing a torrent cannot delete them.
+    private fun pendingResumeDir(): File = File(filesDir, "resume_data_pending")
+
+    // Every 30 s, on its own thread (a save can wait briefly for libtorrent).
+    private fun startResumeSaver() {
+        try {
+            val executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor()
+            resumeSaver = executor
+
+            executor.scheduleWithFixedDelay({
+                try {
+                    TorrentNative.saveResumeData(800)
+                } catch (_: Throwable) {
+                }
+            }, 30L, 30L, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (_: Throwable) {
+        }
+    }
+
+    // After a backup restore wrote new settings/torrent list: bring the
+    // running engine in line with them. replace = the old torrents are
+    // dropped from the session first (their files on disk are untouched).
+    private fun reloadAfterRestore(replace: Boolean) {
+        try {
+            if (replace) {
+                TorrentNative.removeAllTorrents(false)
+
+                resumeDataDir().listFiles()?.forEach { f ->
+                    if (f.isFile && f.name.endsWith(".fastresume")) f.delete()
+                }
+            }
+
+            val pending = pendingResumeDir()
+            val files = pending.listFiles()
+
+            if (files != null) {
+                val dir = resumeDataDir()
+
+                for (f in files) {
+                    if (!f.isFile || !f.name.endsWith(".fastresume")) continue
+
+                    val target = File(dir, f.name)
+
+                    // Merge never overwrites resume data of a torrent that
+                    // is already running here.
+                    if (!target.exists()) {
+                        if (!f.renameTo(target)) {
+                            f.copyTo(target, overwrite = false)
+                        }
+                    }
+
+                    f.delete()
+                }
+            }
+
+            pending.delete()
+
+            applySavedConnectionSettings()
+            applySavedGlobalSpeedLimits()
+
+            restored = false
+            restoreSavedTorrents()
+
+            applyNetworkPolicy()
+
+            AppLog.info("Backup restore: engine reloaded (replace=$replace)")
+        } catch (e: Throwable) {
+            AppLog.warning("Backup restore: reload problem: ${e.message}")
+        }
+    }
+
+    // Torrent notifications get their own 1-second loop (the main update
+    // loop above runs every 3 s); the progress-notification frequency
+    // chosen in Notification Settings is applied inside TorrentNotifier.
+    private fun startNotifierLoop() {
+        handler.post(object : Runnable {
+            override fun run() {
+                notifier.poll()
+                handler.postDelayed(this, 1000L)
+            }
+        })
     }
 
     private fun startUpdates() {

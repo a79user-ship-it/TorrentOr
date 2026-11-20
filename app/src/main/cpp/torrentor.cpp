@@ -10,6 +10,10 @@
 #include <cstdio>
 #include <ctime>
 #include <android/log.h>
+#include <fstream>
+#include <iterator>
+#include <chrono>
+#include <sys/stat.h>
 
 #include <libtorrent/session.hpp>
 #include <libtorrent/session_status.hpp>
@@ -25,6 +29,8 @@
 #include <libtorrent/create_torrent.hpp>
 #include <libtorrent/alert.hpp>
 #include <libtorrent/alert_types.hpp>
+#include <libtorrent/write_resume_data.hpp>
+#include <libtorrent/read_resume_data.hpp>
 
 namespace lt = libtorrent;
 
@@ -263,6 +269,125 @@ static std::string getHashFromHandle(const lt::torrent_handle& handle) {
         return extractHashFromMagnet(magnet);
     } catch (...) {
         return "";
+    }
+}
+
+// ------------------------------------------------------------------
+// Resume data. libtorrent can describe exactly which pieces of a torrent
+// are already on disk ("fast resume"). Without it, every restart makes
+// libtorrent re-read and hash all downloaded data ("Checking files").
+//
+// Files live in g_resumeDir as <info-hash>.fastresume. They are written
+// from save_resume_data_alert (see updatePortForwardingAlerts) and read
+// back in applyResumeData() just before a torrent is added. Everything
+// here is best-effort: any failure just means that torrent is checked the
+// normal way, exactly like before this existed.
+// ------------------------------------------------------------------
+static std::string g_resumeDir;
+static int g_resumePending = 0;
+
+static bool isSafeHashName(const std::string& hash) {
+    if (hash.empty() || hash.size() > 64) return false;
+
+    for (char c : hash) {
+        if (!std::isalnum(static_cast<unsigned char>(c))) return false;
+    }
+
+    return true;
+}
+
+static std::string resumeFilePath(const std::string& hash) {
+    return g_resumeDir + "/" + hash + ".fastresume";
+}
+
+static void deleteResumeFile(const std::string& hash) {
+    if (g_resumeDir.empty() || !isSafeHashName(hash)) return;
+    std::remove(resumeFilePath(hash).c_str());
+}
+
+static bool resumeFileExists(const std::string& hash) {
+    if (g_resumeDir.empty() || !isSafeHashName(hash)) return false;
+
+    std::ifstream in(resumeFilePath(hash), std::ios::binary);
+    return static_cast<bool>(in);
+}
+
+// Copies only "what we already have" from the saved resume data into the
+// params about to be added. Deliberately NOT copied: save path, flags,
+// file/piece priorities (the app re-applies its own saved selection), and
+// trackers. A resume file for a torrent with no resume file, or one that
+// cannot be read, leaves params untouched.
+static void applyResumeData(lt::add_torrent_params& params, const std::string& hash) {
+    if (g_resumeDir.empty() || !isSafeHashName(hash)) return;
+
+    try {
+        std::ifstream in(resumeFilePath(hash), std::ios::binary);
+        if (!in) return;
+
+        std::vector<char> buf(
+                (std::istreambuf_iterator<char>(in)),
+                std::istreambuf_iterator<char>()
+        );
+
+        if (buf.empty() || buf.size() > 64u * 1024u * 1024u) return;
+
+        lt::error_code rec;
+        lt::add_torrent_params rp = lt::read_resume_data(
+                lt::span<char const>(buf.data(), buf.size()), rec);
+
+        if (rec) return;
+
+        params.have_pieces = rp.have_pieces;
+        params.verified_pieces = rp.verified_pieces;
+        params.unfinished_pieces = rp.unfinished_pieces;
+        params.renamed_files = rp.renamed_files;
+        params.total_uploaded = rp.total_uploaded;
+        params.total_downloaded = rp.total_downloaded;
+        params.active_time = rp.active_time;
+        params.finished_time = rp.finished_time;
+        params.seeding_time = rp.seeding_time;
+        params.added_time = rp.added_time;
+        params.completed_time = rp.completed_time;
+
+        // A magnet link has no metadata yet; the saved info dictionary
+        // gives it immediately, with nothing to fetch from peers.
+        if (!params.ti && rp.ti) {
+            params.ti = rp.ti;
+        }
+    } catch (...) {
+        // Unreadable or incompatible: ignore, the torrent is just checked.
+    }
+}
+
+static void writeResumeFile(const lt::save_resume_data_alert* alert) {
+    if (!alert || g_resumeDir.empty()) return;
+
+    try {
+        std::string hash = getHashFromHandle(alert->handle);
+        if (!isSafeHashName(hash)) return;
+
+        std::vector<char> buf = lt::write_resume_data_buf(alert->params);
+        if (buf.empty()) return;
+
+        std::string finalPath = resumeFilePath(hash);
+        std::string tmpPath = finalPath + ".tmp";
+
+        {
+            std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!out) return;
+
+            out.write(buf.data(), static_cast<std::streamsize>(buf.size()));
+            out.flush();
+
+            if (!out) {
+                out.close();
+                std::remove(tmpPath.c_str());
+                return;
+            }
+        }
+
+        std::rename(tmpPath.c_str(), finalPath.c_str());
+    } catch (...) {
     }
 }
 
@@ -794,6 +919,19 @@ static void updatePortForwardingAlerts() {
 
         logTorrentAlert(alert);
 
+        // Resume data requested by saveResumeData(): write it to disk.
+        if (auto* rdAlert = lt::alert_cast<lt::save_resume_data_alert>(alert)) {
+            if (g_resumePending > 0) g_resumePending--;
+            writeResumeFile(rdAlert);
+            continue;
+        }
+
+        if (lt::alert_cast<lt::save_resume_data_failed_alert>(alert)) {
+            // Includes "nothing changed since last save" - not an error.
+            if (g_resumePending > 0) g_resumePending--;
+            continue;
+        }
+
         // Feature: magnet file selection (app + Web UI). addMagnetPaused
         // deliberately keeps auto_managed on so libtorrent will run the
         // torrent long enough to fetch its metadata - but that same
@@ -979,6 +1117,8 @@ Java_com_example_torrentor_TorrentNative_addMagnet(
 
     params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
+    applyResumeData(params, hash);
+
     auto handle = g_session->add_torrent(params, ec);
 
     // Bug fix: a newly added torrent used to inherit g_pausedAll, which
@@ -1034,6 +1174,8 @@ Java_com_example_torrentor_TorrentNative_addMagnetPaused(
     // clears auto_managed, and the service pauses restored ones the same way.
     params.flags |= lt::torrent_flags::paused;
 
+    applyResumeData(params, hash);
+
     auto handle = g_session->add_torrent(params, ec);
 
     if (ec || !handle.is_valid()) {
@@ -1081,6 +1223,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFile(
     params.ti = info;
     params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
 
+    applyResumeData(params, hash);
+
     auto handle = g_session->add_torrent(params, ec);
 
     // Bug fix: see addMagnet above - new torrents must not inherit the
@@ -1127,6 +1271,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFilePaused(
     params.save_path = torrentSavePath.empty() ? g_savePath : torrentSavePath;
     params.flags |= lt::torrent_flags::paused;
     params.flags &= ~lt::torrent_flags::auto_managed;
+
+    applyResumeData(params, hash);
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -1236,6 +1382,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelected(
 
     params.file_priorities = priorities;
 
+    applyResumeData(params, hash);
+
     auto handle = g_session->add_torrent(params, ec);
 
     // Bug fix: see addMagnet above - new torrents must not inherit the
@@ -1310,6 +1458,8 @@ Java_com_example_torrentor_TorrentNative_addTorrentFileSelectedPaused(
     }
 
     params.file_priorities = priorities;
+
+    applyResumeData(params, hash);
 
     auto handle = g_session->add_torrent(params, ec);
 
@@ -1476,7 +1626,11 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
             // like the recheck did nothing. Reporting the real state here
             // makes it visible again, same as before.
             state = "Checking files";
-        } else if (st.is_seeding) {
+        } else if (st.is_seeding || st.state == lt::torrent_status::finished) {
+            // A partial download (only some files selected) never reaches
+            // libtorrent's "seeding" state - it sits in "finished" once the
+            // selected files are done - yet it is seeding those files, so
+            // report it as Seeding instead of "Downloading".
             state = "Seeding";
         } else {
             // Feature: make it visible that an incomplete torrent is
@@ -1623,6 +1777,94 @@ Java_com_example_torrentor_TorrentNative_resumeTorrent(
     }
 }
 
+// Where fast-resume files are kept (app-private folder, created by the
+// caller). Safe to call more than once.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_setResumeDataDir(
+        JNIEnv* env,
+        jobject,
+        jstring dir) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    try {
+        g_resumeDir = toString(env, dir);
+
+        if (!g_resumeDir.empty()) {
+            ::mkdir(g_resumeDir.c_str(), 0700);
+        }
+    } catch (...) {
+        g_resumeDir.clear();
+    }
+}
+
+// Asks libtorrent for fresh resume data of every torrent that has
+// metadata, then waits up to waitMs for the answers and writes them to
+// disk. Returns how many torrents were asked, 0 on any problem.
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_example_torrentor_TorrentNative_saveResumeData(
+        JNIEnv*,
+        jobject,
+        jint waitMs) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    if (!g_session || g_resumeDir.empty()) {
+        return 0;
+    }
+
+    int requested = 0;
+
+    try {
+        // Write whatever earlier requests produced first.
+        updatePortForwardingAlerts();
+        g_resumePending = 0;
+
+        for (auto& handle : g_handles) {
+            if (!handle.is_valid()) continue;
+
+            try {
+                if (!handle.torrent_file()) continue;
+
+                std::string hash = getHashFromHandle(handle);
+                if (!isSafeHashName(hash)) continue;
+
+                // Unchanged torrents are skipped, unless this one has
+                // never been saved.
+                lt::resume_data_flags_t flags = lt::torrent_handle::save_info_dict;
+
+                if (resumeFileExists(hash)) {
+                    flags |= lt::torrent_handle::only_if_modified;
+                }
+
+                handle.save_resume_data(flags);
+                requested++;
+                g_resumePending++;
+            } catch (...) {
+                // Skip this torrent, carry on with the rest.
+            }
+        }
+
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(waitMs > 0 ? waitMs : 0);
+
+        while (g_resumePending > 0 && std::chrono::steady_clock::now() < deadline) {
+            g_session->wait_for_alert(std::chrono::milliseconds(50));
+            updatePortForwardingAlerts();
+        }
+
+        updatePortForwardingAlerts();
+        g_resumePending = 0;
+    } catch (...) {
+        g_resumePending = 0;
+        return 0;
+    }
+
+    return requested;
+}
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_torrentor_TorrentNative_removeTorrent(
@@ -1636,6 +1878,9 @@ Java_com_example_torrentor_TorrentNative_removeTorrent(
     int i = index - 1;
 
     if (i >= 0 && i < static_cast<int>(g_handles.size())) {
+        // A removed torrent must not leave stale resume data behind.
+        std::string removedHash = getHashFromHandle(g_handles[i]);
+
         if (g_session && g_handles[i].is_valid()) {
             if (deleteFiles) {
                 g_session->remove_torrent(
@@ -1658,6 +1903,8 @@ Java_com_example_torrentor_TorrentNative_removeTorrent(
                     g_pausedHandles.begin() + i
             );
         }
+
+        deleteResumeFile(removedHash);
     }
 }
 
@@ -1675,6 +1922,8 @@ Java_com_example_torrentor_TorrentNative_removeAllTorrents(
             if (!handle.is_valid()) {
                 continue;
             }
+
+            deleteResumeFile(getHashFromHandle(handle));
 
             try {
                 if (deleteFiles) {
@@ -1923,6 +2172,30 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
     int totalSeeds = st.list_seeds;
     int totalPeers = st.list_peers;
 
+    // Torrent-wide copies, computed exactly like the General/Swarm tabs
+    // (getTorrentAvailability): libtorrent's distributed_copies, or - when
+    // it is -1 - the tracker seed counts. A finished torrent, and a partial
+    // download that has finished its selected files, has few or no
+    // connected peers (seeds don't stay connected to a seeder), so a purely
+    // per-file count of connected peers + us would read just "1.000". For a
+    // file we hold completely the torrent-wide figure is the real one, so
+    // it is used when it is higher (see below).
+    float torrentAvail = st.distributed_copies;
+
+    if (torrentAvail < 0.0f) {
+        if (st.list_seeds > 0) {
+            torrentAvail = static_cast<float>(st.list_seeds);
+        } else if (st.num_seeds > 0) {
+            torrentAvail = static_cast<float>(st.num_seeds);
+        } else if (st.is_seeding || st.progress >= 1.0f) {
+            torrentAvail = 1.0f;
+        } else {
+            torrentAvail = 0.0f;
+        }
+    }
+
+    int torrentCopiesMilli = static_cast<int>(torrentAvail * 1000.0f + 0.5f);
+
     std::string output;
     auto const& files = info->files();
 
@@ -1949,6 +2222,17 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
         // nothing left to request from it, unchoked or not.
         int uploadingCount = 0;
 
+        // Feature: per-file availability - which pieces of this file exist
+        // anywhere we can reach: at least one connected peer has them (their
+        // bitfield, read in the loop below) or we already have them. Reported
+        // as the percentage of the file's pieces that are available, -1 when
+        // it can't be worked out. Read-only; changes nothing.
+        // pieceCopies[k] = how many connected peers have piece k of this
+        // file (we add ourselves below), which also gives the file's
+        // "distributed copies" figure.
+        std::vector<int> pieceCopies(
+                numFilePieces > 0 ? static_cast<size_t>(numFilePieces) : 0, 0);
+
         if (numFilePieces > 0) {
             for (auto const& peer : peers) {
                 int bitfieldSize = peer.pieces.size();
@@ -1966,6 +2250,10 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
 
                     if (peer.pieces[lt::piece_index_t(p)]) {
                         haveCount++;
+
+                        if (p - firstPiece >= 0 && p - firstPiece < numFilePieces) {
+                            pieceCopies[static_cast<size_t>(p - firstPiece)]++;
+                        }
                     }
                 }
 
@@ -1984,6 +2272,65 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
             }
         }
 
+        int availabilityPercent = -1;
+        // Distributed copies in thousandths: whole number = how many full
+        // copies of the file exist (peers + us) i.e. the rarest piece's
+        // count; fraction = share of pieces that have more than that.
+        // -1 = unknown.
+        int copiesMilli = -1;
+
+        try {
+            if (numFilePieces <= 0) {
+                availabilityPercent = 100;
+            } else {
+                int availableCount = 0;
+                int minCopies = -1;
+                int ownedCount = 0;
+
+                for (int k = 0; k < numFilePieces; ++k) {
+                    int c = pieceCopies[static_cast<size_t>(k)];
+
+                    if (handle.have_piece(lt::piece_index_t(firstPiece + k))) {
+                        c++;
+                        ownedCount++;
+                    }
+
+                    pieceCopies[static_cast<size_t>(k)] = c;
+
+                    if (c > 0) {
+                        availableCount++;
+                    }
+
+                    if (minCopies < 0 || c < minCopies) {
+                        minCopies = c;
+                    }
+                }
+
+                availabilityPercent = static_cast<int>(
+                        (static_cast<long long>(availableCount) * 100LL) / numFilePieces);
+
+                int above = 0;
+
+                for (int k = 0; k < numFilePieces; ++k) {
+                    if (pieceCopies[static_cast<size_t>(k)] > minCopies) {
+                        above++;
+                    }
+                }
+
+                copiesMilli = minCopies * 1000 + static_cast<int>(
+                        (static_cast<long long>(above) * 1000LL) / numFilePieces);
+
+                // We hold this whole file: report the torrent-wide copies
+                // when higher (connected peers alone under-count it).
+                if (ownedCount >= numFilePieces && torrentCopiesMilli > copiesMilli) {
+                    copiesMilli = torrentCopiesMilli;
+                }
+            }
+        } catch (...) {
+            availabilityPercent = -1;
+            copiesMilli = -1;
+        }
+
         output += std::to_string(f);
         output += "|";
         output += std::to_string(seedCount);
@@ -1995,6 +2342,10 @@ Java_com_example_torrentor_TorrentNative_getTorrentFileSwarm(
         output += std::to_string(totalPeers);
         output += "|";
         output += std::to_string(uploadingCount);
+        output += "|";
+        output += std::to_string(availabilityPercent);
+        output += "|";
+        output += std::to_string(copiesMilli);
         output += "\n";
     }
 
@@ -2084,28 +2435,94 @@ Java_com_example_torrentor_TorrentNative_getTorrentTrackerStatus(
             output += "\nTier: ";
             output += std::to_string(tracker.tier);
 
+            // Real per-tracker state. libtorrent 2.x keeps fail count, last
+            // error, the tracker's own message and scrape numbers on each
+            // endpoint (one per local address / IP family) and per
+            // info-hash version, not on the announce_entry itself.
+            int maxFails = 0;
+            bool anyUpdating = false;
+            std::string lastError;
+            std::string trackerMessage;
+            int scrapeIncomplete = -1;
+            int scrapeComplete = -1;
+            int scrapeDownloaded = -1;
+            int endpointCount = 0;
+            int endpointsFailing = 0;
+
+            for (const auto& ep : tracker.endpoints) {
+                endpointCount++;
+                bool epFailing = false;
+
+                for (const auto& ih : ep.info_hashes) {
+                    if (static_cast<int>(ih.fails) > maxFails) {
+                        maxFails = static_cast<int>(ih.fails);
+                    }
+
+                    if (ih.fails > 0) epFailing = true;
+                    if (ih.updating) anyUpdating = true;
+
+                    if (ih.last_error) {
+                        epFailing = true;
+                        if (lastError.empty()) lastError = ih.last_error.message();
+                    }
+
+                    if (trackerMessage.empty() && !ih.message.empty()) {
+                        trackerMessage = ih.message;
+                    }
+
+                    if (ih.scrape_incomplete > scrapeIncomplete) scrapeIncomplete = ih.scrape_incomplete;
+                    if (ih.scrape_complete > scrapeComplete) scrapeComplete = ih.scrape_complete;
+                    if (ih.scrape_downloaded > scrapeDownloaded) scrapeDownloaded = ih.scrape_downloaded;
+                }
+
+                if (epFailing) endpointsFailing++;
+            }
+
+            bool allFailing = endpointCount > 0 && endpointsFailing == endpointCount;
+
             output += "\nFails: ";
-            output += std::to_string(tracker.fails);
+            output += std::to_string(maxFails);
 
             output += "\nVerified: ";
             output += tracker.verified ? "Yes" : "No";
 
+            // "Status: Error / Failed" is matched by TorrentNotifier
+            // (tracker error notification) - keep that exact text.
             output += "\nStatus: ";
-            if (tracker.verified) {
-                output += "Working";
-            } else if (tracker.fails > 0) {
+            if (allFailing) {
                 output += "Error / Failed";
+            } else if (anyUpdating) {
+                output += "Updating...";
+            } else if (tracker.verified || (endpointCount > 0 && endpointsFailing < endpointCount &&
+                                             (!trackerMessage.empty() || scrapeIncomplete >= 0))) {
+                output += "Working";
             } else {
                 output += "Not contacted yet";
             }
 
             output += "\nMessage: ";
-            if (tracker.verified) {
+            if (!trackerMessage.empty()) {
+                output += trackerMessage;
+            } else if (allFailing) {
+                output += "No message from the tracker";
+            } else if (tracker.verified) {
                 output += "Announce OK";
-            } else if (tracker.fails > 0) {
-                output += "Tracker failed or did not respond";
             } else {
                 output += "No tracker message yet";
+            }
+
+            if (!lastError.empty()) {
+                output += "\nLast error: ";
+                output += lastError;
+            }
+
+            if (scrapeIncomplete >= 0 || scrapeComplete >= 0 || scrapeDownloaded >= 0) {
+                output += "\nTracker reports: Seeds ";
+                output += scrapeComplete >= 0 ? std::to_string(scrapeComplete) : std::string("--");
+                output += "  Peers ";
+                output += scrapeIncomplete >= 0 ? std::to_string(scrapeIncomplete) : std::string("--");
+                output += "  Downloaded ";
+                output += scrapeDownloaded >= 0 ? std::to_string(scrapeDownloaded) : std::string("--");
             }
 
             output += "\nSource: ";
@@ -2411,8 +2828,8 @@ Java_com_example_torrentor_TorrentNative_getTorrentPieceSize(
 
     std::string output;
     output += "Piece size: ";
-    output += std::to_string(pieceSize);
-    output += " bytes\n";
+    output += formatBytes(pieceSize);
+    output += "\n";
 
     output += "Pieces: ";
     output += std::to_string(pieces);
@@ -2755,6 +3172,102 @@ Java_com_example_torrentor_TorrentNative_moveTorrentStorage(
     return JNI_TRUE;
 }
 
+// Piece map with one state per piece (coloured by the app / Web UI):
+//   "OK|<totalPieces>|<completedPieces>|<pieceSize>\n<states>"
+// where <states> has one character per piece (capped at 20000):
+//   '2' = downloaded, '1' = downloading now (some blocks received),
+//   '0' = missing but wanted, 'x' = missing and skipped (file not selected).
+// Anything not starting with "OK|" is a plain message ("Metadata not
+// ready", ...) for the caller to fall back on.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentPieceStates(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("Invalid torrent");
+    }
+
+    try {
+        auto info = handle.torrent_file();
+
+        if (!info) {
+            return env->NewStringUTF("Metadata not ready");
+        }
+
+        lt::torrent_status st = handle.status(lt::torrent_handle::query_pieces);
+
+        int totalPieces = info->num_pieces();
+        int pieceSize = info->piece_length();
+
+        if (totalPieces <= 0) {
+            return env->NewStringUTF("No pieces");
+        }
+
+        int shown = totalPieces > 20000 ? 20000 : totalPieces;
+
+        std::string states(static_cast<size_t>(shown), '0');
+        int completed = 0;
+
+        // Skipped = priority 0 (one call for all pieces, not one per piece).
+        std::vector<lt::download_priority_t> priorities;
+
+        try {
+            priorities = handle.get_piece_priorities();
+        } catch (...) {
+            priorities.clear();
+        }
+
+        for (int p = 0; p < totalPieces; ++p) {
+            bool have = p < static_cast<int>(st.pieces.size()) && st.pieces[p];
+            if (have) completed++;
+
+            if (p >= shown) continue;
+
+            if (have) {
+                states[p] = '2';
+            } else if (p < static_cast<int>(priorities.size()) &&
+                       priorities[p] == lt::dont_download) {
+                states[p] = 'x';
+            }
+        }
+
+        // Pieces that are partly there right now.
+        try {
+            auto queue = handle.get_download_queue();
+
+            for (const auto& pi : queue) {
+                int p = static_cast<int>(pi.piece_index);
+
+                if (p >= 0 && p < shown && states[p] != '2' &&
+                    (pi.finished + pi.writing) > 0) {
+                    states[p] = '1';
+                }
+            }
+        } catch (...) {
+        }
+
+        std::string output = "OK|" + std::to_string(totalPieces) + "|" +
+                std::to_string(completed) + "|" + std::to_string(pieceSize) + "\n" + states;
+
+        return env->NewStringUTF(output.c_str());
+    } catch (...) {
+        return env->NewStringUTF("Pieces not ready");
+    }
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentPieces(
@@ -2841,8 +3354,8 @@ Java_com_example_torrentor_TorrentNative_getTorrentPieces(
     output += "%\n";
 
     output += "Piece size: ";
-    output += std::to_string(pieceSize);
-    output += " bytes\n\n";
+    output += formatBytes(pieceSize);
+    output += "\n\n";
 
     output += "Piece map:\n";
     output += "■ = downloaded\n";
