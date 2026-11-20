@@ -6712,7 +6712,9 @@ async function loadTextTab(index, tab) {
     const data = await res.json();
     const el = document.getElementById('tabText');
     if (!el || openFilesIndex !== index || openFilesTab !== tab) return;
-    if (tab === 'swarmhealth' && data.ok) {
+    if (tab === 'trackers' && data.ok) {
+      el.innerHTML = colorTrackerText(data.text || '');
+    } else if (tab === 'swarmhealth' && data.ok) {
       el.innerHTML = colorSwarmText(data.text || '');
     } else {
       el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
@@ -6722,6 +6724,66 @@ async function loadTextTab(index, tab) {
     const el = document.getElementById('tabText');
     if (el && openFilesIndex === index && openFilesTab === tab) el.textContent = 'Could not load';
   }
+}
+
+// Tracker tab: summary line, a coloured dot on each URL line and the
+// Status value (and Message / Last error when wrong) in the status colour.
+// Display only - the text from the server is not changed.
+function colorTrackerText(text) {
+  function esc(t) {
+    return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  if (text.indexOf('Tracker Status\n\n') !== 0) return esc(text);
+
+  const palette = { 0: '#4CD964', 1: '#4DA3FF', 2: '#FF5252', 3: '#8A93A3', 4: '#FFA726' };
+  const names = { 0: 'working', 1: 'updating', 4: 'warning', 2: 'error', 3: 'not contacted' };
+
+  const blocks = text.split('\n\n').slice(1).filter(function(b) { return b.trim() !== ''; })
+    .map(function(b) { return b.split('\n'); });
+
+  const kinds = blocks.map(function(lines) {
+    let status = '';
+    let hasLastError = false;
+    lines.forEach(function(line) {
+      if (line.indexOf('Status: ') === 0) status = line.substring(8);
+      if (line.indexOf('Last error: ') === 0) hasLastError = true;
+    });
+    if (status.indexOf('Error') === 0) return 2;
+    if (status.indexOf('Updating') === 0) return 1;
+    if (status.indexOf('Working') === 0) return hasLastError ? 4 : 0;
+    return 3;
+  });
+
+  function dot(kind) {
+    return '<span style="color:' + palette[kind] + ';">&#9679;</span>';
+  }
+
+  const summary = [0, 1, 4, 2, 3].map(function(kind) {
+    const n = kinds.filter(function(k) { return k === kind; }).length;
+    if (n === 0) return '';
+    return dot(kind) + ' <span style="color:' + palette[kind] + ';font-weight:bold;">' + n + ' ' + names[kind] + '</span>';
+  }).filter(function(x) { return x !== ''; }).join('&nbsp;&nbsp;&nbsp;');
+
+  const body = blocks.map(function(lines, b) {
+    const kind = kinds[b];
+    const color = palette[kind];
+    return lines.map(function(line) {
+      if (line.indexOf('URL: ') === 0) {
+        return dot(kind) + ' <b>' + esc(line) + '</b>';
+      }
+      if (line.indexOf('Status: ') === 0) {
+        return 'Status: <span style="color:' + color + ';font-weight:bold;">' + esc(line.substring(8)) + '</span>';
+      }
+      if ((kind === 2 || kind === 4) &&
+          (line.indexOf('Message: ') === 0 || line.indexOf('Last error: ') === 0)) {
+        return '<span style="color:' + color + ';">' + esc(line) + '</span>';
+      }
+      return esc(line);
+    }).join('\n');
+  }).join('\n\n');
+
+  return 'Tracker Status\n' + summary + '\n\n' + body;
 }
 
 // Swarm Health text with the Health word and the bar coloured by level.

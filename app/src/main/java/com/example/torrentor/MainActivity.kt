@@ -6647,7 +6647,7 @@ class MainActivity : AppCompatActivity() {
                 currentDetailsTab = "Trackers"
                 clearContent()
 
-                contentText.text = try {
+                contentText.text = colorTrackerStatus(try {
                     TorrentNative.getTorrentTrackerStatus(torrentIndex)
                 } catch (e: Throwable) {
                     try {
@@ -6655,7 +6655,7 @@ class MainActivity : AppCompatActivity() {
                     } catch (e2: Throwable) {
                         "Could not load tracker status"
                     }
-                }
+                })
             }
         }
 
@@ -7410,7 +7410,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             "Trackers" -> {
-                contentText.text = try {
+                contentText.text = colorTrackerStatus(try {
                     TorrentNative.getTorrentTrackerStatus(torrentIndex)
                 } catch (e: Throwable) {
                     try {
@@ -7418,7 +7418,7 @@ class MainActivity : AppCompatActivity() {
                     } catch (e2: Throwable) {
                         "Could not load tracker status"
                     }
-                }
+                })
             }
             "Files" -> {
                 val fileListLayout = currentDetailsFileListLayout
@@ -9211,6 +9211,109 @@ class MainActivity : AppCompatActivity() {
         } ?: throw Exception("Cannot open torrent file")
 
         return file.absolutePath
+    }
+
+    // Colours the Tracker tab: a summary line, a coloured dot on each
+    // tracker's URL line, and the Status value (plus its Message / Last
+    // error lines when something is wrong) in the status colour. The text
+    // itself is never changed, so TorrentNotifier (which reads the raw
+    // native text) is unaffected.
+    private fun colorTrackerStatus(text: String): CharSequence {
+        if (!text.startsWith("Tracker Status\n\n")) return text
+
+        val green = Color.parseColor("#4CD964")
+        val blue = Color.parseColor("#4DA3FF")
+        val orange = Color.parseColor("#FFA726")
+        val red = Color.parseColor("#FF5252")
+        val grey = Color.parseColor("#8A93A3")
+
+        // 0 working, 1 updating, 2 error, 3 not contacted, 4 warning
+        fun kindOf(lines: List<String>): Int {
+            val status = lines.firstOrNull { it.startsWith("Status: ") }
+                ?.substring("Status: ".length) ?: ""
+            val hasLastError = lines.any { it.startsWith("Last error: ") }
+            return when {
+                status.startsWith("Error") -> 2
+                status.startsWith("Updating") -> 1
+                status.startsWith("Working") -> if (hasLastError) 4 else 0
+                else -> 3
+            }
+        }
+
+        fun colorOf(kind: Int): Int = when (kind) {
+            0 -> green
+            1 -> blue
+            2 -> red
+            4 -> orange
+            else -> grey
+        }
+
+        val blocks = text.split("\n\n").drop(1).filter { it.isNotBlank() }.map { it.split("\n") }
+        val kinds = blocks.map { kindOf(it) }
+
+        val out = android.text.SpannableStringBuilder()
+
+        fun add(str: String, color: Int?, bold: Boolean) {
+            val start = out.length
+            out.append(str)
+            if (color != null) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(color),
+                    start,
+                    out.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+            if (bold) {
+                out.setSpan(
+                    android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                    start,
+                    out.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+        }
+
+        add("Tracker Status\n", null, false)
+
+        val labels = listOf(0 to "working", 1 to "updating", 4 to "warning", 2 to "error", 3 to "not contacted")
+        var first = true
+        for ((kind, label) in labels) {
+            val n = kinds.count { it == kind }
+            if (n == 0) continue
+            if (!first) add("   ", null, false)
+            first = false
+            add("\u25CF", colorOf(kind), false)
+            add(" $n $label", colorOf(kind), true)
+        }
+        out.append("\n\n")
+
+        for ((b, lines) in blocks.withIndex()) {
+            val kind = kinds[b]
+            val color = colorOf(kind)
+
+            for ((l, line) in lines.withIndex()) {
+                when {
+                    line.startsWith("URL: ") -> {
+                        add("\u25CF ", color, false)
+                        add(line, null, true)
+                    }
+                    line.startsWith("Status: ") -> {
+                        add("Status: ", null, false)
+                        add(line.substring("Status: ".length), color, true)
+                    }
+                    (kind == 2 || kind == 4) &&
+                        (line.startsWith("Message: ") || line.startsWith("Last error: ")) ->
+                        add(line, color, false)
+                    else -> add(line, null, false)
+                }
+                if (l < lines.size - 1) out.append("\n")
+            }
+
+            out.append("\n\n")
+        }
+
+        return out
     }
 
     // Colours the Swarm Health text: the "Health:" word and the bar follow
