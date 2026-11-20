@@ -6714,7 +6714,7 @@ async function loadTextTab(index, tab) {
     if (!el || openFilesIndex !== index || openFilesTab !== tab) return;
     if (tab === 'trackers' && data.ok) {
       el.innerHTML = colorTrackerText(data.text || '');
-    } else if (tab === 'swarmhealth' && data.ok) {
+    } else if ((tab === 'swarmhealth' || tab === 'general') && data.ok) {
       el.innerHTML = colorSwarmText(data.text || '');
     } else {
       el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
@@ -6745,13 +6745,15 @@ function colorTrackerText(text) {
   const kinds = blocks.map(function(lines) {
     let status = '';
     let hasLastError = false;
+    let verified = false;
     lines.forEach(function(line) {
       if (line.indexOf('Status: ') === 0) status = line.substring(8);
       if (line.indexOf('Last error: ') === 0) hasLastError = true;
+      if (line === 'Verified: Yes') verified = true;
     });
     if (status.indexOf('Error') === 0) return 2;
     if (status.indexOf('Updating') === 0) return 1;
-    if (status.indexOf('Working') === 0) return hasLastError ? 4 : 0;
+    if (status.indexOf('Working') === 0) return (hasLastError && !verified) ? 4 : 0;
     return 3;
   });
 

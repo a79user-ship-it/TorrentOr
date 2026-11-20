@@ -26,8 +26,8 @@ android {
 
         // (changed) Raise versionCode with every release you install over an
         // older one. Android refuses an update whose versionCode is lower.
-        versionCode = 138
-        versionName = "2.17"
+        versionCode = 141
+        versionName = "2.20"
 
         ndk {
             abiFilters += listOf(

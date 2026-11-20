@@ -7653,7 +7653,7 @@ class MainActivity : AppCompatActivity() {
         text.append("Hash:\n").append(hash).append("\n\n")
         text.append("Magnet:\n").append(magnet)
 
-        contentText.text = text.toString()
+        contentText.text = colorSwarmHealth(text.toString())
     }
 
     private fun getTorrentStatusLine(torrentIndex: Int): String {
@@ -8642,12 +8642,12 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // detail tabs are heavier: every third round (3 s) -
-                    // except Peers and Files, which the user wants live at
+                    // except Peers, Files and Trackers, which the user wants live at
                     // 1 s (peer connections/speeds, and the per-file
                     // progress/speed/ETA/seeds/peers, all change quickly).
                     uiTick++
 
-                    if (currentDetailsTab == "Peers" || currentDetailsTab == "Files") {
+                    if (currentDetailsTab == "Peers" || currentDetailsTab == "Files" || currentDetailsTab == "Trackers") {
                         updateActiveDetailsTab()
                     } else if (uiTick % 3 == 0) {
                         updateActiveDetailsTab()
@@ -9232,10 +9232,13 @@ class MainActivity : AppCompatActivity() {
             val status = lines.firstOrNull { it.startsWith("Status: ") }
                 ?.substring("Status: ".length) ?: ""
             val hasLastError = lines.any { it.startsWith("Last error: ") }
+            val verified = lines.any { it == "Verified: Yes" }
+            // An old "Last error" on a verified tracker is just leftover
+            // history from an earlier attempt - still green.
             return when {
                 status.startsWith("Error") -> 2
                 status.startsWith("Updating") -> 1
-                status.startsWith("Working") -> if (hasLastError) 4 else 0
+                status.startsWith("Working") -> if (hasLastError && !verified) 4 else 0
                 else -> 3
             }
         }
