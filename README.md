@@ -168,3 +168,31 @@ Users are responsible for complying with the copyright laws applicable in their 
 Made with ❤️ using Kotlin, Android NDK and native libtorrent.
 
 </p>
+
+## ❤️ Support TorrentOr
+
+TorrentOr is an independent Android torrent client built to provide a powerful, reliable, and user-friendly downloading experience.
+
+Developing and maintaining an application takes considerable time, effort, testing, and continuous improvements. Your support helps keep TorrentOr growing.
+
+Your contributions help with:
+
+- 🚀 Developing new features and improvements.
+- 🛠️ Fixing bugs and improving stability.
+- ⚡ Optimizing performance and download efficiency.
+- 📱 Maintaining compatibility with newer Android versions.
+- 💡 Exploring new ideas based on community feedback.
+
+Every contribution, no matter how small, makes a difference.
+
+You don't have to donate to enjoy TorrentOr. Using the app, reporting bugs, sharing feedback, and recommending it to others are equally appreciated.
+
+If you enjoy TorrentOr and want to support its continued development, consider buying me a coffee!
+
+<a href="https://buymeacoffee.com/a79user">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="200">
+</a>
+
+**Thank you for supporting independent development! ❤️**
+
+— TorrentOr Developer
