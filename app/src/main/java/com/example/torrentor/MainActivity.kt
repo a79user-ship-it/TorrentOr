@@ -200,44 +200,67 @@ class MainActivity : AppCompatActivity() {
     // results, RSS feed items), while still honoring the user's chosen
     // card color theme from cardColor() above.
     private fun roundedCardBackground(): android.graphics.drawable.GradientDrawable {
+        // Every card (torrents, search results, RSS feeds...) gets a thin
+        // outline in a lighter shade of the theme's card color.
         return android.graphics.drawable.GradientDrawable().apply {
             setColor(cardColor())
             cornerRadius = 22f
+            setStroke(
+                (1f * resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                outlineColor()
+            )
         }
     }
 
-    // Torrent cards on the main list: same as above, plus a thin lighter
-    // blue outline in the Deep Blue theme only.
     private fun torrentCardBackground(): android.graphics.drawable.GradientDrawable {
-        return roundedCardBackground().apply {
-            if (isDeepBlueTheme()) {
-                setStroke(
-                    (1f * resources.displayMetrics.density).toInt().coerceAtLeast(1),
-                    Color.parseColor("#3F7FD8")
-                )
-            }
-        }
+        return roundedCardBackground()
     }
 
-    // Deep Blue theme only: buttons get the same blue as the torrent cards
-    // instead of the default faint teal tint. Used for the main screen's
-    // buttons (Switch Theme through Sort, including the Filter buttons),
-    // the buttons inside each torrent card, and the details tabs. Other
-    // themes keep the normal buttons, because their card colours (light
-    // blue, orange...) would not leave the teal text readable.
+    // Every theme: buttons are filled with the theme's card color and have
+    // a thin lighter outline (the Deep Blue look), instead of the default
+    // faint teal tint. Used for the main screen's buttons, the buttons inside
+    // each torrent card, the details tabs and the buttons on every screen.
     private fun isDeepBlueTheme(): Boolean {
         return getSharedPreferences("prefs", MODE_PRIVATE)
             .getString("theme_color", "blue") == "deepblue"
     }
 
-    // Buttons that sit ON a card are the same blue as the card, so they get
-    // a thin lighter outline - otherwise the button edges would disappear.
-    private fun deepBlueButtons(onCard: Boolean, vararg buttons: Button) {
-        if (!isDeepBlueTheme()) return
+    // Outline and pressed colors for the current theme. Deep Blue keeps its
+    // hand-picked blues; the other themes use a lighter shade of their own
+    // card color, so every theme gets the same outlined look.
+    private fun outlineColor(): Int {
+        return if (isDeepBlueTheme()) {
+            Color.parseColor("#3F7FD8")
+        } else {
+            androidx.core.graphics.ColorUtils.blendARGB(cardColor(), Color.WHITE, 0.40f)
+        }
+    }
 
+    private fun pressedFillColor(): Int {
+        return if (isDeepBlueTheme()) {
+            Color.parseColor("#2E74D6")
+        } else {
+            androidx.core.graphics.ColorUtils.blendARGB(cardColor(), Color.WHITE, 0.25f)
+        }
+    }
+
+    private fun pressedOutlineColor(): Int {
+        return if (isDeepBlueTheme()) {
+            Color.parseColor("#7FB2F0")
+        } else {
+            androidx.core.graphics.ColorUtils.blendARGB(cardColor(), Color.WHITE, 0.65f)
+        }
+    }
+
+    private fun deepBlueButtons(onCard: Boolean, vararg buttons: Button) {
         val density = resources.displayMetrics.density
         val strokeWidth = (1f * density).toInt().coerceAtLeast(1)
-        val outline = Color.parseColor("#3F7FD8")
+        val outline = outlineColor()
+
+        // The teal button text is unreadable on bright cards (orange, light
+        // blue, rose...), so those themes get white text instead.
+        val teal = Color.parseColor("#4FD1C5")
+        val whiteText = androidx.core.graphics.ColorUtils.calculateContrast(teal, cardColor()) < 3.0
 
         for (button in buttons) {
             val normal = android.graphics.drawable.GradientDrawable().apply {
@@ -249,14 +272,18 @@ class MainActivity : AppCompatActivity() {
             // Lighter blue while the finger is down, so every press is
             // visibly acknowledged (Pause, Resume, Force Recheck...).
             val pressed = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#2E74D6"))
+                setColor(pressedFillColor())
                 cornerRadius = 8f * density
-                setStroke(strokeWidth, Color.parseColor("#7FB2F0"))
+                setStroke(strokeWidth, pressedOutlineColor())
             }
 
             val states = android.graphics.drawable.StateListDrawable().apply {
                 addState(intArrayOf(android.R.attr.state_pressed), pressed)
                 addState(intArrayOf(), normal)
+            }
+
+            if (whiteText) {
+                button.setTextColor(Color.WHITE)
             }
 
             button.background = DeepBlueRipple(
@@ -266,39 +293,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Other themes: buttons keep their normal look but flash lighter while
-    // pressed, so every press is visibly acknowledged on any color.
-    private fun pressFeedback(vararg buttons: Button) {
-        if (isDeepBlueTheme()) return
-
-        val density = resources.displayMetrics.density
-
-        for (button in buttons) {
-            if (button.foreground is PressFlash) continue
-
-            val flash = android.graphics.drawable.GradientDrawable().apply {
-                setColor(Color.parseColor("#66FFFFFF"))
-                cornerRadius = 8f * density
-            }
-
-            val states = PressFlash()
-            states.addState(intArrayOf(android.R.attr.state_pressed), flash)
-            states.addState(intArrayOf(), android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
-            button.foreground = states
-        }
-    }
-
-    private fun flashTree(view: android.view.View) {
-        if (view is Button && view !is CompoundButton) {
-            pressFeedback(view)
-        } else if (view is android.view.ViewGroup) {
-            for (i in 0 until view.childCount) {
-                flashTree(view.getChildAt(i))
-            }
-        }
-    }
-
-    // Deep Blue only: every plain button on every screen (Settings, Web UI,
+    // Every theme: every plain button on every screen (Settings, Web UI,
     // RSS, Notifications, Online Search, Execution Log...) gets the same
     // look as the main-screen buttons. Buttons are built in code and
     // rebuilt often, so this runs after each layout pass and only touches
@@ -319,17 +314,57 @@ class MainActivity : AppCompatActivity() {
 
     private fun installDeepBlueButtonWatcher() {
         window.decorView.viewTreeObserver.addOnGlobalLayoutListener {
-            if (isDeepBlueTheme()) {
-                restyleDeepBlueTree(window.decorView)
-            } else {
-                flashTree(window.decorView)
+            restyleDeepBlueTree(window.decorView)
+            addMissingButtonIcons(window.decorView)
+        }
+    }
+
+    // Colored icon for buttons that were built without one (Refresh, Apply,
+    // Save, Enable/Disable DHT, Copy Address...), picked from the button's
+    // text. Buttons that already have an icon, and ones whose text changes
+    // meaning (Add/Added, Turn On/Off), are left alone.
+    private fun iconNameForButtonText(text: String): String? {
+        return when {
+            text == "Refresh" -> "refresh"
+            text.startsWith("Apply") -> "check"
+            text == "Save" || text == "Create Backup" -> "save"
+            text == "Restore from Backup" -> "recheck"
+            text == "Cancel" || text == "Clear Search" -> "selectnone"
+            text == "Add all" || text == "Add Custom Provider" -> "plus"
+            text.startsWith("Download All") || text == "Download Selected" -> "download"
+            text.startsWith("Auto-download") -> "download"
+            text == "Enable DHT" || text == "Enable PEX" || text == "Enable LSD" -> "check"
+            text == "Disable DHT" || text == "Disable PEX" || text == "Disable LSD" -> "selectnone"
+            text == "Copy Address" || text == "Copy Tailscale Address" -> "copy"
+            text == "Change Default Folder" -> "edit"
+            text == "Create Folder Here" -> "folder"
+            text == "Open" -> "files"
+            text == "Open Site" -> "connection"
+            text == "History" -> "clock"
+            text == "Remove Feed" -> "trash"
+            text == "Test" -> "speed"
+            text == ".. (Up)" -> "back"
+            else -> null
+        }
+    }
+
+    private fun addMissingButtonIcons(view: android.view.View) {
+        if (view is Button && view !is CompoundButton) {
+            if (view.compoundDrawablesRelative[0] == null && view.compoundDrawables[0] == null) {
+                val name = iconNameForButtonText(view.text?.toString() ?: "")
+
+                if (name != null) {
+                    TabIcons.apply(view, name, 18, 6)
+                }
+            }
+        } else if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                addMissingButtonIcons(view.getChildAt(i))
             }
         }
     }
 
     private fun applyDeepBlueButtons(root: LinearLayout) {
-        if (!isDeepBlueTheme()) return
-
         for (i in 0 until root.childCount) {
             val child = root.getChildAt(i)
 
@@ -3035,6 +3070,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(addFeedButton, "addfeed", 18, 6)
+        TabIcons.apply(refreshButton, "refresh", 18, 6)
+        TabIcons.apply(intervalButton, "clock", 18, 6)
+
         val backButton = Button(this).apply {
             text = "Back"
             setOnClickListener {
@@ -4163,6 +4202,8 @@ class MainActivity : AppCompatActivity() {
             textSize = 18f
             setTextColor(Color.WHITE)
         }
+
+        TabIcons.apply(heading, "encryption", 26, 10)
 
         val info = TextView(this).apply {
             textSize = 14f
@@ -7457,12 +7498,12 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.rgb(13, 71, 161))
-            setPadding(8, 8, 8, 8)
+            setPadding(8, 32, 8, 32)
             elevation = 12f
 
             addView(TextView(this@MainActivity).apply {
                 text = "\u2190"
-                textSize = 26f
+                textSize = 30f
                 setTextColor(Color.WHITE)
                 setPadding(28, 12, 28, 12)
                 setOnClickListener { showMainScreen() }
@@ -7470,7 +7511,7 @@ class MainActivity : AppCompatActivity() {
 
             addView(TextView(this@MainActivity).apply {
                 text = "Torrent details"
-                textSize = 20f
+                textSize = 24f
                 setTextColor(Color.WHITE)
                 setPadding(12, 0, 0, 0)
             })
@@ -9215,7 +9256,6 @@ class MainActivity : AppCompatActivity() {
             TabIcons.apply(forceRecheck, "recheck", 18, 6)
             TabIcons.apply(forceReannounce, "reannounce", 18, 6)
             deepBlueButtons(true, pause, resume, remove, forceRecheck, forceReannounce)
-            pressFeedback(pause, resume, remove, forceRecheck, forceReannounce)
             buttonRow2.addView(forceRecheck)
             buttonRow2.addView(forceReannounce)
 
@@ -10263,6 +10303,7 @@ class MainActivity : AppCompatActivity() {
             root.addView(permissionNote)
         }
 
+        TabIcons.apply(systemSettingsButton, "bell", 18, 6)
         root.addView(systemSettingsButton)
 
         root.addView(heading("Notification types"))
@@ -10302,6 +10343,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(intervalButton, "clock", 18, 6)
         root.addView(intervalButton)
 
         root.addView(heading("Sound"))
@@ -10371,6 +10413,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(perTorrentButton, "select", 18, 6)
         root.addView(perTorrentButton)
         root.addView(note("Unchecked torrents get no progress or alert notifications at all."))
 
@@ -10609,6 +10652,3 @@ private class DeepBlueRipple(
     color: android.content.res.ColorStateList,
     content: android.graphics.drawable.Drawable
 ) : android.graphics.drawable.RippleDrawable(color, content, null)
-
-// Marks a button that already has the press flash (non Deep Blue themes).
-private class PressFlash : android.graphics.drawable.StateListDrawable()
