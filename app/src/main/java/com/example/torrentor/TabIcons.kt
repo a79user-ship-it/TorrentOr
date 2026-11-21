@@ -286,14 +286,14 @@ object TabIcons {
             s("M22 3v6h-6", "#FFA726", 2.6f)
         ),
         "encryption" to listOf(
-            s("M12 4.5V2.2", "#90A4AE", 1.4f),
-            s("M12 19.5v2.3", "#90A4AE", 1.4f),
-            s("M4.5 12H2.2", "#90A4AE", 1.4f),
-            s("M19.5 12h2.3", "#90A4AE", 1.4f),
-            f("M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#FFA726"),
-            f("M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#FFA726"),
-            f("M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#FFA726"),
-            f("M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#FFA726"),
+            s("M12 4.5V2.2", "#2E7D32", 1.4f),
+            s("M12 19.5v2.3", "#2E7D32", 1.4f),
+            s("M4.5 12H2.2", "#2E7D32", 1.4f),
+            s("M19.5 12h2.3", "#2E7D32", 1.4f),
+            f("M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#2E7D32"),
+            f("M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#2E7D32"),
+            f("M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#2E7D32"),
+            f("M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z", "#2E7D32"),
             f("M4.5 12a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z", "#1E88E5"),
             s("M9.8 11.5V9.8a2.2 2.2 0 0 1 4.4 0V11.5", "#FFFFFF", 1.8f),
             f("M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z", "#FFFFFF"),
@@ -324,14 +324,22 @@ object TabIcons {
     // size or padding is ever changed, so rotating the screen or resizing
     // the window can't leave a button stretched or squashed.
     // An unknown name does nothing, so a typo can never crash the screen.
-    fun apply(view: TextView, name: String, sizeDp: Int = 20, gapDp: Int = 8) {
+    // leftAligned = true keeps the icon at the far left (for headings and
+    // other text that is not centred inside a full-width button).
+    fun apply(
+        view: TextView,
+        name: String,
+        sizeDp: Int = 20,
+        gapDp: Int = 8,
+        leftAligned: Boolean = false
+    ) {
         val layers = ICONS[name] ?: return
         val density = view.resources.displayMetrics.density
         val size = (sizeDp * density).toInt()
         val gap = (gapDp * density).toInt()
 
         view.setCompoundDrawablesRelativeWithIntrinsicBounds(
-            ColorIconDrawable(layers, size, gap, view),
+            ColorIconDrawable(layers, size, gap, view, if (leftAligned) 3 else 0),
             null,
             null,
             null
@@ -371,7 +379,8 @@ object TabIcons {
         private val sizePx: Int,
         private val gapPx: Int,
         private val owner: TextView,
-        // 0 = the only icon (left), 1 = left of a pair, 2 = right of a pair
+        // 0 = the only icon (left), 1 = left of a pair, 2 = right of a pair,
+        // 3 = left icon that is not shifted (headings)
         private val side: Int = 0
     ) : Drawable() {
 
@@ -399,7 +408,9 @@ object TabIcons {
                 owner.transformationMethod?.getTransformation(owner.text, owner) ?: owner.text
             val textWidth = owner.paint.measureText(shown, 0, shown.length)
             val contentWidth = owner.width - owner.paddingLeft - owner.paddingRight
-            val shift = if (side == 0) {
+            val shift = if (side == 3) {
+                0f
+            } else if (side == 0) {
                 maxOf(0f, (contentWidth - sizePx - gapPx - textWidth) / 2f)
             } else {
                 // Icon, text and icon form one group; centre it. The left

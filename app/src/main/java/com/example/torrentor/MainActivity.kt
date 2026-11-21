@@ -4203,7 +4203,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
         }
 
-        TabIcons.apply(heading, "encryption", 26, 10)
+        TabIcons.apply(heading, "encryption", 26, 10, true)
 
         val info = TextView(this).apply {
             textSize = 14f
