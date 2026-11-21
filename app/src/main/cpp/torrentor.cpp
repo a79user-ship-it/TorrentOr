@@ -850,26 +850,33 @@ static std::string pluralUnit(long value, const char* singular, const char* plur
 static std::string formatDuration(long seconds) {
     if (seconds <= 0) return "0 seconds";
 
-    long mins = seconds / 60;
-    long hrs = mins / 60;
-    long days = hrs / 24;
+    long days = seconds / 86400;
+    long hrs = (seconds % 86400) / 3600;
+    long mins = (seconds % 3600) / 60;
+    long secs = seconds % 60;
+
+    // Always days, hours, minutes and seconds: it starts at the largest
+    // unit that is not zero and then shows every smaller unit, e.g.
+    // "1 day 16 hours 1 minute 5 seconds" or "3 minutes 0 seconds".
+    std::string out;
 
     if (days > 0) {
-        return pluralUnit(days, "day", "days") + " " +
-               pluralUnit(hrs % 24, "hour", "hours");
+        out = pluralUnit(days, "day", "days") + " " +
+              pluralUnit(hrs, "hour", "hours") + " " +
+              pluralUnit(mins, "minute", "minutes") + " " +
+              pluralUnit(secs, "second", "seconds");
+    } else if (hrs > 0) {
+        out = pluralUnit(hrs, "hour", "hours") + " " +
+              pluralUnit(mins, "minute", "minutes") + " " +
+              pluralUnit(secs, "second", "seconds");
+    } else if (mins > 0) {
+        out = pluralUnit(mins, "minute", "minutes") + " " +
+              pluralUnit(secs, "second", "seconds");
+    } else {
+        out = pluralUnit(secs, "second", "seconds");
     }
 
-    if (hrs > 0) {
-        return pluralUnit(hrs, "hour", "hours") + " " +
-               pluralUnit(mins % 60, "minute", "minutes");
-    }
-
-    if (mins > 0) {
-        return pluralUnit(mins, "minute", "minutes") + " " +
-               pluralUnit(seconds % 60, "second", "seconds");
-    }
-
-    return pluralUnit(seconds, "second", "seconds");
+    return out;
 }
 
 // "Time active: ..." (and "Seeding time: ..." once it has been seeding) -
@@ -884,12 +891,18 @@ static std::string buildTimeLines(const lt::torrent_status& st) {
     long long now = static_cast<long long>(std::time(nullptr));
 
     // Elapsed = real (wall-clock) time since the torrent was added,
-    // including time it was paused or the app was closed. "Time active"
-    // below only counts time it was actually running.
-    if (added > 0 && now > added) {
-        out += "Elapsed: ";
-        out += formatDuration(static_cast<long>(now - added));
-        out += "\n";
+    // including time it was paused or the app was closed. It stops
+    // counting at the moment the download completed, so it then equals
+    // "Time to complete". "Time active" below only counts time it was
+    // actually running.
+    if (added > 0) {
+        long long end = (completed > added) ? completed : now;
+
+        if (end > added) {
+            out += "Elapsed: ";
+            out += formatDuration(static_cast<long>(end - added));
+            out += "\n";
+        }
     }
 
     out += "Time active: ";

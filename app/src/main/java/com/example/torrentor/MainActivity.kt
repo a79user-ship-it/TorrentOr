@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private val interval = 3000L
 
-    // The torrent cards refresh every second. The detail tabs stay at 3 s.
+    // The torrent cards refresh every second. Most detail tabs stay at 3 s.
     private val listInterval = 1000L
     private var uiTick = 0
 
@@ -5959,12 +5959,12 @@ class MainActivity : AppCompatActivity() {
                     // Keep the screen alive even if statistics are temporarily unavailable.
                 }
 
-                handler.postDelayed(this, interval)
+                handler.postDelayed(this, 1000L)
             }
         }
 
         globalStatsRefreshRunnable = runnable
-        handler.postDelayed(runnable, interval)
+        handler.postDelayed(runnable, 1000L)
     }
 
     private fun stopGlobalStatsAutoRefresh() {
@@ -5999,7 +5999,7 @@ class MainActivity : AppCompatActivity() {
             .append("\n")
             .append("All-time share ratio: ")
             .append(String.format("%.2f", ratio))
-            .append("\n\nAuto-refresh: Every 3 seconds")
+            .append("\n\nAuto-refresh: Every 1 second")
             .toString()
     }
 
@@ -6991,7 +6991,7 @@ class MainActivity : AppCompatActivity() {
 
                 val stats = try {
                     TorrentNative.getTorrentStatistics(torrentIndex) +
-                        "\n\nAuto-refresh: Every 3 seconds"
+                        "\n\nAuto-refresh: Every 1 second"
                 } catch (e: Throwable) {
                     "Could not load statistics"
                 }
@@ -7694,7 +7694,7 @@ class MainActivity : AppCompatActivity() {
             "Statistics" -> {
                 contentText.text = highlightTimeLines(try {
                     TorrentNative.getTorrentStatistics(torrentIndex) +
-                        "\n\nAuto-refresh: Every 3 seconds"
+                        "\n\nAuto-refresh: Every 1 second"
                 } catch (e: Throwable) {
                     "Could not load statistics"
                 })
@@ -8963,12 +8963,15 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // detail tabs are heavier: every third round (3 s) -
-                    // except Peers, Files and Trackers, which the user wants live at
-                    // 1 s (peer connections/speeds, and the per-file
-                    // progress/speed/ETA/seeds/peers, all change quickly).
+                    // except Peers, Files, Trackers, General and Statistics,
+                    // which the user wants live at 1 s (peer connections and
+                    // speeds, per-file progress, the running time lines).
                     uiTick++
 
-                    if (currentDetailsTab == "Peers" || currentDetailsTab == "Files" || currentDetailsTab == "Trackers") {
+                    if (currentDetailsTab == "Peers" || currentDetailsTab == "Files" ||
+                        currentDetailsTab == "Trackers" || currentDetailsTab == "General" ||
+                        currentDetailsTab == "Statistics"
+                    ) {
                         updateActiveDetailsTab()
                     } else if (uiTick % 3 == 0) {
                         updateActiveDetailsTab()
@@ -9166,6 +9169,18 @@ class MainActivity : AppCompatActivity() {
 
                 card.addView(checkBox)
             } else {
+                // The whole card lightens while it is pressed, so a tap on a
+                // torrent is visibly acknowledged (every theme).
+                val pressedCard = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.parseColor("#44FFFFFF"))
+                    cornerRadius = 22f
+                }
+
+                card.foreground = android.graphics.drawable.StateListDrawable().apply {
+                    addState(intArrayOf(android.R.attr.state_pressed), pressedCard)
+                    addState(intArrayOf(), android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+                }
+
                 card.setOnClickListener {
                     showTorrentDetails(torrentIndex)
                 }
