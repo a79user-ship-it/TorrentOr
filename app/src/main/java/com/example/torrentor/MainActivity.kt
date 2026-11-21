@@ -170,6 +170,7 @@ class MainActivity : AppCompatActivity() {
             "rose" -> Color.parseColor("#3D0A1E")
             "ash" -> Color.parseColor("#2A2A28")
             "darkblue" -> Color.parseColor("#081028")
+            "deepblue" -> Color.parseColor("#0A2558")
             else -> Color.parseColor("#0D47A1")
         }
     }
@@ -188,6 +189,7 @@ class MainActivity : AppCompatActivity() {
             "rose" -> Color.parseColor("#C2185B")
             "ash" -> Color.parseColor("#6E6E66")
             "darkblue" -> Color.parseColor("#16305C")
+            "deepblue" -> Color.parseColor("#1553A6")
             else -> Color.parseColor("#42A5F5")
         }
     }
@@ -201,6 +203,70 @@ class MainActivity : AppCompatActivity() {
         return android.graphics.drawable.GradientDrawable().apply {
             setColor(cardColor())
             cornerRadius = 22f
+        }
+    }
+
+    // Torrent cards on the main list: same as above, plus a thin lighter
+    // blue outline in the Deep Blue theme only.
+    private fun torrentCardBackground(): android.graphics.drawable.GradientDrawable {
+        return roundedCardBackground().apply {
+            if (isDeepBlueTheme()) {
+                setStroke(
+                    (1f * resources.displayMetrics.density).toInt().coerceAtLeast(1),
+                    Color.parseColor("#3F7FD8")
+                )
+            }
+        }
+    }
+
+    // Deep Blue theme only: buttons get the same blue as the torrent cards
+    // instead of the default faint teal tint. Used for the main screen's
+    // buttons (Switch Theme through Sort, including the Filter buttons),
+    // the buttons inside each torrent card, and the details tabs. Other
+    // themes keep the normal buttons, because their card colours (light
+    // blue, orange...) would not leave the teal text readable.
+    private fun isDeepBlueTheme(): Boolean {
+        return getSharedPreferences("prefs", MODE_PRIVATE)
+            .getString("theme_color", "blue") == "deepblue"
+    }
+
+    // Buttons that sit ON a card are the same blue as the card, so they get
+    // a thin lighter outline - otherwise the button edges would disappear.
+    private fun deepBlueButtons(onCard: Boolean, vararg buttons: Button) {
+        if (!isDeepBlueTheme()) return
+
+        val density = resources.displayMetrics.density
+
+        for (button in buttons) {
+            val fill = android.graphics.drawable.GradientDrawable().apply {
+                setColor(cardColor())
+                cornerRadius = 8f * density
+                setStroke((1f * density).toInt().coerceAtLeast(1), Color.parseColor("#3F7FD8"))
+            }
+
+            button.background = android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(Color.parseColor("#334FD1C5")),
+                fill,
+                null
+            )
+        }
+    }
+
+    private fun applyDeepBlueButtons(root: LinearLayout) {
+        if (!isDeepBlueTheme()) return
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i)
+
+            if (child is Button) {
+                deepBlueButtons(false, child)
+            } else if (child is HorizontalScrollView) {
+                val row = child.getChildAt(0) as? LinearLayout ?: continue
+
+                for (j in 0 until row.childCount) {
+                    (row.getChildAt(j) as? Button)?.let { deepBlueButtons(false, it) }
+                }
+            }
         }
     }
 
@@ -218,6 +284,7 @@ class MainActivity : AppCompatActivity() {
             "rose" -> "Rose"
             "ash" -> "Ash"
             "darkblue" -> "Dark Blue"
+            "deepblue" -> "Deep Blue"
             else -> "Light Blue"
         }
     }
@@ -236,6 +303,7 @@ class MainActivity : AppCompatActivity() {
             "rose" -> "amoled"
             "amoled" -> "ash"
             "ash" -> "darkblue"
+            "darkblue" -> "deepblue"
             else -> "blue"
         }
 
@@ -271,10 +339,14 @@ class MainActivity : AppCompatActivity() {
     // Sticky action bar shown at the top of the main screen while
     // torrents are being selected (long-press a torrent to start).
     private var selectionBar: LinearLayout? = null
+    private var mainTitleBar: LinearLayout? = null
     private var selectionCountView: TextView? = null
 
     private fun updateSelectionBar() {
         selectionBar?.visibility = if (selectMode) android.view.View.VISIBLE else android.view.View.GONE
+        // The title bar and the selection bar share the same spot: the
+        // selection bar replaces the title while selecting.
+        mainTitleBar?.visibility = if (selectMode) android.view.View.GONE else android.view.View.VISIBLE
         selectionCountView?.text = "${selectedTorrents.size}"
     }
 
@@ -402,7 +474,7 @@ class MainActivity : AppCompatActivity() {
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(32, 40, 36))
+            setBackgroundColor(Color.rgb(13, 71, 161))
             setPadding(8, 8, 8, 8)
             elevation = 12f
 
@@ -471,6 +543,73 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         uiVisible = true
         updateTorrentList()
+    }
+
+    // The main screen's "Paste magnet link or hash" box, while that screen
+    // is showing. Used to fill it from the clipboard (see below).
+    private var mainMagnetInput: EditText? = null
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+
+        // Android only lets an app read the clipboard while it has focus,
+        // so this is the moment to look - right after coming back from the
+        // browser where the magnet link was copied.
+        if (hasFocus) {
+            fillMagnetFromClipboard()
+        }
+    }
+
+    // Like qBittorrent / tTorrent: if the clipboard holds a magnet link (or
+    // a bare 40-character info-hash) and the main magnet box is empty, put
+    // it in the box. Each copy is only offered once, so clearing the box
+    // does not make it come straight back - but copying the same link
+    // again does fill it again.
+    private fun fillMagnetFromClipboard() {
+        val input = mainMagnetInput ?: return
+
+        if (!input.isAttachedToWindow || input.text.isNotEmpty()) return
+
+        try {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip ?: return
+
+            if (clip.itemCount == 0) return
+
+            val raw = clip.getItemAt(0).coerceToText(this)?.toString()?.trim().orEmpty()
+
+            if (raw.isEmpty() || raw.length > 20000) return
+
+            val magnet = Regex("magnet:\\?[^\\s]+", RegexOption.IGNORE_CASE).find(raw)?.value
+            val value = when {
+                magnet != null -> magnet
+                Regex("[0-9a-fA-F]{40}").matches(raw) -> raw
+                else -> return
+            }
+
+            // Text + the time it was copied. Copying the same link again
+            // gives it a new time, so it fills again; leaving the app and
+            // coming back WITHOUT copying anything new does not.
+            val copiedAt = if (android.os.Build.VERSION.SDK_INT >= 26) {
+                clip.description.timestamp
+            } else {
+                0L
+            }
+            val key = "$copiedAt|$value"
+
+            val prefs = getSharedPreferences("clipboard_magnet", MODE_PRIVATE)
+
+            if (prefs.getString("last_offered", "") == key) return
+
+            prefs.edit().putString("last_offered", key).apply()
+
+            input.setText(value)
+            input.setSelection(input.text.length)
+
+            Toast.makeText(this, "Magnet link pasted from clipboard", Toast.LENGTH_SHORT).show()
+        } catch (_: Throwable) {
+            // Clipboard not readable right now - nothing to do.
+        }
     }
 
     override fun onStop() {
@@ -687,7 +826,9 @@ class MainActivity : AppCompatActivity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            // No top padding: the pinned title bar above now covers that
+            // strip, so there is no dark gap between the bar and the list.
+            setPadding(32, 0, 32, 32)
             setBackgroundColor(bgColor())
         }
 
@@ -909,6 +1050,7 @@ class MainActivity : AppCompatActivity() {
             setHintTextColor(Color.LTGRAY)
             setTextColor(Color.WHITE)
         }
+        mainMagnetInput = magnetInput
 
         val addMagnet = Button(this).apply {
             text = "Add Magnet / Hash"
@@ -1228,7 +1370,6 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(onlineSearchButton, "search")
         TabIcons.apply(webUiButton, "webui")
 
-        root.addView(title)
         root.addView(themeButton)
         root.addView(selectModeButton)
         root.addView(selectAllButton)
@@ -1267,6 +1408,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(sortButton)
         root.addView(listLayout)
 
+        applyDeepBlueButtons(root)
+
         val outerScroll = ScrollView(this).apply {
             addView(root)
         }
@@ -1293,7 +1436,7 @@ class MainActivity : AppCompatActivity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(32, 40, 36))
+            setBackgroundColor(Color.rgb(13, 71, 161))
             setPadding(12, 14, 12, 14)
             elevation = 12f
 
@@ -1344,10 +1487,24 @@ class MainActivity : AppCompatActivity() {
         }
         selectionBar = bar
 
+        // Pinned title bar in the same deep blue as the other top bars; the
+        // title no longer scrolls away with the list.
+        val titleBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.rgb(13, 71, 161))
+            setPadding(32, 40, 32, 40)
+            elevation = 12f
+
+            addView(title)
+        }
+        mainTitleBar = titleBar
+
         val container = LinearLayout(this).apply {
             tag = "has_bar"
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bgColor())
+            addView(titleBar)
             addView(bar)
             addView(
                 outerScroll,
@@ -6778,6 +6935,12 @@ class MainActivity : AppCompatActivity() {
         tabRowTwo.addView(statisticsButton)
         tabRowTwo.addView(commentButton)
 
+        deepBlueButtons(
+            false,
+            generalButton, filesButton, peersButton, trackersButton,
+            webSeedsButton, swarmButton, piecesButton, statisticsButton, commentButton
+        )
+
         val actionTitle = TextView(this).apply {
             text = "Actions"
             textSize = 18f
@@ -7196,6 +7359,14 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(changeSaveFolderButton, "edit", 18, 6)
         TabIcons.apply(backButton, "back", 18, 6)
 
+        deepBlueButtons(
+            true,
+            copyMagnet, copyHash, pauseButton, resumeButton, deleteButton,
+            sequentialButton, firstLastButton, applySpeedLimitButton,
+            forceReannounce, forceRecheck, openFolderButton,
+            saveTorrentFileButton, changeSaveFolderButton
+        )
+
         root.addView(actionTitle)
         root.addView(copyMagnet)
         root.addView(copyHash)
@@ -7223,7 +7394,7 @@ class MainActivity : AppCompatActivity() {
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(32, 40, 36))
+            setBackgroundColor(Color.rgb(13, 71, 161))
             setPadding(8, 8, 8, 8)
             elevation = 12f
 
@@ -8854,7 +9025,7 @@ class MainActivity : AppCompatActivity() {
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(20, 20, 20, 20)
-                background = roundedCardBackground()
+                background = torrentCardBackground()
 
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -8974,6 +9145,7 @@ class MainActivity : AppCompatActivity() {
 
             TabIcons.apply(forceRecheck, "recheck", 18, 6)
             TabIcons.apply(forceReannounce, "reannounce", 18, 6)
+            deepBlueButtons(true, pause, resume, remove, forceRecheck, forceReannounce)
             buttonRow2.addView(forceRecheck)
             buttonRow2.addView(forceReannounce)
 
