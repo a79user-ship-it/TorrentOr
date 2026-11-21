@@ -236,19 +236,94 @@ class MainActivity : AppCompatActivity() {
         if (!isDeepBlueTheme()) return
 
         val density = resources.displayMetrics.density
+        val strokeWidth = (1f * density).toInt().coerceAtLeast(1)
+        val outline = Color.parseColor("#3F7FD8")
 
         for (button in buttons) {
-            val fill = android.graphics.drawable.GradientDrawable().apply {
+            val normal = android.graphics.drawable.GradientDrawable().apply {
                 setColor(cardColor())
                 cornerRadius = 8f * density
-                setStroke((1f * density).toInt().coerceAtLeast(1), Color.parseColor("#3F7FD8"))
+                setStroke(strokeWidth, outline)
             }
 
-            button.background = android.graphics.drawable.RippleDrawable(
-                android.content.res.ColorStateList.valueOf(Color.parseColor("#334FD1C5")),
-                fill,
-                null
+            // Lighter blue while the finger is down, so every press is
+            // visibly acknowledged (Pause, Resume, Force Recheck...).
+            val pressed = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#2E74D6"))
+                cornerRadius = 8f * density
+                setStroke(strokeWidth, Color.parseColor("#7FB2F0"))
+            }
+
+            val states = android.graphics.drawable.StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_pressed), pressed)
+                addState(intArrayOf(), normal)
+            }
+
+            button.background = DeepBlueRipple(
+                android.content.res.ColorStateList.valueOf(Color.parseColor("#664FD1C5")),
+                states
             )
+        }
+    }
+
+    // Other themes: buttons keep their normal look but flash lighter while
+    // pressed, so every press is visibly acknowledged on any color.
+    private fun pressFeedback(vararg buttons: Button) {
+        if (isDeepBlueTheme()) return
+
+        val density = resources.displayMetrics.density
+
+        for (button in buttons) {
+            if (button.foreground is PressFlash) continue
+
+            val flash = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#66FFFFFF"))
+                cornerRadius = 8f * density
+            }
+
+            val states = PressFlash()
+            states.addState(intArrayOf(android.R.attr.state_pressed), flash)
+            states.addState(intArrayOf(), android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+            button.foreground = states
+        }
+    }
+
+    private fun flashTree(view: android.view.View) {
+        if (view is Button && view !is CompoundButton) {
+            pressFeedback(view)
+        } else if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                flashTree(view.getChildAt(i))
+            }
+        }
+    }
+
+    // Deep Blue only: every plain button on every screen (Settings, Web UI,
+    // RSS, Notifications, Online Search, Execution Log...) gets the same
+    // look as the main-screen buttons. Buttons are built in code and
+    // rebuilt often, so this runs after each layout pass and only touches
+    // buttons that still have the default look. Check boxes, radio buttons
+    // and anything with its own custom color are left alone.
+    private fun restyleDeepBlueTree(view: android.view.View) {
+        if (view is Button && view !is CompoundButton) {
+            val bg = view.background
+            if (bg !is DeepBlueRipple && bg is android.graphics.drawable.RippleDrawable) {
+                deepBlueButtons(true, view)
+            }
+        } else if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                restyleDeepBlueTree(view.getChildAt(i))
+            }
+        }
+    }
+
+    private fun installDeepBlueButtonWatcher() {
+        window.decorView.viewTreeObserver.addOnGlobalLayoutListener {
+            if (isDeepBlueTheme()) {
+                restyleDeepBlueTree(window.decorView)
+            } else {
+                flashTree(window.decorView)
+            }
         }
     }
 
@@ -378,6 +453,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        installDeepBlueButtonWatcher()
 
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
@@ -1165,21 +1242,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val clearSaved = Button(this).apply {
-            text = "Clean Deleted Torrents"
-            setOnClickListener {
-                val intent = Intent(this@MainActivity, TorrentService::class.java)
-                intent.putExtra("ACTION", "CLEAN_DELETED_SAVED_TORRENTS")
-                startTorrentService(intent)
-
-                Toast.makeText(
-                    this@MainActivity,
-                    "Old deleted torrents cleaned",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        }
-
         val globalStatistics = Button(this).apply {
             text = "Statistics"
             setOnClickListener {
@@ -1355,7 +1417,6 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(selectFile, "addfile")
         TabIcons.apply(pauseAll, "pause")
         TabIcons.apply(resumeAll, "play")
-        TabIcons.apply(clearSaved, "trash")
         TabIcons.apply(globalStatistics, "statistics")
         TabIcons.apply(portForwardingStatus, "portfwd")
         TabIcons.apply(networkFeatures, "network")
@@ -1388,7 +1449,6 @@ class MainActivity : AppCompatActivity() {
         root.addView(speedGraphView)
         root.addView(pauseAll)
         root.addView(resumeAll)
-        root.addView(clearSaved)
         root.addView(globalStatistics)
         root.addView(portForwardingStatus)
         root.addView(networkFeatures)
@@ -5898,6 +5958,7 @@ class MainActivity : AppCompatActivity() {
             .append("\n")
             .append("All-time share ratio: ")
             .append(String.format("%.2f", ratio))
+            .append("\n\nAuto-refresh: Every 3 seconds")
             .toString()
     }
 
@@ -6888,7 +6949,8 @@ class MainActivity : AppCompatActivity() {
                 clearContent()
 
                 val stats = try {
-                    TorrentNative.getTorrentStatistics(torrentIndex)
+                    TorrentNative.getTorrentStatistics(torrentIndex) +
+                        "\n\nAuto-refresh: Every 3 seconds"
                 } catch (e: Throwable) {
                     "Could not load statistics"
                 }
@@ -7590,7 +7652,8 @@ class MainActivity : AppCompatActivity() {
             "Pieces" -> showPiecesDetails(torrentIndex, contentText)
             "Statistics" -> {
                 contentText.text = highlightTimeLines(try {
-                    TorrentNative.getTorrentStatistics(torrentIndex)
+                    TorrentNative.getTorrentStatistics(torrentIndex) +
+                        "\n\nAuto-refresh: Every 3 seconds"
                 } catch (e: Throwable) {
                     "Could not load statistics"
                 })
@@ -8222,6 +8285,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        deepBlueButtons(true, selectAllButton, selectNoneButton, applySelectionButton)
+
         selectButtonsRow.addView(selectAllButton)
         selectButtonsRow.addView(selectNoneButton)
 
@@ -8331,6 +8396,8 @@ class MainActivity : AppCompatActivity() {
 
             filesProgressViews[index] = Pair(progressText, progressBar)
 
+            deepBlueButtons(true, openButton)
+
             row.addView(checkBox)
             row.addView(progressText)
             row.addView(progressBar)
@@ -8349,6 +8416,8 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+
+        deepBlueButtons(true, applyBottomButton)
 
         fileListLayout.addView(applyBottomButton)
 
@@ -9146,6 +9215,7 @@ class MainActivity : AppCompatActivity() {
             TabIcons.apply(forceRecheck, "recheck", 18, 6)
             TabIcons.apply(forceReannounce, "reannounce", 18, 6)
             deepBlueButtons(true, pause, resume, remove, forceRecheck, forceReannounce)
+            pressFeedback(pause, resume, remove, forceRecheck, forceReannounce)
             buttonRow2.addView(forceRecheck)
             buttonRow2.addView(forceReannounce)
 
@@ -10532,3 +10602,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
+
+
+// Marks a button that already has the Deep Blue look.
+private class DeepBlueRipple(
+    color: android.content.res.ColorStateList,
+    content: android.graphics.drawable.Drawable
+) : android.graphics.drawable.RippleDrawable(color, content, null)
+
+// Marks a button that already has the press flash (non Deep Blue themes).
+private class PressFlash : android.graphics.drawable.StateListDrawable()
