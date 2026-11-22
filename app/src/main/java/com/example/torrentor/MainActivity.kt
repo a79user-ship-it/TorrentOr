@@ -509,6 +509,9 @@ class MainActivity : AppCompatActivity() {
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
 
+        // HTTPS tracker certificates (must be ready before the session starts).
+        CaBundle.prepare(applicationContext)
+
         // Bug fix: restore the torrent list's Filter and Sort choices from
         // last time, instead of leaving them at the "All"/"None" defaults
         // the fields above are declared with (see torrentListViewPrefs()).
@@ -4062,6 +4065,15 @@ class MainActivity : AppCompatActivity() {
         logUiRefreshRunnable = null
     }
 
+    // Remembers the global DHT / PEX / LSD switch so it survives a restart
+    // (TorrentService sends an "off" choice back to the engine on start).
+    private fun saveNetworkFeature(name: String, enabled: Boolean) {
+        getSharedPreferences("network_features", MODE_PRIVATE)
+            .edit()
+            .putBoolean(name, enabled)
+            .apply()
+    }
+
     private fun showNetworkFeaturesScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -4106,6 +4118,7 @@ class MainActivity : AppCompatActivity() {
         val enableDht = Button(this).apply {
             text = "Enable DHT"
             setOnClickListener {
+                saveNetworkFeature("dht", true)
                 TorrentNative.setDhtEnabled(true)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "DHT enabled", Toast.LENGTH_SHORT).show()
@@ -4115,6 +4128,7 @@ class MainActivity : AppCompatActivity() {
         val disableDht = Button(this).apply {
             text = "Disable DHT"
             setOnClickListener {
+                saveNetworkFeature("dht", false)
                 TorrentNative.setDhtEnabled(false)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "DHT disabled", Toast.LENGTH_SHORT).show()
@@ -4131,6 +4145,7 @@ class MainActivity : AppCompatActivity() {
         val enablePex = Button(this).apply {
             text = "Enable PEX"
             setOnClickListener {
+                saveNetworkFeature("pex", true)
                 TorrentNative.setPexEnabled(true)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "PEX enabled", Toast.LENGTH_SHORT).show()
@@ -4140,6 +4155,7 @@ class MainActivity : AppCompatActivity() {
         val disablePex = Button(this).apply {
             text = "Disable PEX"
             setOnClickListener {
+                saveNetworkFeature("pex", false)
                 TorrentNative.setPexEnabled(false)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "PEX disabled", Toast.LENGTH_SHORT).show()
@@ -4156,6 +4172,7 @@ class MainActivity : AppCompatActivity() {
         val enableLsd = Button(this).apply {
             text = "Enable LSD"
             setOnClickListener {
+                saveNetworkFeature("lsd", true)
                 TorrentNative.setLsdEnabled(true)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "LSD enabled", Toast.LENGTH_SHORT).show()
@@ -4165,6 +4182,7 @@ class MainActivity : AppCompatActivity() {
         val disableLsd = Button(this).apply {
             text = "Disable LSD"
             setOnClickListener {
+                saveNetworkFeature("lsd", false)
                 TorrentNative.setLsdEnabled(false)
                 refreshStatus()
                 Toast.makeText(this@MainActivity, "LSD disabled", Toast.LENGTH_SHORT).show()
@@ -4173,6 +4191,34 @@ class MainActivity : AppCompatActivity() {
 
         lsdRow.addView(enableLsd)
         lsdRow.addView(disableLsd)
+
+        // Contact every tracker at once instead of only the first working tier.
+        val announceAllRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val enableAnnounceAll = Button(this).apply {
+            text = "Announce to all trackers: On"
+            setOnClickListener {
+                saveNetworkFeature("announce_all", true)
+                TorrentNative.setAnnounceToAllEnabled(true)
+                refreshStatus()
+                Toast.makeText(this@MainActivity, "Announcing to all trackers", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        val disableAnnounceAll = Button(this).apply {
+            text = "Off"
+            setOnClickListener {
+                saveNetworkFeature("announce_all", false)
+                TorrentNative.setAnnounceToAllEnabled(false)
+                refreshStatus()
+                Toast.makeText(this@MainActivity, "Announcing to the first working tier only", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        announceAllRow.addView(enableAnnounceAll)
+        announceAllRow.addView(disableAnnounceAll)
 
         val refreshButton = Button(this).apply {
             text = "Refresh"
@@ -4194,6 +4240,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(dhtRow)
         root.addView(pexRow)
         root.addView(lsdRow)
+        root.addView(announceAllRow)
         root.addView(buildEncryptionSection())
         root.addView(refreshButton)
         root.addView(backButton)
@@ -4347,6 +4394,8 @@ class MainActivity : AppCompatActivity() {
                 append(TorrentNative.getPexStatus())
                 append("\n\n")
                 append(TorrentNative.getLsdStatus())
+                append("\n\n")
+                append(TorrentNative.getAnnounceToAllStatus())
             }
         } catch (e: Throwable) {
             buildString {
@@ -4378,7 +4427,8 @@ class MainActivity : AppCompatActivity() {
         builder.append("DHT nodes shows how many DHT contacts libtorrent knows.\n")
         builder.append("DHT torrents shows if DHT is active for torrents.\n")
         builder.append("PEX peers shows peer exchange availability/discovery.\n")
-        builder.append("LSD shows local network discovery status.")
+        builder.append("LSD shows local network discovery status.\n")
+        builder.append("Announce to all trackers contacts every tracker at once, not just the first working tier.")
 
         return builder
     }
@@ -6983,15 +7033,7 @@ class MainActivity : AppCompatActivity() {
                 currentDetailsTab = "Trackers"
                 clearContent()
 
-                contentText.text = colorTrackerStatus(try {
-                    TorrentNative.getTorrentTrackerStatus(torrentIndex)
-                } catch (e: Throwable) {
-                    try {
-                        "Trackers\n\n" + TorrentNative.getTorrentTrackers(torrentIndex)
-                    } catch (e2: Throwable) {
-                        "Could not load tracker status"
-                    }
-                })
+                renderTrackersTab(torrentIndex, contentText, fileListLayout)
             }
         }
 
@@ -7169,7 +7211,8 @@ class MainActivity : AppCompatActivity() {
             setEngine: (String, Boolean) -> Boolean,
             enableMessage: String,
             disableMessage: String,
-            notReadyMessage: String
+            notReadyMessage: String,
+            colorState: Boolean = false
         ): Button {
             lateinit var button: Button
 
@@ -7188,7 +7231,31 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                button.text = if (enabled) onLabel else offLabel
+                val label = if (enabled) onLabel else offLabel
+
+                if (!colorState) {
+                    button.text = label
+                } else {
+                    // "DHT: On for this torrent" - everything after the colon
+                    // ("On for this torrent") is drawn bold in bright green
+                    // for On, bright red for Off.
+                    val spannable = android.text.SpannableString(label)
+                    val start = label.indexOf(": ") + 2
+                    val end = label.length
+                    if (start in 2 until end) {
+                        val word = label.substring(start).substringBefore(' ')
+                        val color = if (word == "On") "#00E676" else "#FF1744"
+                        spannable.setSpan(
+                            android.text.style.ForegroundColorSpan(Color.parseColor(color)),
+                            start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+                        spannable.setSpan(
+                            android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                            start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+                    }
+                    button.text = spannable
+                }
             }
 
             button = Button(this).apply {
@@ -7254,6 +7321,45 @@ class MainActivity : AppCompatActivity() {
             enableMessage = "Sequential download enabled",
             disableMessage = "Sequential download disabled",
             notReadyMessage = "Could not change sequential download"
+        )
+
+        // Per-torrent DHT switch. The "enabled" value used by this helper
+        // means "DHT turned OFF for this torrent", so the labels read the
+        // other way round: On-label shows when it is switched off.
+        val dhtButton = pieceSettingToggleButton(
+            onLabel = "DHT: Off for this torrent",
+            offLabel = "DHT: On for this torrent",
+            prefs = getSharedPreferences("torrent_dht_disabled", MODE_PRIVATE),
+            getEngine = { h -> TorrentNative.getTorrentDhtDisabled(h) },
+            setEngine = { h, v -> TorrentNative.setTorrentDhtDisabled(h, v) },
+            enableMessage = "DHT turned off for this torrent (takes effect on its next announce)",
+            disableMessage = "DHT turned on for this torrent",
+            notReadyMessage = "Could not change DHT for this torrent yet",
+            colorState = true
+        )
+
+        val pexButton = pieceSettingToggleButton(
+            onLabel = "PEX: Off for this torrent",
+            offLabel = "PEX: On for this torrent",
+            prefs = getSharedPreferences("torrent_pex_disabled", MODE_PRIVATE),
+            getEngine = { h -> TorrentNative.getTorrentPexDisabled(h) },
+            setEngine = { h, v -> TorrentNative.setTorrentPexDisabled(h, v) },
+            enableMessage = "PEX turned off for this torrent",
+            disableMessage = "PEX turned on for this torrent",
+            notReadyMessage = "Could not change PEX for this torrent yet",
+            colorState = true
+        )
+
+        val lsdButton = pieceSettingToggleButton(
+            onLabel = "LSD: Off for this torrent",
+            offLabel = "LSD: On for this torrent",
+            prefs = getSharedPreferences("torrent_lsd_disabled", MODE_PRIVATE),
+            getEngine = { h -> TorrentNative.getTorrentLsdDisabled(h) },
+            setEngine = { h, v -> TorrentNative.setTorrentLsdDisabled(h, v) },
+            enableMessage = "LSD turned off for this torrent",
+            disableMessage = "LSD turned on for this torrent",
+            notReadyMessage = "Could not change LSD for this torrent yet",
+            colorState = true
         )
 
         val firstLastButton = pieceSettingToggleButton(
@@ -7505,6 +7611,9 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(deleteButton, "trash", 18, 6)
         TabIcons.apply(sequentialButton, "sequential", 18, 6)
         TabIcons.apply(firstLastButton, "flag", 18, 6)
+        TabIcons.apply(dhtButton, "network", 18, 6)
+        TabIcons.apply(pexButton, "peers", 18, 6)
+        TabIcons.apply(lsdButton, "connection", 18, 6)
         TabIcons.apply(applySpeedLimitButton, "speed", 18, 6)
         TabIcons.apply(forceReannounce, "reannounce", 18, 6)
         TabIcons.apply(forceRecheck, "recheck", 18, 6)
@@ -7516,7 +7625,7 @@ class MainActivity : AppCompatActivity() {
         deepBlueButtons(
             true,
             copyMagnet, copyHash, pauseButton, resumeButton, deleteButton,
-            sequentialButton, firstLastButton, applySpeedLimitButton,
+            sequentialButton, firstLastButton, dhtButton, pexButton, lsdButton, applySpeedLimitButton,
             forceReannounce, forceRecheck, openFolderButton,
             saveTorrentFileButton, changeSaveFolderButton
         )
@@ -7529,6 +7638,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(deleteButton)
         root.addView(sequentialButton)
         root.addView(firstLastButton)
+        root.addView(dhtButton)
+        root.addView(pexButton)
+        root.addView(lsdButton)
         root.addView(speedLimitLabel)
         root.addView(uploadLimitInput)
         root.addView(downloadLimitInput)
@@ -7766,15 +7878,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             "Trackers" -> {
-                contentText.text = colorTrackerStatus(try {
-                    TorrentNative.getTorrentTrackerStatus(torrentIndex)
-                } catch (e: Throwable) {
-                    try {
-                        "Trackers\n\n" + TorrentNative.getTorrentTrackers(torrentIndex)
-                    } catch (e2: Throwable) {
-                        "Could not load tracker status"
-                    }
-                })
+                renderTrackersTab(torrentIndex, contentText, currentDetailsFileListLayout)
             }
             "Files" -> {
                 val fileListLayout = currentDetailsFileListLayout
@@ -9615,6 +9719,232 @@ class MainActivity : AppCompatActivity() {
     // error lines when something is wrong) in the status colour. The text
     // itself is never changed, so TorrentNotifier (which reads the raw
     // native text) is unaffected.
+    // Kind of one tracker block: 0 working, 1 updating, 2 error, 3 not
+    // contacted, 4 warning, 5 failing, 6 off (DHT / PeX / LSD switched off).
+    private fun trackerKindOf(lines: List<String>): Int {
+        val status = lines.firstOrNull { it.startsWith("Status: ") }
+            ?.removePrefix("Status: ") ?: ""
+        val hasLastError = lines.any { it.startsWith("Last error: ") }
+        val verified = lines.any { it == "Verified: Yes" }
+
+        return when {
+            status.startsWith("Error") -> 2
+            status.startsWith("Updating") -> 1
+            status.startsWith("Failing") -> 5
+            status.startsWith("Off") -> 6
+            status.startsWith("Working") -> if (hasLastError && !verified) 4 else 0
+            else -> 3
+        }
+    }
+
+    private fun trackerKindColor(kind: Int): Int = Color.parseColor(
+        when (kind) {
+            0 -> "#00E676"
+            1 -> "#4DA3FF"
+            2 -> "#FF8A80"
+            4, 5 -> "#FFA726"
+            6 -> "#FF1744"
+            else -> "#8A93A3"
+        }
+    )
+
+    // Trackers tab, drawn as rounded cards: DHT / PeX / LSD first, then every
+    // real tracker. Each card has the name in bold, the status or tracker
+    // message on the left (red/orange when something is wrong) and "Peers: N"
+    // on the right. A summary line stays above the cards.
+    private fun renderTrackersTab(
+        torrentIndex: Int,
+        contentText: TextView,
+        cards: LinearLayout?
+    ) {
+        val raw = try {
+            TorrentNative.getTorrentTrackerStatus(torrentIndex)
+        } catch (e: Throwable) {
+            try {
+                "Trackers\n\n" + TorrentNative.getTorrentTrackers(torrentIndex)
+            } catch (e2: Throwable) {
+                "Could not load tracker status"
+            }
+        }
+
+        cards?.removeAllViews()
+
+        if (!raw.startsWith("Tracker Status\n\n")) {
+            contentText.text = raw
+            return
+        }
+
+        val special = setOf("DHT", "PeX", "LSD")
+
+        fun nameOf(block: List<String>): String =
+            block.firstOrNull { it.startsWith("URL: ") }?.removePrefix("URL: ") ?: ""
+
+        val all = raw.split("\n\n").drop(1).filter { it.isNotBlank() }.map { it.split("\n") }
+        val ordered = all.filter { nameOf(it) in special } + all.filter { nameOf(it) !in special }
+        val kinds = ordered.map { trackerKindOf(it) }
+
+        // Summary line (counts per kind), same look as before.
+        val summary = android.text.SpannableStringBuilder()
+        val labels = listOf(
+            0 to "working", 1 to "updating", 4 to "warning",
+            5 to "failing", 2 to "error", 6 to "off", 3 to "not contacted"
+        )
+        var first = true
+        for ((kind, label) in labels) {
+            val n = kinds.count { it == kind }
+            if (n == 0) continue
+            if (!first) summary.append("   ")
+            first = false
+            val start = summary.length
+            summary.append("\u25CF $n $label")
+            summary.setSpan(
+                android.text.style.ForegroundColorSpan(trackerKindColor(kind)),
+                start, summary.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            summary.setSpan(
+                android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                start, summary.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        contentText.text = summary
+
+        if (cards == null) return
+
+        val density = resources.displayMetrics.density
+        val cardBg = androidx.core.graphics.ColorUtils.blendARGB(bgColor(), Color.BLACK, 0.45f)
+
+        for ((i, block) in ordered.withIndex()) {
+            val kind = kinds[i]
+            val color = trackerKindColor(kind)
+            val name = nameOf(block)
+            val isSpecial = name in special
+
+            fun field(prefix: String): String =
+                block.firstOrNull { it.startsWith(prefix) }?.removePrefix(prefix) ?: ""
+
+            val status = field("Status: ")
+            val message = field("Message: ")
+            val lastError = field("Last error: ")
+
+            var peers = "Peers: 0"
+            val reports = field("Tracker reports: ")
+            val reported = Regex("Peers (\\d+)").find(reports)?.groupValues?.get(1)
+            if (reported != null) peers = "Peers: $reported"
+            val own = field("Peers: ")
+            if (own.isNotBlank()) peers = "Peers: $own"
+
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(cardBg)
+                    cornerRadius = 14f * density
+                }
+                setPadding(
+                    (14 * density).toInt(), (12 * density).toInt(),
+                    (14 * density).toInt(), (12 * density).toInt()
+                )
+            }
+
+            card.addView(TextView(this).apply {
+                text = name
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            })
+
+            val left = android.text.SpannableStringBuilder()
+
+            fun addLeft(str: String, col: Int, bold: Boolean) {
+                if (str.isBlank()) return
+                if (left.isNotEmpty()) left.append("\n")
+                val start = left.length
+                left.append(str)
+                left.setSpan(
+                    android.text.style.ForegroundColorSpan(col),
+                    start, left.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                if (bold) {
+                    left.setSpan(
+                        android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                        start, left.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                    )
+                }
+            }
+
+            val quietMessages = setOf("Announce OK", "No tracker message yet", "No message from the tracker")
+
+            when {
+                isSpecial -> addLeft(status, color, true)
+                kind == 0 -> {
+                    addLeft("Working", color, true)
+                    if (message !in quietMessages) addLeft(message, Color.parseColor("#B0BEC5"), false)
+                }
+                kind == 1 || kind == 3 -> addLeft(status, color, true)
+                else -> {
+                    addLeft(status, color, true)
+                    if (message !in quietMessages) addLeft(message, color, false)
+                    addLeft(lastError, color, false)
+                }
+            }
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, (6 * density).toInt(), 0, 0)
+            }
+
+            row.addView(
+                TextView(this).apply {
+                    text = left
+                    textSize = 16f
+                    setPadding(0, 0, (10 * density).toInt(), 0)
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+
+            row.addView(TextView(this).apply {
+                text = peers
+                textSize = 16f
+                setTextColor(Color.WHITE)
+            })
+
+            card.addView(row)
+
+            if (isSpecial) {
+                if (message.isNotBlank()) {
+                    card.addView(TextView(this).apply {
+                        text = message
+                        textSize = 14f
+                        setTextColor(if (kind == 6) color else Color.parseColor("#B0BEC5"))
+                        setPadding(0, (4 * density).toInt(), 0, 0)
+                    })
+                }
+            } else {
+                val details = listOf(
+                    field("Tier: ").takeIf { it.isNotBlank() }?.let { "Tier $it" },
+                    field("Fails: ").takeIf { it.isNotBlank() }?.let { "Fails $it" },
+                    field("Source: ").takeIf { it.isNotBlank() }
+                ).filterNotNull()
+
+                if (details.isNotEmpty()) {
+                    card.addView(TextView(this).apply {
+                        text = details.joinToString("  \u00B7  ")
+                        textSize = 12f
+                        setTextColor(Color.parseColor("#8A93A3"))
+                        setPadding(0, (6 * density).toInt(), 0, 0)
+                    })
+                }
+            }
+
+            cards.addView(
+                card,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = (6 * density).toInt() }
+            )
+        }
+    }
+
     private fun colorTrackerStatus(text: String): CharSequence {
         if (!text.startsWith("Tracker Status\n\n")) return text
 
@@ -9636,6 +9966,7 @@ class MainActivity : AppCompatActivity() {
                 status.startsWith("Error") -> 2
                 status.startsWith("Updating") -> 1
                 status.startsWith("Failing") -> 5
+                status.startsWith("Off") -> 6
                 status.startsWith("Working") -> if (hasLastError && !verified) 4 else 0
                 else -> 3
             }
@@ -9644,7 +9975,7 @@ class MainActivity : AppCompatActivity() {
         fun colorOf(kind: Int): Int = when (kind) {
             0 -> green
             1 -> blue
-            2 -> red
+            2, 6 -> red
             4, 5 -> orange
             else -> grey
         }
@@ -9677,7 +10008,7 @@ class MainActivity : AppCompatActivity() {
 
         add("Tracker Status\n", null, false)
 
-        val labels = listOf(0 to "working", 1 to "updating", 4 to "warning", 5 to "failing", 2 to "error", 3 to "not contacted")
+        val labels = listOf(0 to "working", 1 to "updating", 4 to "warning", 5 to "failing", 2 to "error", 6 to "off", 3 to "not contacted")
         var first = true
         for ((kind, label) in labels) {
             val n = kinds.count { it == kind }
@@ -9703,7 +10034,7 @@ class MainActivity : AppCompatActivity() {
                         add("Status: ", null, false)
                         add(line.substring("Status: ".length), color, true)
                     }
-                    (kind == 2 || kind == 4 || kind == 5) &&
+                    (kind == 2 || kind == 4 || kind == 5 || kind == 6) &&
                         (line.startsWith("Message: ") || line.startsWith("Last error: ")) ->
                         add(line, color, false)
                     else -> add(line, null, false)

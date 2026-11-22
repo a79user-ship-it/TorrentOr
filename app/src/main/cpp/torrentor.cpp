@@ -66,6 +66,11 @@ static bool g_dhtEnabled = true;
 static bool g_pexEnabled = true;
 static bool g_lsdEnabled = true;
 
+// Contact every tracker (every tier) at once instead of only the first
+// working tier. libtorrent's own default is off; this app turns it ON by
+// default (the user can switch it off in Network Features).
+static bool g_announceToAll = true;
+
 // Feature 1: Speed Control (global limits only - no scheduling). Bytes
 // per second, matching libtorrent's own convention where 0 means
 // unlimited. Defaults to unlimited, matching the app's behavior before
@@ -660,6 +665,10 @@ static void ensureSession(const std::string& savePath) {
                 g_lsdEnabled
         );
 
+        // Announce to every tracker and every tier at once (on by default).
+        pack.set_bool(lt::settings_pack::announce_to_all_trackers, g_announceToAll);
+        pack.set_bool(lt::settings_pack::announce_to_all_tiers, g_announceToAll);
+
         // uTP: enables µTP peer connections, commonly used by modern clients.
         pack.set_bool(
                 lt::settings_pack::enable_incoming_utp,
@@ -720,6 +729,19 @@ static void ensureSession(const std::string& savePath) {
             g_natpmpState = "Disabled";
             g_natpmpMessage = "NAT-PMP is turned off";
         }
+
+        // HTTPS trackers: OpenSSL has no certificate store on Android by
+        // default, so every https:// tracker failed certificate checking
+        // ("unspecified system error"). Point OpenSSL at Android's own
+        // trusted-certificate folders (a colon-separated list; folders that
+        // do not exist on a given Android version are simply skipped).
+        setenv("SSL_CERT_DIR",
+               "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts",
+               1);
+
+        // HTTPS tracker certificates are verified (libtorrent default). The
+        // trusted-certificate bundle is prepared by CaBundle.kt before this.
+        pack.set_bool(lt::settings_pack::validate_https_trackers, true);
 
         g_session = std::make_unique<lt::session>(pack);
 
@@ -1003,6 +1025,22 @@ static void logTorrentAlert(lt::alert* alert) {
             message.c_str()
     );
 
+    // Diagnostic: the plain message hides the numeric error code and its
+    // category, which is what tells a TLS/certificate failure apart from a
+    // network failure for HTTPS trackers.
+    if (auto* te = lt::alert_cast<lt::tracker_error_alert>(alert)) {
+        __android_log_print(
+                ANDROID_LOG_INFO,
+                "TorrentOrLT",
+                "TRACKER-ERR url=%s code=%d category=%s msg=%s reason=%s",
+                te->tracker_url(),
+                te->error.value(),
+                te->error.category().name(),
+                te->error.message().c_str(),
+                te->failure_reason()
+        );
+    }
+
     pushEngineLog(level, message);
 }
 
@@ -1138,6 +1176,9 @@ static void applyNetworkFeatureSettings() {
                 lt::settings_pack::enable_lsd,
                 g_lsdEnabled
         );
+
+        pack.set_bool(lt::settings_pack::announce_to_all_trackers, g_announceToAll);
+        pack.set_bool(lt::settings_pack::announce_to_all_tiers, g_announceToAll);
 
         g_session->apply_settings(pack);
     } catch (...) {
@@ -2529,11 +2570,79 @@ Java_com_example_torrentor_TorrentNative_getTorrentTrackerStatus(
     try {
         auto trackers = handle.trackers();
 
-        if (trackers.empty()) {
-            return env->NewStringUTF("No trackers");
+        // Even with no real trackers the DHT / PeX / LSD entries below are
+        // still shown, so the tab always says whether those are on.
+        output += "Tracker Status\n\n";
+
+        std::string specialOutput;
+
+        // DHT / PeX / LSD as their own entries at the TOP of the list (before the real trackers): on
+        // ("Working") or off with the reason (shown red by the app and the
+        // Web UI), plus how many connected peers each one found. Never uses
+        // the words "Error / Failed" - TorrentNotifier counts those.
+        {
+            bool isPrivate = false;
+            auto ti = handle.torrent_file();
+            if (ti && ti->priv()) {
+                isPrivate = true;
+            }
+
+            auto flags = handle.flags();
+            bool dhtFlagOff = static_cast<bool>(flags & lt::torrent_flags::disable_dht);
+            bool pexFlagOff = static_cast<bool>(flags & lt::torrent_flags::disable_pex);
+            bool lsdFlagOff = static_cast<bool>(flags & lt::torrent_flags::disable_lsd);
+
+            bool dhtSessionOn = true;
+            bool lsdSessionOn = true;
+            if (g_session) {
+                dhtSessionOn = g_session->is_dht_running();
+                lsdSessionOn = g_session->get_settings().get_bool(lt::settings_pack::enable_lsd);
+            }
+
+            int peersDht = 0, peersPex = 0, peersLsd = 0;
+            {
+                std::vector<lt::peer_info> peerList;
+                handle.get_peer_info(peerList);
+                for (const auto& p : peerList) {
+                    if (static_cast<bool>(p.source & lt::peer_info::dht)) peersDht++;
+                    if (static_cast<bool>(p.source & lt::peer_info::pex)) peersPex++;
+                    if (static_cast<bool>(p.source & lt::peer_info::lsd)) peersLsd++;
+                }
+            }
+
+            auto addEntry = [&](const char* name, bool on, const std::string& offReason,
+                                const char* onMessage, int peerCount) {
+                specialOutput += "URL: ";
+                specialOutput += name;
+                specialOutput += "\nStatus: ";
+                specialOutput += on ? std::string("Working") : ("Off (" + offReason + ")");
+                specialOutput += "\nMessage: ";
+                specialOutput += on ? std::string(onMessage)
+                             : (std::string(name) + " is turned off - " + offReason);
+                specialOutput += "\nPeers: ";
+                specialOutput += std::to_string(peerCount);
+                specialOutput += "\n\n";
+            };
+
+            std::string dhtReason = !dhtSessionOn ? "DHT is off for the whole app"
+                                    : isPrivate ? "private torrent"
+                                    : "disabled for this torrent";
+            addEntry("DHT", dhtSessionOn && !isPrivate && !dhtFlagOff, dhtReason,
+                     "Distributed hash table - finds peers without a tracker", peersDht);
+
+            addEntry("PeX", g_pexEnabled && !isPrivate && !pexFlagOff,
+                     !g_pexEnabled ? "PEX is off for the whole app"
+                                   : isPrivate ? "private torrent" : "disabled for this torrent",
+                     "Peer exchange - peers share other peers they know", peersPex);
+
+            std::string lsdReason = !lsdSessionOn ? "Local Service Discovery is off for the whole app"
+                                    : isPrivate ? "private torrent"
+                                    : "disabled for this torrent";
+            addEntry("LSD", lsdSessionOn && !isPrivate && !lsdFlagOff, lsdReason,
+                     "Local Service Discovery - finds peers on your own network", peersLsd);
         }
 
-        output += "Tracker Status\n\n";
+        output += specialOutput;
 
         for (const auto& tracker : trackers) {
             output += "URL: ";
@@ -3384,6 +3493,64 @@ Java_com_example_torrentor_TorrentNative_getSequentialDownload(
 
     try {
         return handle.is_sequential_download() ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
+// Per-torrent DHT switch. "disabled" = true sets libtorrent's disable_dht
+// flag for just this torrent (no DHT announces or lookups for it); the rest
+// of the app keeps using DHT. No metadata needed, so it works the moment the
+// handle exists. Returns false (never throws) when the hash isn't found.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setTorrentDhtDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jboolean disabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        if (disabled == JNI_TRUE) {
+            handle.set_flags(lt::torrent_flags::disable_dht);
+        } else {
+            handle.unset_flags(lt::torrent_flags::disable_dht);
+        }
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentDhtDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        return static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)
+                ? JNI_TRUE : JNI_FALSE;
     } catch (...) {
         return JNI_FALSE;
     }
@@ -4583,6 +4750,130 @@ Java_com_example_torrentor_TorrentNative_getPexStatus(
     return env->NewStringUTF(output.c_str());
 }
 
+// ---- Per-torrent PEX / LSD switches (and making the global PEX switch real) ----
+// libtorrent's standard ut_pex extension is always loaded, so the global
+// "Disable PEX" button used to change nothing but its own status text. PEX
+// is now switched off the way libtorrent allows it: the disable_pex flag on
+// each torrent. A torrent has PEX off when EITHER the global switch is off
+// OR it was turned off for that torrent (g_pexOffHashes), so turning the
+// global switch back on never overrides a per-torrent choice.
+static std::set<std::string> g_pexOffHashes;
+
+static void applyPexFlagToHandle(lt::torrent_handle& handle) {
+    try {
+        if (!handle.is_valid()) {
+            return;
+        }
+
+        std::string key = normalizeHash(getHashFromHandle(handle));
+        bool off = !g_pexEnabled || g_pexOffHashes.count(key) > 0;
+
+        if (off) {
+            handle.set_flags(lt::torrent_flags::disable_pex);
+        } else {
+            handle.unset_flags(lt::torrent_flags::disable_pex);
+        }
+    } catch (...) {
+        // Prevent crash
+    }
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setTorrentPexDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jboolean disabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    if (disabled == JNI_TRUE) {
+        g_pexOffHashes.insert(hash);
+    } else {
+        g_pexOffHashes.erase(hash);
+    }
+
+    applyPexFlagToHandle(handle);
+
+    return JNI_TRUE;
+}
+
+// Reports only the per-torrent choice (not the global switch).
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentPexDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    return g_pexOffHashes.count(hash) > 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_setTorrentLsdDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue,
+        jboolean disabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        if (disabled == JNI_TRUE) {
+            handle.set_flags(lt::torrent_flags::disable_lsd);
+        } else {
+            handle.unset_flags(lt::torrent_flags::disable_lsd);
+        }
+    } catch (...) {
+        return JNI_FALSE;
+    }
+
+    return JNI_TRUE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentLsdDisabled(
+        JNIEnv* env,
+        jobject,
+        jstring hashValue) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string hash = normalizeHash(toString(env, hashValue));
+    auto handle = findHandleByHash(hash);
+
+    if (!handle.is_valid()) {
+        return JNI_FALSE;
+    }
+
+    try {
+        return static_cast<bool>(handle.flags() & lt::torrent_flags::disable_lsd)
+                ? JNI_TRUE : JNI_FALSE;
+    } catch (...) {
+        return JNI_FALSE;
+    }
+}
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_torrentor_TorrentNative_setPexEnabled(
@@ -4595,6 +4886,11 @@ Java_com_example_torrentor_TorrentNative_setPexEnabled(
     g_pexEnabled = enabled == JNI_TRUE;
 
     ensureSession(g_savePath);
+
+    // Make the switch real: set or clear disable_pex on every torrent.
+    for (auto& handle : g_handles) {
+        applyPexFlagToHandle(handle);
+    }
 }
 
 extern "C"
@@ -4652,6 +4948,46 @@ Java_com_example_torrentor_TorrentNative_setLsdEnabled(
 
     ensureSession(g_savePath);
     applyNetworkFeatureSettings();
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_torrentor_TorrentNative_setAnnounceToAllEnabled(
+        JNIEnv*,
+        jobject,
+        jboolean enabled) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    g_announceToAll = enabled == JNI_TRUE;
+
+    ensureSession(g_savePath);
+    applyNetworkFeatureSettings();
+
+    // Ask every running torrent to announce again right away, so turning
+    // this on takes effect now instead of at each tracker's next timer.
+    for (auto& handle : g_handles) {
+        try {
+            if (handle.is_valid()) {
+                handle.force_reannounce();
+            }
+        } catch (...) {
+        }
+    }
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getAnnounceToAllStatus(
+        JNIEnv* env,
+        jobject) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    std::string output = "Announce to all trackers: ";
+    output += g_announceToAll ? "Enabled" : "Disabled";
+
+    return env->NewStringUTF(output.c_str());
 }
 
 extern "C"

@@ -15,6 +15,15 @@ val keystoreProps = Properties().apply {
     }
 }
 
+// ABIs to build. ARM always; x86_64 is added automatically as soon as its
+// prebuilt libtorrent exists at app/src/main/jniLibs/x86_64/ - until then it
+// is skipped, so the build can never fail for a missing x86_64 library.
+val appAbis = mutableListOf("arm64-v8a", "armeabi-v7a").apply {
+    if (file("src/main/jniLibs/x86_64/libtorrent-rasterbar.so").exists()) {
+        add("x86_64")
+    }
+}
+
 android {
     namespace = "com.example.torrentor"
     compileSdk = 37
@@ -26,23 +35,17 @@ android {
 
         // (changed) Raise versionCode with every release you install over an
         // older one. Android refuses an update whose versionCode is lower.
-        versionCode = 194
-        versionName = "2.73"
+        versionCode = 218
+        versionName = "2.97"
 
         ndk {
-            abiFilters += listOf(
-                "arm64-v8a",
-                "armeabi-v7a"
-            )
+            abiFilters += appAbis
         }
 
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
-                abiFilters(
-                    "arm64-v8a",
-                    "armeabi-v7a"
-                )
+                abiFilters(*appAbis.toTypedArray())
             }
         }
     }

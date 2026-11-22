@@ -98,6 +98,8 @@ object TorrentNative {
     external fun setPexEnabled(enabled: Boolean)
     external fun getLsdStatus(): String
     external fun setLsdEnabled(enabled: Boolean)
+    external fun setAnnounceToAllEnabled(enabled: Boolean)
+    external fun getAnnounceToAllStatus(): String
     external fun getNetworkFeaturesStatus(): String
 
     // Feature 4: Connection settings (uTP/TCP/UPnP/NAT-PMP/listen port).
@@ -122,6 +124,12 @@ object TorrentNative {
     // when the torrent's metadata isn't ready yet; it never crashes.
     external fun setSequentialDownload(hash: String, enabled: Boolean): Boolean
     external fun getSequentialDownload(hash: String): Boolean
+    external fun setTorrentDhtDisabled(hash: String, disabled: Boolean): Boolean
+    external fun getTorrentDhtDisabled(hash: String): Boolean
+    external fun setTorrentPexDisabled(hash: String, disabled: Boolean): Boolean
+    external fun getTorrentPexDisabled(hash: String): Boolean
+    external fun setTorrentLsdDisabled(hash: String, disabled: Boolean): Boolean
+    external fun getTorrentLsdDisabled(hash: String): Boolean
     external fun setFirstLastPiecePriority(hash: String, enabled: Boolean): Boolean
     external fun getFirstLastPiecePriority(hash: String): Boolean
 

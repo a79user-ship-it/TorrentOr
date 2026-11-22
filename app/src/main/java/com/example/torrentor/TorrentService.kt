@@ -69,6 +69,9 @@ class TorrentService : Service() {
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr engine starting")
 
+        // HTTPS tracker certificates (must be ready before the session starts).
+        CaBundle.prepare(applicationContext)
+
         // Apply the saved protocol encryption mode before the session and the
         // torrents start, so the very first connections already use it.
         try {
@@ -627,6 +630,8 @@ class TorrentService : Service() {
                         removeSavedFileSelection(hashBeforeRemove)
                         removeSequentialDownload(hashBeforeRemove)
                         removeFirstLastPriority(hashBeforeRemove)
+                        removeTorrentDhtDisabled(hashBeforeRemove)
+                        removeTorrentPexLsdDisabled(hashBeforeRemove)
                         removeSavedTorrentSpeedLimits(hashBeforeRemove)
                         removeSaveFolder(hashBeforeRemove)
                         // must run before the saved entry is removed (it needs the path)
@@ -1062,6 +1067,56 @@ class TorrentService : Service() {
     private fun firstLastPriorityPrefs() =
         getSharedPreferences("firstlast_priority", MODE_PRIVATE)
 
+    // Per-torrent "DHT turned off" choice, keyed by info-hash. Absent = DHT on.
+    private fun torrentDhtDisabledPrefs() =
+        getSharedPreferences("torrent_dht_disabled", MODE_PRIVATE)
+
+    private fun getSavedTorrentDhtDisabled(hash: String): Boolean {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return false
+
+        return torrentDhtDisabledPrefs().getBoolean(key, false)
+    }
+
+    private fun removeTorrentDhtDisabled(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        torrentDhtDisabledPrefs().edit().remove(key).apply()
+    }
+
+    // Per-torrent PEX / LSD "turned off" choices, same shape as DHT above.
+    private fun torrentPexDisabledPrefs() =
+        getSharedPreferences("torrent_pex_disabled", MODE_PRIVATE)
+
+    private fun torrentLsdDisabledPrefs() =
+        getSharedPreferences("torrent_lsd_disabled", MODE_PRIVATE)
+
+    private fun removeTorrentPexLsdDisabled(hash: String) {
+        val key = normalizeHashForKey(hash)
+        if (key.isBlank()) return
+
+        torrentPexDisabledPrefs().edit().remove(key).apply()
+        torrentLsdDisabledPrefs().edit().remove(key).apply()
+    }
+
+    // The global DHT / PEX / LSD switches (Network Features screen) used to
+    // reset to "on" every time the app restarted. They are saved now, and
+    // only an "off" choice needs to be sent back to the engine.
+    private fun applySavedNetworkFeatures() {
+        val prefs = getSharedPreferences("network_features", MODE_PRIVATE)
+
+        try {
+            if (!prefs.getBoolean("dht", true)) TorrentNative.setDhtEnabled(false)
+            if (!prefs.getBoolean("pex", true)) TorrentNative.setPexEnabled(false)
+            if (!prefs.getBoolean("lsd", true)) TorrentNative.setLsdEnabled(false)
+            // Announce to all trackers is ON by default; only an "off" choice is sent.
+            if (!prefs.getBoolean("announce_all", true)) TorrentNative.setAnnounceToAllEnabled(false)
+        } catch (_: Throwable) {
+            // Harmless - retried on the next pass.
+        }
+    }
+
     private fun getSavedSequentialDownload(hash: String): Boolean {
         val key = normalizeHashForKey(hash)
         if (key.isBlank()) return false
@@ -1095,6 +1150,10 @@ class TorrentService : Service() {
         val count = getActiveTorrentCount()
         var pending = false
 
+        if (count > 0) {
+            applySavedNetworkFeatures()
+        }
+
         for (index in 1..count) {
             val hash = try {
                 TorrentNative.getTorrentHash(index)
@@ -1114,6 +1173,32 @@ class TorrentService : Service() {
                 TorrentNative.setSequentialDownload(hash, sequential)
             } catch (_: Throwable) {
                 // Harmless to retry next pass alongside first/last below.
+            }
+
+            // Per-torrent DHT switch: only sent when it was turned off - a
+            // torrent with no saved choice keeps libtorrent's default (DHT on).
+            if (getSavedTorrentDhtDisabled(hash)) {
+                try {
+                    TorrentNative.setTorrentDhtDisabled(hash, true)
+                } catch (_: Throwable) {
+                    // Retried on the next pass.
+                }
+            }
+
+            if (torrentPexDisabledPrefs().getBoolean(key, false)) {
+                try {
+                    TorrentNative.setTorrentPexDisabled(hash, true)
+                } catch (_: Throwable) {
+                    // Retried on the next pass.
+                }
+            }
+
+            if (torrentLsdDisabledPrefs().getBoolean(key, false)) {
+                try {
+                    TorrentNative.setTorrentLsdDisabled(hash, true)
+                } catch (_: Throwable) {
+                    // Retried on the next pass.
+                }
             }
 
             if (appliedPieceSettingsKeys.contains(key)) {

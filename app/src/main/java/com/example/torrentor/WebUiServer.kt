@@ -1787,7 +1787,7 @@ object WebUiServer {
         }
 
         if (!usableTorrentHash(hash)) {
-            sendJson(output, "{\"ok\":true,\"sequential\":false,\"firstLast\":false}")
+            sendJson(output, "{\"ok\":true,\"sequential\":false,\"firstLast\":false,\"dhtOff\":false,\"pexOff\":false,\"lsdOff\":false}")
             return
         }
 
@@ -1803,7 +1803,25 @@ object WebUiServer {
             false
         }
 
-        sendJson(output, "{\"ok\":true,\"sequential\":$sequential,\"firstLast\":$firstLast}")
+        val dhtOff = try {
+            TorrentNative.getTorrentDhtDisabled(hash)
+        } catch (_: Throwable) {
+            false
+        }
+
+        val pexOff = try {
+            TorrentNative.getTorrentPexDisabled(hash)
+        } catch (_: Throwable) {
+            false
+        }
+
+        val lsdOff = try {
+            TorrentNative.getTorrentLsdDisabled(hash)
+        } catch (_: Throwable) {
+            false
+        }
+
+        sendJson(output, "{\"ok\":true,\"sequential\":$sequential,\"firstLast\":$firstLast,\"dhtOff\":$dhtOff,\"pexOff\":$pexOff,\"lsdOff\":$lsdOff}")
     }
 
     private fun handleSetPieceSettings(context: Context, body: String, output: OutputStream) {
@@ -1811,7 +1829,7 @@ object WebUiServer {
         val setting = (extractJsonStringField(body, "setting") ?: "").trim()
         val enabled = extractJsonStringField(body, "enabled") == "true"
 
-        if (torrentIndex == null || (setting != "sequential" && setting != "firstlast")) {
+        if (torrentIndex == null || (setting != "sequential" && setting != "firstlast" && setting != "dht" && setting != "pex" && setting != "lsd")) {
             sendJson(output, "{\"ok\":false,\"error\":\"bad request\"}", status = "400 Bad Request")
             return
         }
@@ -1830,6 +1848,13 @@ object WebUiServer {
         val applied = try {
             if (setting == "sequential") {
                 TorrentNative.setSequentialDownload(hash, enabled)
+            } else if (setting == "dht") {
+                // "enabled" here means DHT is turned OFF for this torrent.
+                TorrentNative.setTorrentDhtDisabled(hash, enabled)
+            } else if (setting == "pex") {
+                TorrentNative.setTorrentPexDisabled(hash, enabled)
+            } else if (setting == "lsd") {
+                TorrentNative.setTorrentLsdDisabled(hash, enabled)
             } else {
                 TorrentNative.setFirstLastPiecePriority(hash, enabled)
             }
@@ -1845,7 +1870,13 @@ object WebUiServer {
             return
         }
 
-        val prefsName = if (setting == "sequential") "sequential_download" else "firstlast_priority"
+        val prefsName = when (setting) {
+            "sequential" -> "sequential_download"
+            "dht" -> "torrent_dht_disabled"
+            "pex" -> "torrent_pex_disabled"
+            "lsd" -> "torrent_lsd_disabled"
+            else -> "firstlast_priority"
+        }
         context.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(pieceSettingKey(hash), enabled)
@@ -6565,6 +6596,9 @@ function renderFilesPanel() {
       '<div class="actions">' +
         '<button class="secondary" id="seqBtn" onclick="togglePieceSetting(' + index + ', \'sequential\')">' + iconSvg('sequential') + 'Sequential Download: ...</button>' +
         '<button class="secondary" id="firstLastBtn" onclick="togglePieceSetting(' + index + ', \'firstlast\')">' + iconSvg('flag') + 'First/Last Piece Priority: ...</button>' +
+        '<button class="secondary" id="dhtBtn" onclick="togglePieceSetting(' + index + ', \'dht\')">' + iconSvg('network') + 'DHT: ...</button>' +
+        '<button class="secondary" id="pexBtn" onclick="togglePieceSetting(' + index + ', \'pex\')">' + iconSvg('peers') + 'PEX: ...</button>' +
+        '<button class="secondary" id="lsdBtn" onclick="togglePieceSetting(' + index + ', \'lsd\')">' + iconSvg('connection') + 'LSD: ...</button>' +
       '</div>' +
       '<div class="actions">' +
         '<button class="secondary" onclick="saveTorrentFileFromDetails(' + index + ')">' + iconSvg('save') + 'Save as .torrent File</button>' +
@@ -6709,27 +6743,39 @@ async function deleteTorrentFromDetails(index) {
   refresh();
 }
 
-function setPieceButtons(sequential, firstLast) {
+function featureState(off) {
+  return off
+    ? '<span style="color:#FF1744;font-weight:bold;">Off for this torrent</span>'
+    : '<span style="color:#00E676;font-weight:bold;">On for this torrent</span>';
+}
+
+function setPieceButtons(sequential, firstLast, dhtOff, pexOff, lsdOff) {
+  const px = document.getElementById('pexBtn');
+  const ls = document.getElementById('lsdBtn');
+  if (px) setBtnLabel(px, 'peers', 'PEX: ' + featureState(pexOff));
+  if (ls) setBtnLabel(ls, 'connection', 'LSD: ' + featureState(lsdOff));
   const seq = document.getElementById('seqBtn');
   const fl = document.getElementById('firstLastBtn');
+  const dh = document.getElementById('dhtBtn');
+  if (dh) setBtnLabel(dh, 'network', 'DHT: ' + featureState(dhtOff));
   if (seq) setBtnLabel(seq, 'sequential', 'Sequential Download: ' + (sequential ? 'On' : 'Off'));
   if (fl) setBtnLabel(fl, 'flag', 'First/Last Piece Priority: ' + (firstLast ? 'On' : 'Off'));
 }
 
-let pieceSettingState = { sequential: false, firstLast: false };
+let pieceSettingState = { sequential: false, firstLast: false, dhtOff: false, pexOff: false, lsdOff: false };
 
 async function loadPieceSettings(index) {
   try {
     const res = await api('/api/torrent_piece_settings?index=' + index);
     const data = await res.json();
     if (!data.ok || openFilesIndex !== index) return;
-    pieceSettingState = { sequential: !!data.sequential, firstLast: !!data.firstLast };
-    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast);
+    pieceSettingState = { sequential: !!data.sequential, firstLast: !!data.firstLast, dhtOff: !!data.dhtOff, pexOff: !!data.pexOff, lsdOff: !!data.lsdOff };
+    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast, pieceSettingState.dhtOff, pieceSettingState.pexOff, pieceSettingState.lsdOff);
   } catch (e) {}
 }
 
 async function togglePieceSetting(index, setting) {
-  const key = setting === 'sequential' ? 'sequential' : 'firstLast';
+  const key = setting === 'sequential' ? 'sequential' : (setting === 'dht' ? 'dhtOff' : (setting === 'pex' ? 'pexOff' : (setting === 'lsd' ? 'lsdOff' : 'firstLast')));
   const newValue = !pieceSettingState[key];
   try {
     const res = await api('/api/torrent_piece_settings', {
@@ -6740,7 +6786,7 @@ async function togglePieceSetting(index, setting) {
     const data = await res.json();
     if (!data.ok) { alert(data.error || 'Could not change this setting'); return; }
     pieceSettingState[key] = newValue;
-    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast);
+    setPieceButtons(pieceSettingState.sequential, pieceSettingState.firstLast, pieceSettingState.dhtOff, pieceSettingState.pexOff, pieceSettingState.lsdOff);
   } catch (e) {
     alert('Could not change this setting');
   }
@@ -6822,57 +6868,100 @@ function colorTrackerText(text) {
 
   if (text.indexOf('Tracker Status\n\n') !== 0) return esc(text);
 
-  const palette = { 0: '#4CD964', 1: '#4DA3FF', 2: '#FF5252', 3: '#8A93A3', 4: '#FFA726', 5: '#FFA726' };
-  const names = { 0: 'working', 1: 'updating', 4: 'warning', 5: 'failing', 2: 'error', 3: 'not contacted' };
+  const palette = { 0: '#00E676', 1: '#4DA3FF', 2: '#FF8A80', 3: '#8A93A3', 4: '#FFA726', 5: '#FFA726', 6: '#FF1744' };
+  const names = { 0: 'working', 1: 'updating', 4: 'warning', 5: 'failing', 2: 'error', 6: 'off', 3: 'not contacted' };
 
-  const blocks = text.split('\n\n').slice(1).filter(function(b) { return b.trim() !== ''; })
+  const allBlocks = text.split('\n\n').slice(1).filter(function(b) { return b.trim() !== ''; })
     .map(function(b) { return b.split('\n'); });
 
-  const kinds = blocks.map(function(lines) {
-    let status = '';
-    let hasLastError = false;
-    let verified = false;
-    lines.forEach(function(line) {
-      if (line.indexOf('Status: ') === 0) status = line.substring(8);
-      if (line.indexOf('Last error: ') === 0) hasLastError = true;
-      if (line === 'Verified: Yes') verified = true;
-    });
+  function field(lines, prefix) {
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf(prefix) === 0) return lines[i].substring(prefix.length);
+    }
+    return '';
+  }
+  function isSpecial(lines) {
+    const n = field(lines, 'URL: ');
+    return n === 'DHT' || n === 'PeX' || n === 'LSD';
+  }
+  function kindOf(lines) {
+    const status = field(lines, 'Status: ');
+    const hasLastError = field(lines, 'Last error: ') !== '';
+    const verified = lines.indexOf('Verified: Yes') >= 0;
     if (status.indexOf('Error') === 0) return 2;
     if (status.indexOf('Updating') === 0) return 1;
     if (status.indexOf('Failing') === 0) return 5;
+    if (status.indexOf('Off') === 0) return 6;
     if (status.indexOf('Working') === 0) return (hasLastError && !verified) ? 4 : 0;
     return 3;
-  });
-
-  function dot(kind) {
-    return '<span style="color:' + palette[kind] + ';">&#9679;</span>';
   }
 
-  const summary = [0, 1, 4, 5, 2, 3].map(function(kind) {
+  // DHT / PeX / LSD first, then every real tracker - each one a rounded card.
+  const ordered = allBlocks.filter(isSpecial).concat(allBlocks.filter(function(l) { return !isSpecial(l); }));
+  const kinds = ordered.map(kindOf);
+
+  const summary = [0, 1, 4, 5, 2, 6, 3].map(function(kind) {
     const n = kinds.filter(function(k) { return k === kind; }).length;
     if (n === 0) return '';
-    return dot(kind) + ' <span style="color:' + palette[kind] + ';font-weight:bold;">' + n + ' ' + names[kind] + '</span>';
+    return '<span style="color:' + palette[kind] + ';font-weight:bold;">&#9679; ' + n + ' ' + names[kind] + '</span>';
   }).filter(function(x) { return x !== ''; }).join('&nbsp;&nbsp;&nbsp;');
 
-  const body = blocks.map(function(lines, b) {
-    const kind = kinds[b];
-    const color = palette[kind];
-    return lines.map(function(line) {
-      if (line.indexOf('URL: ') === 0) {
-        return dot(kind) + ' <b>' + esc(line) + '</b>';
-      }
-      if (line.indexOf('Status: ') === 0) {
-        return 'Status: <span style="color:' + color + ';font-weight:bold;">' + esc(line.substring(8)) + '</span>';
-      }
-      if ((kind === 2 || kind === 4 || kind === 5) &&
-          (line.indexOf('Message: ') === 0 || line.indexOf('Last error: ') === 0)) {
-        return '<span style="color:' + color + ';">' + esc(line) + '</span>';
-      }
-      return esc(line);
-    }).join('\n');
-  }).join('\n\n');
+  const quiet = ['Announce OK', 'No tracker message yet', 'No message from the tracker'];
 
-  return 'Tracker Status\n' + summary + '\n\n' + body;
+  function line(str, color, bold) {
+    if (!str) return '';
+    return '<div style="color:' + color + ';' + (bold ? 'font-weight:bold;' : '') + '">' + esc(str) + '</div>';
+  }
+
+  const cards = ordered.map(function(lines, i) {
+    const kind = kinds[i];
+    const color = palette[kind];
+    const name = field(lines, 'URL: ');
+    const special = isSpecial(lines);
+    const status = field(lines, 'Status: ');
+    const message = field(lines, 'Message: ');
+    const lastError = field(lines, 'Last error: ');
+
+    let peers = 'Peers: 0';
+    const rep = field(lines, 'Tracker reports: ');
+    const pm = rep.match(/Peers (\d+)/);
+    if (pm) peers = 'Peers: ' + pm[1];
+    const own = field(lines, 'Peers: ');
+    if (own !== '') peers = 'Peers: ' + own;
+
+    let left = '';
+    if (special) {
+      left = line(status, color, true);
+    } else if (kind === 0) {
+      left = line('Working', color, true);
+      if (quiet.indexOf(message) < 0) left += line(message, '#B0BEC5', false);
+    } else if (kind === 1 || kind === 3) {
+      left = line(status, color, true);
+    } else {
+      left = line(status, color, true);
+      if (quiet.indexOf(message) < 0) left += line(message, color, false);
+      left += line(lastError, color, false);
+    }
+
+    let extra = '';
+    if (special) {
+      if (message) extra = '<div style="margin-top:4px;font-size:14px;color:' + (kind === 6 ? color : '#B0BEC5') + ';">' + esc(message) + '</div>';
+    } else {
+      const details = [];
+      if (field(lines, 'Tier: ')) details.push('Tier ' + field(lines, 'Tier: '));
+      if (field(lines, 'Fails: ')) details.push('Fails ' + field(lines, 'Fails: '));
+      if (field(lines, 'Source: ')) details.push(field(lines, 'Source: '));
+      if (details.length) extra = '<div style="margin-top:6px;font-size:12px;color:#8A93A3;">' + esc(details.join('  \u00B7  ')) + '</div>';
+    }
+
+    return '<div style="white-space:normal;background:rgba(0,0,0,0.35);border-radius:14px;padding:10px 14px;margin:0 0 6px 0;">' +
+      '<div style="font-weight:bold;font-size:17px;word-break:break-all;">' + esc(name) + '</div>' +
+      '<div style="display:flex;justify-content:space-between;gap:10px;margin-top:6px;font-size:16px;">' +
+      '<div style="min-width:0;word-break:break-word;">' + left + '</div><div style="white-space:nowrap;">' + esc(peers) + '</div></div>' +
+      extra + '</div>';
+  }).join('');
+
+  return '<div style="white-space:normal;margin-bottom:8px;">' + summary + '</div>' + cards;
 }
 
 // Purple for the time lines on the General and Statistics tabs
