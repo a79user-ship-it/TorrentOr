@@ -691,6 +691,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // The "Paste from Clipboard" button: always reads the clipboard right now
+    // and puts a magnet link (or bare 40-character info-hash) into the box,
+    // replacing whatever was there. Unlike the automatic paste it has no
+    // "only once" or "box must be empty" rules.
+    private fun pasteMagnetFromClipboardNow(input: EditText) {
+        try {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = clipboard.primaryClip
+
+            if (clip == null || clip.itemCount == 0) {
+                Toast.makeText(this, "The clipboard is empty", Toast.LENGTH_SHORT).show()
+                return
+            }
+
+            val raw = clip.getItemAt(0).coerceToText(this)?.toString()?.trim().orEmpty()
+
+            val magnet = Regex("magnet:\\?[^\\s]+", RegexOption.IGNORE_CASE).find(raw)?.value
+            val value = when {
+                magnet != null -> magnet
+                Regex("[0-9a-fA-F]{40}").matches(raw) -> raw
+                else -> null
+            }
+
+            if (value == null) {
+                Toast.makeText(
+                    this,
+                    "No magnet link or hash found on the clipboard",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+
+            // Remember this copy as already used, so the automatic paste does
+            // not offer the same link again after it has been added.
+            val copiedAt = if (android.os.Build.VERSION.SDK_INT >= 26) {
+                clip.description.timestamp
+            } else {
+                0L
+            }
+            getSharedPreferences("clipboard_magnet", MODE_PRIVATE)
+                .edit()
+                .putString("last_offered", "$copiedAt|$value")
+                .apply()
+
+            input.setText(value)
+            input.setSelection(input.text.length)
+
+            Toast.makeText(this, "Magnet link pasted", Toast.LENGTH_SHORT).show()
+        } catch (_: Throwable) {
+            Toast.makeText(this, "Could not read the clipboard", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // Like qBittorrent / tTorrent: if the clipboard holds a magnet link (or
     // a bare 40-character info-hash) and the main magnet box is empty, put
     // it in the box. Each copy is only offered once, so clearing the box
@@ -1183,6 +1236,13 @@ class MainActivity : AppCompatActivity() {
         }
         mainMagnetInput = magnetInput
 
+        // Reads the clipboard when tapped, so it does not depend on the
+        // automatic paste noticing the copy when the app regains focus.
+        val pasteMagnet = Button(this).apply {
+            text = "Paste from Clipboard"
+            setOnClickListener { pasteMagnetFromClipboardNow(magnetInput) }
+        }
+
         val addMagnet = Button(this).apply {
             text = "Add Magnet / Hash"
             setOnClickListener {
@@ -1467,6 +1527,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(removeSelected, "trash")
         TabIcons.apply(sortButton, "sort")
         TabIcons.apply(selectModeButton, "select")
+        TabIcons.apply(pasteMagnet, "copy")
         TabIcons.applyBoth(addMagnet, "magnet", "hash")
         TabIcons.apply(selectFile, "addfile")
         TabIcons.apply(pauseAll, "pause")
@@ -1495,6 +1556,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(resumeSelected)
         root.addView(removeSelected)
         root.addView(magnetInput)
+        root.addView(pasteMagnet)
         root.addView(addMagnet)
         root.addView(selectFile)
         root.addView(searchBox)
