@@ -4268,6 +4268,18 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+            // Allow = green check, Require = checklist, Disable = red X
+            TabIcons.apply(
+                button,
+                when (mode) {
+                    0 -> "check"
+                    1 -> "checklist"
+                    else -> "selectnone"
+                },
+                18,
+                6
+            )
+
             modeButtons.add(button)
             row.addView(button)
         }
@@ -4425,12 +4437,12 @@ class MainActivity : AppCompatActivity() {
                     // Keep the screen alive even if native status is temporarily unavailable.
                 }
 
-                handler.postDelayed(this, interval)
+                handler.postDelayed(this, 1000L)
             }
         }
 
         networkFeaturesRefreshRunnable = runnable
-        handler.postDelayed(runnable, interval)
+        handler.postDelayed(runnable, 1000L)
     }
 
     private fun stopNetworkFeaturesAutoRefresh() {
@@ -4814,7 +4826,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Same text as buildConnectionStatusText(), with the trailing
+    // "Auto-refresh" line drawn in amber so it stands out from the status.
+    private fun buildConnectionStatusStyled(): CharSequence {
+        val plain = buildConnectionStatusText()
+        val spannable = android.text.SpannableString(plain)
+        val idx = plain.lastIndexOf("Auto-refresh:")
+        if (idx >= 0) {
+            spannable.setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor("#FFB74D")),
+                idx,
+                plain.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        return spannable
+    }
+
     private fun buildConnectionStatusText(): String {
+        val body = buildConnectionStatusBody()
+        return body.trimEnd() + "\n\nAuto-refresh: Every 1 second"
+    }
+
+    private fun buildConnectionStatusBody(): String {
         val native = try {
             TorrentNative.getConnectionStatus()
         } catch (e: Throwable) {
@@ -4907,7 +4941,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val statusText = TextView(this).apply {
-            text = buildConnectionStatusText()
+            text = buildConnectionStatusStyled()
             textSize = 16f
             setTextColor(Color.WHITE)
             typeface = android.graphics.Typeface.MONOSPACE
@@ -4915,7 +4949,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun refreshStatus() {
-            statusText.text = buildConnectionStatusText()
+            statusText.text = buildConnectionStatusStyled()
         }
 
         // Applies and persists every toggle together (never just the one
@@ -5281,18 +5315,18 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 try {
-                    statusText.text = buildConnectionStatusText()
+                    statusText.text = buildConnectionStatusStyled()
                     onTick?.invoke()
                 } catch (_: Throwable) {
                     // Keep the screen alive even if native status is temporarily unavailable.
                 }
 
-                handler.postDelayed(this, interval)
+                handler.postDelayed(this, 1000L)
             }
         }
 
         connectionRefreshRunnable = runnable
-        handler.postDelayed(runnable, interval)
+        handler.postDelayed(runnable, 1000L)
     }
 
     private fun stopConnectionAutoRefresh() {
@@ -10589,7 +10623,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            builder.append("\n\nAuto-refresh: Every 3 seconds")
+            builder.append("\n\nAuto-refresh: Every 1 second")
         } catch (e: Throwable) {
             builder.clear()
             builder.append("Could not read storage space\n\n$monitoredPath")
@@ -10633,12 +10667,12 @@ class MainActivity : AppCompatActivity() {
                     // Keep screen alive even if storage temporarily cannot be read.
                 }
 
-                handler.postDelayed(this, interval)
+                handler.postDelayed(this, 1000L)
             }
         }
 
         storageRefreshRunnable = runnable
-        handler.postDelayed(runnable, interval)
+        handler.postDelayed(runnable, 1000L)
     }
 
     private fun stopStorageAutoRefresh() {

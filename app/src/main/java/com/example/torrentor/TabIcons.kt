@@ -299,6 +299,14 @@ object TabIcons {
             f("M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z", "#FFFFFF"),
             s("M12 13.6v1.6", "#1E88E5", 1.4f)
         ),
+        "checklist" to listOf(
+            s("M4.9 8.2L7.4 10.7L11.2 6.4", "#22B14C", 2.4f),
+            s("M12.8 8.7H18.8", "#42A5F5", 2.2f),
+            s("M7.6 12.9h.01", "#42A5F5", 2.2f),
+            s("M10.8 12.9H18.8", "#42A5F5", 2.2f),
+            s("M7.6 17.2h.01", "#42A5F5", 2.2f),
+            s("M10.8 17.2H18.8", "#42A5F5", 2.2f)
+        ),
         "plus" to listOf(
             f("M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z", "#66BB6A"),
             s("M12 7v10", "#FFFFFF", 2.6f),
@@ -326,6 +334,28 @@ object TabIcons {
     // An unknown name does nothing, so a typo can never crash the screen.
     // leftAligned = true keeps the icon at the far left (for headings and
     // other text that is not centred inside a full-width button).
+    // Light Blue theme only: the Force Reannounce plane and the Force
+    // Recheck arrows are drawn fully black, because their normal blue and
+    // green blend into the light blue button.
+    private fun themedLayers(view: TextView, name: String, layers: List<Layer>): List<Layer> {
+        if (name != "reannounce" && name != "recheck") return layers
+        val theme = try {
+            view.context.getSharedPreferences("prefs", android.content.Context.MODE_PRIVATE)
+                .getString("theme_color", "blue")
+        } catch (_: Throwable) {
+            "blue"
+        }
+        if (theme != "blue") return layers
+        return layers.map {
+            Layer(
+                it.d,
+                if (it.fill != null) Color.BLACK else null,
+                if (it.stroke != null) Color.BLACK else null,
+                it.width
+            )
+        }
+    }
+
     fun apply(
         view: TextView,
         name: String,
@@ -333,7 +363,7 @@ object TabIcons {
         gapDp: Int = 8,
         leftAligned: Boolean = false
     ) {
-        val layers = ICONS[name] ?: return
+        val layers = themedLayers(view, name, ICONS[name] ?: return)
         val density = view.resources.displayMetrics.density
         val size = (sizeDp * density).toInt()
         val gap = (gapDp * density).toInt()
