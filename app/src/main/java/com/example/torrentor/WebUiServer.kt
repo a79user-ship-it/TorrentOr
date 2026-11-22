@@ -2628,6 +2628,14 @@ object WebUiServer {
         text.append(swarmHealth).append("\n")
         text.append("Web Seeds: ").append(webSeedCount).append("\n")
         text.append("Private: ").append(privateTorrent).append("\n")
+        val peerSources = try {
+            TorrentNative.getTorrentPeerSources(torrentIndex)
+        } catch (e: Throwable) {
+            ""
+        }
+        if (peerSources.isNotBlank()) {
+            text.append(peerSources).append("\n")
+        }
         text.append("Source: ").append(source).append("\n")
         text.append("Encoding: ").append(encoding).append("\n")
 

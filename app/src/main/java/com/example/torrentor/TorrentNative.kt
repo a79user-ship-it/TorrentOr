@@ -56,6 +56,7 @@ object TorrentNative {
     external fun getTorrentTrackerHost(index: Int): String
     external fun getTorrentTotalSize(index: Int): String
     external fun getTorrentPeers(index: Int): String
+    external fun getTorrentPeerSources(index: Int): String
     external fun getTorrentMagnet(index: Int): String
     external fun getTorrentHash(index: Int): String
     external fun getTorrentComment(index: Int): String

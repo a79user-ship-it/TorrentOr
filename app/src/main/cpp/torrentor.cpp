@@ -2659,6 +2659,58 @@ Java_com_example_torrentor_TorrentNative_getTorrentTrackerStatus(
 }
 
 
+// Feature: per-torrent DHT status and where this torrent's connected peers
+// came from (tracker / DHT / PEX / LSD / resume data / incoming). The DHT
+// itself is one shared table for the whole session, so what is per torrent
+// is whether it uses DHT at all and how many peers it actually got from it.
+// Caller must hold g_mutex.
+static std::string buildPeerSourceSummary(
+        const lt::torrent_handle& handle,
+        const std::vector<lt::peer_info>& peers) {
+
+    std::string dhtState = "Active";
+
+    try {
+        bool isPrivate = false;
+        auto ti = handle.torrent_file();
+        if (ti && ti->priv()) {
+            isPrivate = true;
+        }
+
+        if (g_session && !g_session->is_dht_running()) {
+            dhtState = "Off (DHT is turned off for the whole app)";
+        } else if (isPrivate) {
+            dhtState = "Not used (private torrent)";
+        } else if (static_cast<bool>(handle.flags() & lt::torrent_flags::disable_dht)) {
+            dhtState = "Disabled for this torrent";
+        }
+    } catch (...) {
+        dhtState = "Unknown";
+    }
+
+    int fromTracker = 0, fromDht = 0, fromPex = 0, fromLsd = 0, fromResume = 0, incoming = 0;
+
+    for (const auto& peer : peers) {
+        bool any = false;
+
+        if (static_cast<bool>(peer.source & lt::peer_info::tracker)) { fromTracker++; any = true; }
+        if (static_cast<bool>(peer.source & lt::peer_info::dht)) { fromDht++; any = true; }
+        if (static_cast<bool>(peer.source & lt::peer_info::pex)) { fromPex++; any = true; }
+        if (static_cast<bool>(peer.source & lt::peer_info::lsd)) { fromLsd++; any = true; }
+        if (static_cast<bool>(peer.source & lt::peer_info::resume_data)) { fromResume++; any = true; }
+        if (!any) { incoming++; }
+    }
+
+    std::string out = "DHT: " + dhtState;
+    out += "\nPeers from: Tracker " + std::to_string(fromTracker);
+    out += " \u00B7 DHT " + std::to_string(fromDht);
+    out += " \u00B7 PEX " + std::to_string(fromPex);
+    out += " \u00B7 LSD " + std::to_string(fromLsd);
+    out += " \u00B7 Resume data " + std::to_string(fromResume);
+    out += " \u00B7 Incoming " + std::to_string(incoming);
+    return out;
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentPeers(
@@ -2685,6 +2737,8 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
     handle.get_peer_info(peers);
 
     std::string output;
+
+    std::string sourceSummary = buildPeerSourceSummary(handle, peers);
 
     for (const auto& peer : peers) {
         int progressPercent =
@@ -2715,6 +2769,23 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
 
         output += "\nConnection: ";
         output += isUtp ? "uTP" : "TCP";
+
+        {
+            std::string sources;
+            auto addSource = [&](bool on, const char* name) {
+                if (!on) return;
+                if (!sources.empty()) sources += " + ";
+                sources += name;
+            };
+            addSource(static_cast<bool>(peer.source & lt::peer_info::tracker), "Tracker");
+            addSource(static_cast<bool>(peer.source & lt::peer_info::dht), "DHT");
+            addSource(static_cast<bool>(peer.source & lt::peer_info::pex), "PEX");
+            addSource(static_cast<bool>(peer.source & lt::peer_info::lsd), "LSD");
+            addSource(static_cast<bool>(peer.source & lt::peer_info::resume_data), "Resume data");
+            if (sources.empty()) sources = "Incoming";
+            output += "\nFound via: ";
+            output += sources;
+        }
 
         output += "\nProgress: ";
         output += std::to_string(progressPercent);
@@ -2763,7 +2834,41 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
         output = "No peers";
     }
 
+    output = sourceSummary + "\n\n" + output;
+
     return env->NewStringUTF(output.c_str());
+}
+
+// Just the two summary lines (DHT status + peer sources) for the General tab.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentPeerSources(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    try {
+        std::vector<lt::peer_info> peers;
+        handle.get_peer_info(peers);
+        std::string summary = buildPeerSourceSummary(handle, peers);
+        return env->NewStringUTF(summary.c_str());
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
 }
 
 extern "C"

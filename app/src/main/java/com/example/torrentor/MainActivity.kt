@@ -216,6 +216,21 @@ class MainActivity : AppCompatActivity() {
         return roundedCardBackground()
     }
 
+    // Pressed flash for the icon-style TextViews on the blue top bars (back
+    // arrows, the selection bar items): a light overlay shows while pressed.
+    private fun applyBarPressFlash(view: android.view.View) {
+        val pressed = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = 24f
+            setColor(Color.argb(110, 255, 255, 255))
+        }
+        val normal = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+        view.background = android.graphics.drawable.StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), pressed)
+            addState(intArrayOf(), normal)
+        }
+    }
+
     // Every theme: buttons are filled with the theme's card color and have
     // a thin lighter outline (the Deep Blue look), instead of the default
     // faint teal tint. Used for the main screen's buttons, the buttons inside
@@ -595,6 +610,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 26f
                 setTextColor(Color.WHITE)
                 setPadding(28, 12, 28, 12)
+                applyBarPressFlash(this)
                 setOnClickListener {
                     if (backButton != null) {
                         backButton.performClick()
@@ -1518,6 +1534,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 30f
             setTextColor(Color.WHITE)
             setPadding(34, 30, 34, 30)
+            applyBarPressFlash(this)
             setOnClickListener { onClick() }
         }
 
@@ -7540,6 +7557,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 30f
                 setTextColor(Color.WHITE)
                 setPadding(28, 12, 28, 12)
+                applyBarPressFlash(this)
                 setOnClickListener { showMainScreen() }
             })
 
@@ -7986,6 +8004,14 @@ class MainActivity : AppCompatActivity() {
         text.append(swarmHealth).append("\n")
         text.append("Web Seeds: ").append(webSeedCount).append("\n")
         text.append("Private: ").append(privateTorrent).append("\n")
+        val peerSources = try {
+            TorrentNative.getTorrentPeerSources(torrentIndex)
+        } catch (e: Throwable) {
+            ""
+        }
+        if (peerSources.isNotBlank()) {
+            text.append(peerSources).append("\n")
+        }
         text.append("Source: ").append(source).append("\n")
         text.append("Encoding: ").append(encoding).append("\n")
 
