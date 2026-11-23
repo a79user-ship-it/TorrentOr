@@ -4262,8 +4262,8 @@ function sampleGlobalSpeed(torrents) {
     const latestDown = downloadSpeedHistory[downloadSpeedHistory.length - 1] || 0;
     const latestUp = uploadSpeedHistory[uploadSpeedHistory.length - 1] || 0;
     summaryEl.innerHTML =
-      '<span style="color:#4FD1C5;">&darr; ' + latestDown + ' KB/s</span>' +
-      '&nbsp;&nbsp;&nbsp;<span style="color:#B794F6;">&uarr; ' + latestUp + ' KB/s</span>';
+      '<span style="color:#8BC34A;">&darr; ' + latestDown + ' KB/s</span>' +
+      '&nbsp;&nbsp;&nbsp;<span style="color:#42A5F5;">&uarr; ' + latestUp + ' KB/s</span>';
   }
 
   drawLineAreaGraph('speedGraphCanvas', downloadSpeedHistory, uploadSpeedHistory);
@@ -4313,8 +4313,8 @@ function drawLineAreaGraph(canvasId, seriesA, seriesB, colorA, colorB) {
   const maxValue = Math.max(1, ...seriesA, ...seriesB);
 
   // seriesB (upload / peers) drawn first, seriesA (download / seeds) on top.
-  drawGraphSeries(ctx, seriesB, maxValue, w, h, colorB || '#B794F6');
-  drawGraphSeries(ctx, seriesA, maxValue, w, h, colorA || '#4FD1C5');
+  drawGraphSeries(ctx, seriesB, maxValue, w, h, colorB || '#42A5F5');
+  drawGraphSeries(ctx, seriesA, maxValue, w, h, colorA || '#8BC34A');
 }
 
 function roundRectPath(ctx, x, y, w, h, r) {

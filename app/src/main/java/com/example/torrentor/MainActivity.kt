@@ -9483,7 +9483,7 @@ class MainActivity : AppCompatActivity() {
         val builder = android.text.SpannableStringBuilder(text)
 
         builder.setSpan(
-            android.text.style.ForegroundColorSpan(Color.parseColor("#4FD1C5")),
+            android.text.style.ForegroundColorSpan(Color.parseColor("#8BC34A")),
             0,
             downPart.length,
             android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
@@ -9491,7 +9491,7 @@ class MainActivity : AppCompatActivity() {
 
         val upStart = text.length - upPart.length
         builder.setSpan(
-            android.text.style.ForegroundColorSpan(Color.parseColor("#B794F6")),
+            android.text.style.ForegroundColorSpan(Color.parseColor("#42A5F5")),
             upStart,
             text.length,
             android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
