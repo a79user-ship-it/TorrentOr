@@ -4414,8 +4414,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (index == mode) {
                     button.setTextColor(Color.parseColor(selectedColors[index.coerceIn(0, 2)]))
-                } else {
+                } else if (index == 0) {
+                    // Allow when not chosen: back to the normal theme colour
                     normalModeTextColors?.let { button.setTextColor(it) }
+                } else if (index == 2) {
+                    // Disable when not chosen: a deeper red, like its icon
+                    button.setTextColor(Color.parseColor("#E53935"))
+                } else {
+                    // Require when not chosen: a deeper blue, like its icon
+                    button.setTextColor(Color.parseColor("#2D8CFF"))
                 }
             }
         }
