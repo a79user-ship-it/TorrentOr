@@ -1635,30 +1635,20 @@ class MainActivity : AppCompatActivity() {
 
             val menuAnchor = barItem("\u22EE") {}
             menuAnchor.setOnClickListener {
-                val menu = PopupMenu(this@MainActivity, menuAnchor)
-                menu.menu.add(0, 1, 0, "Pause")
-                menu.menu.add(0, 2, 1, "Force Recheck")
-                menu.menu.add(0, 3, 2, "Reannounce")
-                menu.menu.add(1, 0, 3, "Move...").isEnabled = false
-                menu.menu.add(0, 4, 4, "to Top")
-                menu.menu.add(0, 5, 5, "Up")
-                menu.menu.add(0, 6, 6, "Down")
-                menu.menu.add(0, 7, 7, "to Bottom")
-
-                menu.setOnMenuItemClickListener { item ->
-                    when (item.itemId) {
-                        1 -> pauseSelected.performClick()
-                        2 -> forceRecheckSelected.performClick()
-                        3 -> forceReannounceSelected.performClick()
-                        4 -> moveSelectedInQueue("top")
-                        5 -> moveSelectedInQueue("up")
-                        6 -> moveSelectedInQueue("down")
-                        7 -> moveSelectedInQueue("bottom")
-                    }
-                    true
-                }
-
-                menu.show()
+                showIconMenu(
+                    menuAnchor,
+                    listOf(
+                        IconMenuItem("Pause", "pause", true) { pauseSelected.performClick() },
+                        IconMenuItem("Force Recheck", "recheck", true) { forceRecheckSelected.performClick() },
+                        IconMenuItem("Reannounce", "reannounce", true) { forceReannounceSelected.performClick() },
+                        IconMenuItem("Share Magnet Link", "share", true) { shareSelectedMagnets() },
+                        IconMenuItem("Move...", "move", false) {},
+                        IconMenuItem("to Top", "totop", true) { moveSelectedInQueue("top") },
+                        IconMenuItem("Up", "up", true) { moveSelectedInQueue("up") },
+                        IconMenuItem("Down", "down", true) { moveSelectedInQueue("down") },
+                        IconMenuItem("to Bottom", "tobottom", true) { moveSelectedInQueue("bottom") }
+                    )
+                )
             }
             addView(menuAnchor)
         }
@@ -1670,10 +1660,52 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.rgb(13, 71, 161))
-            setPadding(32, 40, 32, 40)
+            setPadding(32, 40, 96, 40)
             elevation = 12f
 
-            addView(title)
+            // App name, with the live total speeds under it in the same
+            // "[D: 0 B/s, U: 0 B/s]" style as qBittorrent's window title.
+            val nameColumn = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(title)
+
+                val speedView = TextView(this@MainActivity).apply {
+                    textSize = 14f
+                    maxLines = 1
+                    gravity = android.view.Gravity.END
+                    text = "[D: 0 B/s, U: 0 B/s]"
+                    setTextColor(Color.WHITE)
+                    setPadding(0, 4, 0, 0)
+                }
+                mainSpeedText = speedView
+                addView(
+                    speedView,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, 0, 48, 0) }
+                )
+            }
+
+            addView(
+                nameColumn,
+                LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            // Three-dot menu on the right (Shutdown).
+            val menuDots = TextView(this@MainActivity).apply {
+                text = "\u22EE"
+                textSize = 28f
+                setTextColor(Color.WHITE)
+                gravity = android.view.Gravity.CENTER
+                setPadding(28, 8, 28, 8)
+                setOnClickListener { showMainOverflowMenu(this) }
+            }
+            addView(menuDots)
         }
         mainTitleBar = titleBar
 
@@ -1690,6 +1722,34 @@ class MainActivity : AppCompatActivity() {
                     0,
                     1f
                 )
+            )
+
+            // Thin status strip pinned to the bottom: DHT / PEX / LSD
+            // state dots and the total seeds and peers. Tap it to open
+            // Network Features.
+            addView(
+                android.view.View(this@MainActivity).apply {
+                    setBackgroundColor(outlineColor())
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    maxOf(1, (1f * resources.displayMetrics.density).toInt())
+                )
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    textSize = 12.5f
+                    maxLines = 1
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    setPadding(16, 22, 16, 22)
+                    setBackgroundColor(
+                        androidx.core.graphics.ColorUtils.blendARGB(bgColor(), Color.BLACK, 0.35f)
+                    )
+                    setOnClickListener { showNetworkFeaturesScreen() }
+                    mainBottomBar = this
+                    updateMainBottomBarText()
+                }
             )
         }
 
@@ -7278,6 +7338,33 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val shareMagnet = Button(this).apply {
+            text = "Share Magnet"
+            setOnClickListener {
+                val magnet = try {
+                    TorrentNative.getTorrentMagnet(torrentIndex)
+                } catch (_: Throwable) {
+                    ""
+                }
+
+                if (magnet.isBlank() || !magnet.startsWith("magnet:")) {
+                    Toast.makeText(this@MainActivity, "Magnet not available yet", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, magnet)
+                }
+
+                try {
+                    startActivity(Intent.createChooser(send, "Share magnet link"))
+                } catch (_: Throwable) {
+                    Toast.makeText(this@MainActivity, "Could not open the share menu", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
         val copyHash = Button(this).apply {
             text = "Copy Hash"
             setOnClickListener {
@@ -7730,6 +7817,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(fileListLayout)
         TabIcons.apply(copyMagnet, "magnet", 18, 6)
         TabIcons.apply(copyHash, "hash", 18, 6)
+        TabIcons.apply(shareMagnet, "share", 18, 6)
         TabIcons.apply(pauseButton, "pause", 18, 6)
         TabIcons.apply(resumeButton, "play", 18, 6)
         TabIcons.apply(deleteButton, "trash", 18, 6)
@@ -7748,7 +7836,7 @@ class MainActivity : AppCompatActivity() {
 
         deepBlueButtons(
             true,
-            copyMagnet, copyHash, pauseButton, resumeButton, deleteButton,
+            copyMagnet, copyHash, shareMagnet, pauseButton, resumeButton, deleteButton,
             sequentialButton, firstLastButton, dhtButton, pexButton, lsdButton, applySpeedLimitButton,
             forceReannounce, forceRecheck, openFolderButton,
             saveTorrentFileButton, changeSaveFolderButton
@@ -7757,6 +7845,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(actionTitle)
         root.addView(copyMagnet)
         root.addView(copyHash)
+        root.addView(shareMagnet)
         root.addView(pauseButton)
         root.addView(resumeButton)
         root.addView(deleteButton)
@@ -9271,7 +9360,93 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
+    // Live total speeds under the app name in the main screen's title bar,
+    // written like qBittorrent's window title: "[D: 0 B/s, U: 0 B/s]" in
+    // plain white.
+    private var mainSpeedText: TextView? = null
+
+    // Bottom status strip: "● DHT  ● PEX  ● LSD | seeds: 7 · peers: 42".
+    // The dots are green when the feature is on and red when it is off (the
+    // global switch from Network Features); seeds and peers are the totals
+    // connected right now across all torrents.
+    private var mainBottomBar: TextView? = null
+    private var barSeeds = 0
+    private var barPeers = 0
+
+    private fun updateMainBottomBarText() {
+        val view = mainBottomBar ?: return
+        val prefs = getSharedPreferences("network_features", MODE_PRIVATE)
+        val sb = android.text.SpannableStringBuilder()
+
+        fun feature(key: String, label: String) {
+            val on = prefs.getBoolean(key, true)
+            val start = sb.length
+            sb.append("\u25CF")
+            sb.setSpan(
+                android.text.style.ForegroundColorSpan(
+                    Color.parseColor(if (on) "#00E676" else "#FF1744")
+                ),
+                start, sb.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            sb.append(" ").append(label)
+        }
+
+        feature("dht", "DHT")
+        sb.append("   ")
+        feature("pex", "PEX")
+        sb.append("   ")
+        feature("lsd", "LSD")
+        sb.append("   |   seeds: $barSeeds ")
+        val dotStart = sb.length
+        sb.append("\u25CF")
+        sb.setSpan(
+            android.text.style.ForegroundColorSpan(Color.parseColor("#8000FF")),
+            dotStart, sb.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        sb.append(" peers: $barPeers")
+        view.text = sb
+    }
+
+    // Adds up "Seeds N (M)" and "Peers N (M)" (the connected counts) from
+    // every torrent line of the engine status.
+    private fun updateMainBottomBar(status: String) {
+        var seeds = 0
+        var peers = 0
+
+        if (status != "No torrents" && status != "Engine not ready") {
+            val seedRegex = Regex(" \u2022 Seeds (\\d+) \\(")
+            val peerRegex = Regex(" \u2022 Peers (\\d+) \\(")
+
+            for (line in status.lines()) {
+                seedRegex.findAll(line).lastOrNull()?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?.let { seeds += it }
+                peerRegex.findAll(line).lastOrNull()?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    ?.let { peers += it }
+            }
+        }
+
+        barSeeds = seeds
+        barPeers = peers
+        updateMainBottomBarText()
+    }
+
+    private fun formatBarSpeed(kb: Int): String {
+        val v = kb.coerceAtLeast(0)
+        return when {
+            v <= 0 -> "0 B/s"
+            v < 1024 -> "$v KB/s"
+            v < 1024 * 1024 -> String.format("%.1f MB/s", v / 1024.0)
+            else -> String.format("%.2f GB/s", v / 1024.0 / 1024.0)
+        }
+    }
+
+    private fun updateMainSpeedText(downloadKb: Int, uploadKb: Int) {
+        val view = mainSpeedText ?: return
+        view.text = "[D: " + formatBarSpeed(downloadKb) + ", U: " + formatBarSpeed(uploadKb) + "]"
+    }
+
     private fun addSpeedSample(downloadKb: Int, uploadKb: Int) {
+        updateMainSpeedText(downloadKb, uploadKb)
         downloadSpeedHistory.add(downloadKb.coerceAtLeast(0))
         uploadSpeedHistory.add(uploadKb.coerceAtLeast(0))
 
@@ -9383,6 +9558,8 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             "Engine not ready"
         }
+
+        updateMainBottomBar(status)
 
         if (status == "No torrents" || status == "Engine not ready") {
             addSpeedSample(0, 0)
@@ -11167,6 +11344,240 @@ class MainActivity : AppCompatActivity() {
         storageRefreshRunnable = null
     }
 
+
+    // Share the magnet links of the selected torrents through the share
+    // sheet, one link per line. Torrents without a magnet link yet (metadata
+    // not loaded) are skipped and counted in a short note.
+    private fun shareSelectedMagnets() {
+        if (selectedTorrents.isEmpty()) {
+            Toast.makeText(this, "No torrents selected", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val magnets = mutableListOf<String>()
+        var skipped = 0
+
+        for (index in selectedTorrents.sorted()) {
+            val magnet = try {
+                TorrentNative.getTorrentMagnet(index)
+            } catch (_: Throwable) {
+                ""
+            }
+
+            if (magnet.startsWith("magnet:")) {
+                magnets.add(magnet)
+            } else {
+                skipped++
+            }
+        }
+
+        if (magnets.isEmpty()) {
+            Toast.makeText(this, "No magnet links ready yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (skipped > 0) {
+            Toast.makeText(
+                this,
+                "${magnets.size} of ${magnets.size + skipped} shared, $skipped not ready",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, magnets.joinToString("\n"))
+        }
+
+        try {
+            startActivity(Intent.createChooser(send, "Share magnet link"))
+        } catch (_: Throwable) {
+            Toast.makeText(this, "Could not open the share menu", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // A dark popup menu whose rows each have a coloured icon (the stock
+    // PopupMenu cannot show icons). A row with enabled = false is dimmed and
+    // does nothing.
+    private class IconMenuItem(
+        val label: String,
+        val icon: String?,
+        val enabled: Boolean,
+        val action: () -> Unit
+    )
+
+    private fun showIconMenu(anchor: android.view.View, items: List<IconMenuItem>) {
+        val d = resources.displayMetrics.density
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(28, 30, 38))
+                cornerRadius = 14f * d
+            }
+            setPadding(0, (6 * d).toInt(), 0, (6 * d).toInt())
+        }
+
+        val popup = android.widget.PopupWindow(
+            card,
+            (250 * d).toInt(),
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            true
+        )
+        popup.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        popup.elevation = 16f * d
+
+        for (item in items) {
+            val row = TextView(this).apply {
+                text = item.label
+                textSize = 17f
+                setTextColor(if (item.enabled) Color.WHITE else Color.parseColor("#6B7280"))
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding((20 * d).toInt(), (13 * d).toInt(), (20 * d).toInt(), (13 * d).toInt())
+                alpha = 1f
+
+                if (item.enabled) {
+                    setOnClickListener {
+                        popup.dismiss()
+                        item.action()
+                    }
+                }
+            }
+
+            val icon = item.icon
+            if (icon != null) {
+                TabIcons.apply(row, icon, 22, 14, true)
+            }
+
+            card.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        popup.showAsDropDown(anchor, 0, 0, android.view.Gravity.END)
+    }
+
+    // ---- Three-dot menu on the main screen header + Shutdown ----
+
+    private fun showMainOverflowMenu(anchor: android.view.View) {
+        val d = resources.displayMetrics.density
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(0, 0, 0))
+                cornerRadius = 20f * d
+            }
+            setPadding((8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
+        }
+
+        val popup = android.widget.PopupWindow(
+            card,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            true
+        )
+        popup.elevation = 16f * d
+
+        val shutdownRow = TextView(this).apply {
+            text = "Shutdown"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding((22 * d).toInt(), (10 * d).toInt(), (26 * d).toInt(), (10 * d).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(13, 71, 161))
+                cornerRadius = 13f * d
+            }
+            setOnClickListener {
+                popup.dismiss()
+                confirmShutdown()
+            }
+        }
+        TabIcons.apply(shutdownRow, "powerred", 54, 18, true)
+
+        val rowParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 0, 0, 0)
+        }
+        card.addView(shutdownRow, rowParams)
+
+        popup.showAsDropDown(anchor, (-28 * d).toInt(), 0, android.view.Gravity.END)
+    }
+
+    private fun confirmShutdown() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Shut down TorrentOr?")
+            .setMessage(
+                "Your torrents are saved first. Downloads, seeding and the Web UI stop " +
+                        "until you open TorrentOr again."
+            )
+            .setPositiveButton("Shut down") { _, _ -> shutdownApp() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Saves every torrent's resume data, turns off the Web UI, stops the
+    // service (which removes the notification) and ends the process so the
+    // engine really stops. Everything is restored the next time the app opens.
+    //
+    // The app stays on screen behind a "Shutting down" box until everything
+    // is saved, and the process is ended a split second after the window
+    // closes. That way there is almost no moment where the app looks closed
+    // but its process is still dying - opening the app again in that gap
+    // used to start it inside the dying process, so it opened and closed.
+    private fun shutdownApp() {
+        AppLog.info("Shutdown requested from the main screen")
+
+        try {
+            android.app.AlertDialog.Builder(this)
+                .setMessage("Shutting down TorrentOr...")
+                .setCancelable(false)
+                .show()
+        } catch (_: Throwable) {
+        }
+
+        Thread {
+            try {
+                TorrentNative.saveResumeData(2500)
+            } catch (_: Throwable) {
+            }
+
+            runOnUiThread {
+                try {
+                    WebUiServer.stop()
+                } catch (_: Throwable) {
+                }
+
+                try {
+                    stopService(Intent(this, TorrentService::class.java))
+                } catch (_: Throwable) {
+                }
+            }
+
+            // Let the system register the service stop (so it is not
+            // restarted), then close the window and end the process at once.
+            try {
+                Thread.sleep(700)
+            } catch (_: InterruptedException) {
+            }
+
+            runOnUiThread { finishAndRemoveTask() }
+
+            try {
+                Thread.sleep(150)
+            } catch (_: InterruptedException) {
+            }
+
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }.start()
+    }
 
     private fun startTorrentService(intent: Intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
