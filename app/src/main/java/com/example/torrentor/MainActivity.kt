@@ -4167,8 +4167,13 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 16, 0, 16)
         }
 
+        // Colours the Enable / Disable buttons from the saved on/off choice
+        // (set once the buttons exist, further down).
+        var updateFeatureColors: () -> Unit = {}
+
         fun refreshStatus() {
             statusText.text = buildNetworkFeaturesColoredText()
+            updateFeatureColors()
         }
 
         startNetworkFeaturesAutoRefresh(statusText)
@@ -4197,6 +4202,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(enableDht, "dht")
+        TabIcons.apply(disableDht, "poweroff")
+
         dhtRow.addView(enableDht)
         dhtRow.addView(disableDht)
 
@@ -4224,6 +4232,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(enablePex, "pex")
+        TabIcons.apply(disablePex, "poweroff")
+
         pexRow.addView(enablePex)
         pexRow.addView(disablePex)
 
@@ -4250,6 +4261,9 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, "LSD disabled", Toast.LENGTH_SHORT).show()
             }
         }
+
+        TabIcons.apply(enableLsd, "lsd")
+        TabIcons.apply(disableLsd, "poweroff")
 
         lsdRow.addView(enableLsd)
         lsdRow.addView(disableLsd)
@@ -4279,8 +4293,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TabIcons.apply(enableAnnounceAll, "announce")
+        TabIcons.apply(disableAnnounceAll, "poweroff")
+
         announceAllRow.addView(enableAnnounceAll)
         announceAllRow.addView(disableAnnounceAll)
+
+        // DHT / PEX / LSD / Announce-to-all buttons: when a feature is ON its Enable button's
+        // whole text turns green, when it is OFF its Disable button's whole
+        // text turns red; the other button keeps the normal theme colour.
+        val featureButtons = listOf(
+            Triple("dht", enableDht, disableDht),
+            Triple("pex", enablePex, disablePex),
+            Triple("lsd", enableLsd, disableLsd),
+            Triple("announce_all", enableAnnounceAll, disableAnnounceAll)
+        )
+        val normalButtonText = enableDht.textColors
+        updateFeatureColors = {
+            val prefs = getSharedPreferences("network_features", MODE_PRIVATE)
+            for ((key, enableBtn, disableBtn) in featureButtons) {
+                val on = prefs.getBoolean(key, true)
+                if (on) {
+                    enableBtn.setTextColor(Color.parseColor("#00E676"))
+                    disableBtn.setTextColor(normalButtonText)
+                } else {
+                    enableBtn.setTextColor(normalButtonText)
+                    disableBtn.setTextColor(Color.parseColor("#FF1744"))
+                }
+            }
+        }
+        updateFeatureColors()
 
         val refreshButton = Button(this).apply {
             text = "Refresh"
@@ -4342,6 +4384,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val modeButtons = mutableListOf<Button>()
+        var normalModeTextColors: android.content.res.ColorStateList? = null
 
         fun describe(mode: Int): String {
             return when (mode) {
@@ -4359,11 +4402,20 @@ class MainActivity : AppCompatActivity() {
                         describe(mode) +
                         "\nA change applies to new connections."
 
+            // The chosen mode's whole text is coloured: Allow green,
+            // Require amber, Disable red. The other two keep the theme colour.
+            val selectedColors = listOf("#00E676", "#FFB300", "#FF1744")
             for ((index, button) in modeButtons.withIndex()) {
+                if (normalModeTextColors == null) normalModeTextColors = button.textColors
                 button.text = if (index == mode) {
                     "[${EngineExtras.encryptionLabel(index)}]"
                 } else {
                     EngineExtras.encryptionLabel(index)
+                }
+                if (index == mode) {
+                    button.setTextColor(Color.parseColor(selectedColors[index.coerceIn(0, 2)]))
+                } else {
+                    normalModeTextColors?.let { button.setTextColor(it) }
                 }
             }
         }
@@ -5782,7 +5834,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         fun refreshToggleButton() {
-            toggleButton.text = if (WebUiServer.isRunning()) "Turn Off" else "Turn On"
+            val running = WebUiServer.isRunning()
+            toggleButton.text = if (running) "Turn Off" else "Turn On"
+            // Red power icon on Turn Off, green power icon on Turn On.
+            TabIcons.apply(toggleButton, if (running) "poweroff" else "poweron")
         }
 
         toggleButton.setOnClickListener {
