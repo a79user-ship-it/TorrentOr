@@ -9900,6 +9900,7 @@ class MainActivity : AppCompatActivity() {
                 background = android.graphics.drawable.GradientDrawable().apply {
                     setColor(cardBg)
                     cornerRadius = 14f * density
+                    setStroke(maxOf(1, (1.2f * density).toInt()), outlineColor())
                 }
                 setPadding(
                     (14 * density).toInt(), (12 * density).toInt(),

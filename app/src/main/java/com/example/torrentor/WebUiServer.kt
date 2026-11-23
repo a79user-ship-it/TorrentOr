@@ -6954,7 +6954,7 @@ function colorTrackerText(text) {
       if (details.length) extra = '<div style="margin-top:6px;font-size:12px;color:#8A93A3;">' + esc(details.join('  \u00B7  ')) + '</div>';
     }
 
-    return '<div style="white-space:normal;background:rgba(0,0,0,0.35);border-radius:14px;padding:10px 14px;margin:0 0 6px 0;">' +
+    return '<div style="white-space:normal;background:rgba(0,0,0,0.35);border:1px solid var(--border-strong);border-radius:14px;padding:10px 14px;margin:0 0 6px 0;">' +
       '<div style="font-weight:bold;font-size:17px;word-break:break-all;">' + esc(name) + '</div>' +
       '<div style="display:flex;justify-content:space-between;gap:10px;margin-top:6px;font-size:16px;">' +
       '<div style="min-width:0;word-break:break-word;">' + left + '</div><div style="white-space:nowrap;">' + esc(peers) + '</div></div>' +
