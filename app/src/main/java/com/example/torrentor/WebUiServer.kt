@@ -4293,20 +4293,29 @@ function drawLineAreaGraph(canvasId, seriesA, seriesB, colorA, colorB) {
   ctx.clearRect(0, 0, w, h);
 
   const cornerRadius = 12;
-  ctx.fillStyle = '#1C1F26';
+  ctx.fillStyle = '#2D2D2D';
   roundRectPath(ctx, 0, 0, w, h, cornerRadius);
   ctx.fill();
 
-  ctx.strokeStyle = '#2A2E37';
+  // qBittorrent-style dashed grid: 4 horizontal lines and 7 vertical columns.
+  ctx.strokeStyle = '#585858';
   ctx.lineWidth = 1;
-  const gridLines = 4;
-  for (let i = 0; i <= gridLines; i++) {
-    const y = Math.round((h * i) / gridLines) + 0.5;
+  ctx.setLineDash([5, 4]);
+  for (let i = 0; i < 4; i++) {
+    const y = Math.round(h * (0.06 + 0.235 * i)) + 0.5;
     ctx.beginPath();
     ctx.moveTo(0, y);
     ctx.lineTo(w, y);
     ctx.stroke();
   }
+  for (let i = 0; i < 7; i++) {
+    const x = Math.round(w * (0.068 + 0.155 * i)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
 
   if (seriesA.length < 2 && seriesB.length < 2) return;
 

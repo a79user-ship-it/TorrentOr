@@ -35,13 +35,15 @@ class SpeedGraphView @JvmOverloads constructor(
     private val uploadColor = Color.parseColor("#42A5F5")   // blue
 
     private val panelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#1C1F26")
+        color = Color.parseColor("#2D2D2D") // qBittorrent graph background
         style = Paint.Style.FILL
     }
 
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#2A2E37")
+        color = Color.parseColor("#585858")
         strokeWidth = 2f
+        style = Paint.Style.STROKE
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f, 8f), 0f)
     }
 
     private val downloadLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -87,10 +89,15 @@ class SpeedGraphView @JvmOverloads constructor(
         panelRect.set(0f, 0f, w, h)
         canvas.drawRoundRect(panelRect, cornerRadius, cornerRadius, panelPaint)
 
-        val gridLines = 4
-        for (i in 0..gridLines) {
-            val y = h * i / gridLines
+        // qBittorrent-style dashed grid: 4 horizontal lines and 7 vertical
+        // "columns", all in the same light grey dashes.
+        for (i in 0..3) {
+            val y = h * (0.06f + 0.235f * i)
             canvas.drawLine(0f, y, w, y, gridPaint)
+        }
+        for (i in 0..6) {
+            val x = w * (0.068f + 0.155f * i)
+            canvas.drawLine(x, 0f, x, h, gridPaint)
         }
 
         if (downloadValues.size < 2 && uploadValues.size < 2) {
