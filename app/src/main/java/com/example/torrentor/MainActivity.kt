@@ -1384,6 +1384,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val batterySettingsButton = Button(this).apply {
+            text = "Battery Settings"
+            setOnClickListener {
+                openBatterySettings()
+            }
+        }
+
         val speedLimitsButton = Button(this).apply {
             text = "Speed Limits"
             setOnClickListener {
@@ -1542,6 +1549,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(rssButton, "rss")
         TabIcons.apply(executionLogButton, "log")
         TabIcons.apply(notificationSettingsButton, "comment")
+        TabIcons.apply(batterySettingsButton, "battery")
         TabIcons.apply(backupRestoreButton, "save")
         TabIcons.apply(onlineSearchButton, "search")
         TabIcons.apply(webUiButton, "webui")
@@ -1575,6 +1583,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(rssButton)
         root.addView(executionLogButton)
         root.addView(notificationSettingsButton)
+        root.addView(batterySettingsButton)
         root.addView(backupRestoreButton)
         root.addView(onlineSearchButton)
         root.addView(webUiButton)
@@ -11462,6 +11471,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---- Three-dot menu on the main screen header + Shutdown ----
+
+    // Opens Android's battery setting for TorrentOr so it can keep running at full
+    // speed with the screen off. If the app is not yet exempt, shows the system
+    // "Allow always running in the background?" prompt; if it already is, opens the
+    // app's own settings page (Battery lives there). Phone brands differ, so every
+    // step falls back to the next one.
+    private fun openBatterySettings() {
+        try {
+            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    startActivity(
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                        ).setData(android.net.Uri.parse("package:$packageName"))
+                    )
+                    return
+                } catch (_: Throwable) {
+                }
+            }
+            startActivity(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                ).setData(android.net.Uri.parse("package:$packageName"))
+            )
+            android.widget.Toast.makeText(
+                this,
+                "Open Battery and choose Unrestricted / Allow background activity",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Throwable) {
+            android.widget.Toast.makeText(
+                this,
+                "Could not open battery settings. Open Settings > Apps > TorrentOr > Battery.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
 
     private fun showMainOverflowMenu(anchor: android.view.View) {
         val d = resources.displayMetrics.density

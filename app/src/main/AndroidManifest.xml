@@ -31,6 +31,15 @@
          runtime prompt. Held only while UPnP is on and the service is running. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- (added) Lets the engine service keep the CPU and Wi-Fi radio awake while the
+         screen is off, so transfers do not slow down or stall when you leave the app.
+         Normal permission, no runtime prompt. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- (added) Lets the Battery Settings button show Android's "Allow TorrentOr to
+         always run in the background?" prompt. Normal permission, no runtime prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="false"
         android:fullBackupContent="@xml/backup_rules"

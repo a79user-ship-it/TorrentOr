@@ -46,6 +46,13 @@ class TorrentService : Service() {
     // on, released when it's turned off or the service is destroyed.
     private var upnpMulticastLock: WifiManager.MulticastLock? = null
 
+    // Keeps transfers at full speed with the screen off. Without these the phone
+    // sleeps the CPU (Doze) and puts the Wi-Fi radio in power-save, which throttles
+    // or stalls downloads when the app is in the background. Held for as long as
+    // the engine service runs, released in onDestroy().
+    private var engineWakeLock: android.os.PowerManager.WakeLock? = null
+    private var engineWifiLock: WifiManager.WifiLock? = null
+
     companion object {
         // Set while all transfers are paused because the phone is on a
         // network the user did not allow (Connection screen -> Download
@@ -65,6 +72,7 @@ class TorrentService : Service() {
 
         createChannel()
         updateNotification("Starting TorrentOr...")
+        acquireEngineLocks()
 
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr engine starting")
@@ -131,6 +139,7 @@ class TorrentService : Service() {
 
         stopNetworkWatcher()
         releaseUpnpMulticastLock()
+        releaseEngineLocks()
         WebUiServer.stop()
         super.onDestroy()
     }
@@ -411,6 +420,49 @@ class TorrentService : Service() {
     // changes the UPnP toggle (via ACTION = CONNECTION_SETTINGS_CHANGED
     // below), so the lock always matches the current setting without
     // MainActivity needing to know anything about WifiManager.
+    private fun acquireEngineLocks() {
+        try {
+            if (engineWakeLock?.isHeld != true) {
+                val pm = applicationContext.getSystemService(POWER_SERVICE) as? android.os.PowerManager
+                val wl = pm?.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                    "TorrentOr:engine"
+                )
+                wl?.setReferenceCounted(false)
+                wl?.acquire()
+                engineWakeLock = wl
+            }
+            if (engineWifiLock?.isHeld != true) {
+                val wm = applicationContext.getSystemService(WIFI_SERVICE) as? WifiManager
+                @Suppress("DEPRECATION")
+                val mode = WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                val fl = wm?.createWifiLock(mode, "TorrentOr:wifi")
+                fl?.setReferenceCounted(false)
+                fl?.acquire()
+                engineWifiLock = fl
+            }
+            AppLog.info("Background locks acquired (CPU wake lock + Wi-Fi lock)")
+        } catch (e: Throwable) {
+            AppLog.error(
+                "Could not acquire the background locks: " +
+                        e.javaClass.simpleName + " " + (e.message ?: "")
+            )
+        }
+    }
+
+    private fun releaseEngineLocks() {
+        try {
+            if (engineWakeLock?.isHeld == true) engineWakeLock?.release()
+        } catch (_: Throwable) {
+        }
+        try {
+            if (engineWifiLock?.isHeld == true) engineWifiLock?.release()
+        } catch (_: Throwable) {
+        }
+        engineWakeLock = null
+        engineWifiLock = null
+    }
+
     private fun updateUpnpMulticastLock(upnpEnabled: Boolean) {
         try {
             if (upnpEnabled) {
