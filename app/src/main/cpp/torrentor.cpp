@@ -3474,6 +3474,11 @@ Java_com_example_torrentor_TorrentNative_streamPrepare(
             return env->NewStringUTF("ERR|metadata not ready");
         }
 
+        // Drop urgent-piece requests left over from an earlier stream/open:
+        // libtorrent serves deadline pieces oldest-deadline-first, so stale
+        // ones (even expired) would make this file wait behind them.
+        handle.clear_piece_deadlines();
+
         handle.set_sequential_download(true);
         handle.file_priority(lt::file_index_t(fileIndex), lt::top_priority);
         handle.resume();
@@ -3575,9 +3580,19 @@ Java_com_example_torrentor_TorrentNative_streamWait(
                     info->map_file(lt::file_index_t(fileIndex), readAheadEnd, 1).piece);
 
             int n = 0;
-            for (int p = firstPiece; p <= aheadPiece && n < 40; ++p, ++n) {
+            // A small request (video playback chunk) only needs the next few
+            // pieces urgently, spaced out so playback order is kept. A large
+            // request (opening a whole file) marks every piece in the range
+            // urgent with tight spacing, so all the bandwidth goes to it.
+            int rangePieces = lastPiece - firstPiece + 1;
+            bool wholeRange = rangePieces > 16;
+            int cap = wholeRange ? (rangePieces + 16) : 40;
+            if (cap > 4096) cap = 4096;
+            int spacing = wholeRange ? 40 : 400;
+
+            for (int p = firstPiece; p <= aheadPiece && n < cap; ++p, ++n) {
                 if (!handle.have_piece(lt::piece_index_t(p))) {
-                    handle.set_piece_deadline(lt::piece_index_t(p), 100 + n * 400);
+                    handle.set_piece_deadline(lt::piece_index_t(p), 10 + n * spacing);
                 }
             }
         } catch (...) {

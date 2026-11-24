@@ -9045,10 +9045,13 @@ class MainActivity : AppCompatActivity() {
                 text = "Open"
 
                 setOnClickListener {
-                    if (percent >= 100) {
+                    // Read the live progress now - 'percent' above was captured
+                    // when this row was built and can be long out of date.
+                    val livePercent = getTorrentFileProgressMap(torrentIndex)[index]?.percent ?: percent
+                    if (livePercent >= 100) {
                         openDownloadedFile(file)
                     } else {
-                        openWhenDownloaded(torrentIndex, index, file, sizeBytes, percent)
+                        openWhenDownloaded(torrentIndex, index, file, sizeBytes, livePercent)
                     }
                 }
 
@@ -9302,13 +9305,17 @@ class MainActivity : AppCompatActivity() {
 
         Thread {
             var ready = false
+            val t0 = System.currentTimeMillis()
+            AppLog.info("Open early: " + file.name + " (" + size + " B, " + percent + "%) - preparing")
             try {
                 val prep = TorrentNative.streamPrepare(torrentIndex, fileIndex)
+                AppLog.info("Open early: prepare returned in " + (System.currentTimeMillis() - t0) + " ms: " + prep.take(60))
                 if (prep.startsWith("OK")) {
-                    ready = TorrentNative.streamWait(torrentIndex, fileIndex, 0L, size, 90000)
+                    ready = TorrentNative.streamWait(torrentIndex, fileIndex, 0L, size, 180000)
                 }
             } catch (_: Throwable) {
             }
+            AppLog.info("Open early: " + file.name + (if (ready) " ready" else " NOT ready") + " after " + (System.currentTimeMillis() - t0) + " ms")
 
             runOnUiThread {
                 if (ready) {
