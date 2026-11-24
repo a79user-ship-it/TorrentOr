@@ -1351,8 +1351,10 @@ class MainActivity : AppCompatActivity() {
             text = buildSpeedSummaryText()
             setTextColor(Color.WHITE)
             textSize = 14f
-            setPadding(16, 16, 16, 8)
-            setBackgroundColor(Color.rgb(20, 20, 20))
+            // No black band: the readout is drawn on top of the graph
+            // (see speedGraphFrame below), like qBittorrent's legend.
+            setPadding(24, 34, 24, 0)
+            setBackgroundColor(Color.TRANSPARENT)
         }
 
         speedGraphView = SpeedGraphView(this).apply {
@@ -1600,8 +1602,18 @@ class MainActivity : AppCompatActivity() {
         root.addView(selectFile)
         root.addView(searchBox)
         root.addView(clearSearch)
-        root.addView(speedGraphText)
-        root.addView(speedGraphView)
+        val speedGraphFrame = FrameLayout(this)
+        // The graph keeps its own height and bottom margin; the speed text
+        // floats over its top-left corner.
+        speedGraphFrame.addView(speedGraphView)
+        speedGraphFrame.addView(
+            speedGraphText,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(speedGraphFrame)
         root.addView(pauseAll)
         root.addView(resumeAll)
         root.addView(globalStatistics)
