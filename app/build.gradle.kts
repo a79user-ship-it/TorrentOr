@@ -35,8 +35,8 @@ android {
 
         // (changed) Raise versionCode with every release you install over an
         // older one. Android refuses an update whose versionCode is lower.
-        versionCode = 267
-        versionName = "3.46"
+        versionCode = 275
+        versionName = "3.54"
 
         ndk {
             abiFilters += appAbis

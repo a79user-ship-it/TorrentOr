@@ -111,6 +111,13 @@ object TabIcons {
         "play" to listOf(
             fs("M7 4.5v15l13-7.5z", "#66BB6A", "#66BB6A", 2.4f)
         ),
+        // Distinct from "play": a screen with a play button, used only by Stream.
+        "stream" to listOf(
+            f("M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z", "#26C6DA"),
+            f("M10 7v6l5-3z", "#FFFFFF"),
+            s("M8 21h8", "#26C6DA", 2.6f),
+            s("M12 17v4", "#26C6DA", 2.4f)
+        ),
         "select" to listOf(
             f("M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z", "#66BB6A"),
             s("M7.5 12.5l3 3 6-7", "#FFFFFF", 2.6f)

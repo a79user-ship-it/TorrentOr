@@ -353,6 +353,7 @@ class MainActivity : AppCompatActivity() {
             text == "Copy Address" || text == "Copy Tailscale Address" -> "copy"
             text == "Change Default Folder" -> "edit"
             text == "Create Folder Here" -> "folder"
+            text == "Stream" -> "stream"
             text == "Open" -> "files"
             text == "Open Site" -> "connection"
             text == "History" -> "clock"
@@ -6918,6 +6919,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val streamNow = Button(this).apply {
+            text = "Stream"
+            setOnClickListener {
+                val chosen: Set<Int> = if (selected.isEmpty()) allIndexes.toSet() else selected.toSet()
+                val indexes = chosen.sorted().joinToString(",")
+
+                applySequentialDownloadForHash(getSafeTorrentHashForAction(torrentIndex), true)
+
+                saveMagnetOnly(magnet)
+                TorrentNative.setTorrentFilePriorities(torrentIndex, indexes)
+                saveFileSelectionForTorrent(torrentIndex, chosen)
+                TorrentNative.resumeTorrent(torrentIndex)
+                onAdded?.invoke()
+                showMainScreen()
+                launchStream(torrentIndex, chosen)
+            }
+        }
+
         val cancel = Button(this).apply {
             text = "Cancel"
             tag = "back_button"
@@ -6936,6 +6955,8 @@ class MainActivity : AppCompatActivity() {
         container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
+        TabIcons.apply(streamNow, "stream", 18, 6)
+        container.addView(streamNow)
         container.addView(cancel)
 
         val outerScroll = ScrollView(this).apply {
@@ -7155,6 +7176,37 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val streamNow = Button(this).apply {
+            text = "Stream"
+            setOnClickListener {
+                persistSequentialDownloadChoice(true)
+
+                val intent = Intent(this@MainActivity, TorrentService::class.java)
+                intent.putExtra("TORRENT_PATH", filePath)
+                if (selected.isNotEmpty()) {
+                    intent.putExtra("SELECTED_INDEXES", selected.sorted().joinToString(","))
+                }
+                intent.putExtra("SAVE_PATH", selectedSaveFolder)
+
+                val hash = try {
+                    TorrentNative.getTorrentFileHash(filePath)
+                } catch (_: Throwable) {
+                    ""
+                }
+
+                startTorrentService(intent)
+                onAdded?.invoke()
+                showMainScreen()
+
+                if (hash.isBlank()) {
+                    Toast.makeText(this@MainActivity, "Added - open it and tap Stream", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "Adding torrent - streaming starts when it is ready", Toast.LENGTH_LONG).show()
+                    streamWhenReady(hash, if (selected.isEmpty()) null else selected.toSet())
+                }
+            }
+        }
+
         // Nothing has been added yet on this screen, so leaving it is a
         // plain Cancel; the top arrow does the same.
         val back = Button(this).apply {
@@ -7172,6 +7224,8 @@ class MainActivity : AppCompatActivity() {
         container.addView(ignoreLowSpaceCheckBox)
         container.addView(downloadSelected)
         container.addView(downloadAll)
+        TabIcons.apply(streamNow, "stream", 18, 6)
+        container.addView(streamNow)
         container.addView(back)
 
         val outerScroll = ScrollView(this).apply {
@@ -7188,6 +7242,132 @@ class MainActivity : AppCompatActivity() {
             overScrollMode = HorizontalScrollView.OVER_SCROLL_IF_CONTENT_SCROLLS
             addView(row)
         }
+    }
+
+    // Streams a torrent's biggest video (restricted to onlyIndexes when given)
+    // in an external player while it downloads. Checks free space first.
+    private class StreamCandidate(val idx: Int, val name: String, val size: Long, val isVideo: Boolean)
+
+    private fun launchStream(torrentIndex: Int, onlyIndexes: Set<Int>?) {
+        val videoExt = setOf("mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv", "ts", "mpg", "mpeg", "3gp")
+        val audioExt = setOf("mp3", "m4a", "flac", "wav", "ogg", "oga", "aac", "opus", "wma")
+        val cands = mutableListOf<StreamCandidate>()
+
+        try {
+            for (line in TorrentNative.getTorrentFilesByIndex(torrentIndex).split("\n")) {
+                if (line.isBlank()) continue
+                val parts = line.split("|", limit = 3)
+                if (parts.size < 3) continue
+                val idx = parts[0].toIntOrNull() ?: continue
+                if (onlyIndexes != null && idx !in onlyIndexes) continue
+                val ext = parts[1].substringAfterLast('.', "").lowercase()
+                val size = parts[2].trim().toLongOrNull() ?: 0L
+                val name = parts[1].substringAfterLast('/')
+                if (ext in videoExt) cands.add(StreamCandidate(idx, name, size, true))
+                else if (ext in audioExt) cands.add(StreamCandidate(idx, name, size, false))
+            }
+        } catch (_: Throwable) {
+        }
+
+        if (cands.isEmpty()) {
+            Toast.makeText(this, "No video or audio file found (metadata may still be loading)", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        // Videos first (biggest first), then audio files in track order.
+        val videos = cands.filter { it.isVideo }.sortedByDescending { it.size }
+        val audios = cands.filter { !it.isVideo }.sortedBy { it.name.lowercase() }
+
+        if (videos.isNotEmpty() && audios.isNotEmpty()) {
+            // Both kinds in this torrent: let the user pick what to play.
+            val list = videos + audios
+            val labels = list.map {
+                (if (it.isVideo) "\uD83C\uDFAC " else "\uD83C\uDFB5 ") + it.name + " (" + formatSize(it.size) + ")"
+            }.toTypedArray()
+
+            AlertDialog.Builder(this)
+                .setTitle("Stream which file?")
+                .setItems(labels) { _, which -> streamCandidate(torrentIndex, list[which]) }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+
+        streamCandidate(torrentIndex, if (videos.isNotEmpty()) videos[0] else audios.maxByOrNull { it.size }!!)
+    }
+
+    private fun streamCandidate(torrentIndex: Int, c: StreamCandidate) {
+        val problem = StreamSupport.spaceProblem(torrentIndex, c.idx)
+        if (problem != null) {
+            AlertDialog.Builder(this)
+                .setTitle("Low Disk Space")
+                .setMessage("$problem Stream anyway?")
+                .setPositiveButton("Stream anyway") { _, _ ->
+                    StreamSupport.allowLowSpace(torrentIndex, c.idx)
+                    openStreamPlayer(torrentIndex, c.idx, c.name, c.isVideo)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+
+        openStreamPlayer(torrentIndex, c.idx, c.name, c.isVideo)
+    }
+
+    private fun openStreamPlayer(torrentIndex: Int, fileIdx: Int, fileName: String, isVideo: Boolean) {
+        val url = StreamServer.urlFor(torrentIndex, fileIdx, fileName)
+        if (url == null) {
+            Toast.makeText(this, "Could not start the stream server", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(url), if (isVideo) "video/*" else "audio/*")
+        }
+
+        try {
+            startActivity(Intent.createChooser(view, "Stream with"))
+            Toast.makeText(this, "Buffering the first pieces - this can take a moment", Toast.LENGTH_LONG).show()
+        } catch (_: Throwable) {
+            Toast.makeText(this, "No media player app found", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // Used by the .torrent file-selection screen: the torrent is only being
+    // added at that point, so wait (up to ~40 s) until it shows up with its
+    // file list, then start streaming.
+    private fun streamWhenReady(hash: String, onlyIndexes: Set<Int>?, attempt: Int = 0) {
+        val target = normalizeHashForDateKey(hash)
+
+        var found = -1
+        try {
+            val count = TorrentNative.getDetailedStatus().lines().count { it.isNotBlank() }
+            for (i in 1..count) {
+                if (normalizeHashForDateKey(TorrentNative.getTorrentHash(i)) == target) {
+                    found = i
+                    break
+                }
+            }
+        } catch (_: Throwable) {
+        }
+
+        val ready = found > 0 && try {
+            TorrentNative.getTorrentFilesByIndex(found).isNotBlank()
+        } catch (_: Throwable) {
+            false
+        }
+
+        if (ready) {
+            launchStream(found, onlyIndexes)
+            return
+        }
+
+        if (attempt >= 40) {
+            Toast.makeText(this, "Torrent is still loading - open it and tap Stream", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        Handler(Looper.getMainLooper()).postDelayed({ streamWhenReady(hash, onlyIndexes, attempt + 1) }, 1000)
     }
 
     private fun showTorrentDetails(torrentIndex: Int) {
@@ -7423,6 +7603,11 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "Could not open the share menu", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+
+        val streamButton = Button(this).apply {
+            text = "Stream"
+            setOnClickListener { launchStream(torrentIndex, null) }
         }
 
         val copyHash = Button(this).apply {
@@ -7878,6 +8063,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(copyMagnet, "magnet", 18, 6)
         TabIcons.apply(copyHash, "hash", 18, 6)
         TabIcons.apply(shareMagnet, "share", 18, 6)
+        TabIcons.apply(streamButton, "stream", 18, 6)
         TabIcons.apply(pauseButton, "pause", 18, 6)
         TabIcons.apply(resumeButton, "play", 18, 6)
         TabIcons.apply(deleteButton, "trash", 18, 6)
@@ -7896,7 +8082,7 @@ class MainActivity : AppCompatActivity() {
 
         deepBlueButtons(
             true,
-            copyMagnet, copyHash, shareMagnet, pauseButton, resumeButton, deleteButton,
+            copyMagnet, copyHash, shareMagnet, streamButton, pauseButton, resumeButton, deleteButton,
             sequentialButton, firstLastButton, dhtButton, pexButton, lsdButton, applySpeedLimitButton,
             forceReannounce, forceRecheck, openFolderButton,
             saveTorrentFileButton, changeSaveFolderButton
@@ -7906,6 +8092,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(copyMagnet)
         root.addView(copyHash)
         root.addView(shareMagnet)
+        root.addView(streamButton)
         root.addView(pauseButton)
         root.addView(resumeButton)
         root.addView(deleteButton)
@@ -8858,7 +9045,11 @@ class MainActivity : AppCompatActivity() {
                 text = "Open"
 
                 setOnClickListener {
-                    openDownloadedFile(file)
+                    if (percent >= 100) {
+                        openDownloadedFile(file)
+                    } else {
+                        openWhenDownloaded(torrentIndex, index, file, sizeBytes, percent)
+                    }
                 }
 
                 setOnLongClickListener {
@@ -8876,10 +9067,39 @@ class MainActivity : AppCompatActivity() {
 
             deepBlueButtons(true, openButton)
 
+            // Per-file Stream button for video/audio files: plays this exact
+            // file while it is still downloading.
+            val fileExt = name.substringAfterLast('.', "").lowercase()
+            val isVideoFile = fileExt in setOf("mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "flv", "ts", "mpg", "mpeg", "3gp")
+            val isAudioFile = fileExt in setOf("mp3", "m4a", "flac", "wav", "ogg", "oga", "aac", "opus", "wma")
+
             row.addView(checkBox)
             row.addView(progressText)
             row.addView(progressBar)
-            row.addView(openButton)
+
+            if (isVideoFile || isAudioFile) {
+                val streamFileButton = Button(this).apply {
+                    text = "Stream"
+                    setOnClickListener {
+                        streamCandidate(
+                            torrentIndex,
+                            StreamCandidate(index, name.substringAfterLast('/'), sizeBytes, isVideoFile)
+                        )
+                    }
+                }
+                TabIcons.apply(streamFileButton, "stream", 18, 6)
+                deepBlueButtons(true, streamFileButton)
+
+                val buttonsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                }
+                buttonsRow.addView(openButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                buttonsRow.addView(streamFileButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(buttonsRow)
+            } else {
+                row.addView(openButton)
+            }
+
             fileListLayout.addView(row)
         }
 
@@ -9062,6 +9282,46 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
         }
+    }
+
+    // Open on a file that is still downloading: bump this file to the front of
+    // the queue, wait for all of its pieces (small files only), then open it,
+    // so an .nfo/.sfv/image never opens half-empty.
+    private fun openWhenDownloaded(torrentIndex: Int, fileIndex: Int, file: File, size: Long, percent: Int) {
+        val limit = 100L * 1024 * 1024
+        if (size > limit) {
+            Toast.makeText(
+                this,
+                "This file is only $percent% downloaded. Large files can't be opened early - use Stream for video/audio.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        Toast.makeText(this, "Fetching this file first, then opening it...", Toast.LENGTH_LONG).show()
+
+        Thread {
+            var ready = false
+            try {
+                val prep = TorrentNative.streamPrepare(torrentIndex, fileIndex)
+                if (prep.startsWith("OK")) {
+                    ready = TorrentNative.streamWait(torrentIndex, fileIndex, 0L, size, 90000)
+                }
+            } catch (_: Throwable) {
+            }
+
+            runOnUiThread {
+                if (ready) {
+                    openDownloadedFile(file)
+                } else {
+                    Toast.makeText(
+                        this,
+                        "Could not finish fetching this file yet (no peers have it?). Try again in a moment.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }.start()
     }
 
     private fun openDownloadedFile(file: File) {

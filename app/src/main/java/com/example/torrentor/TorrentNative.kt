@@ -123,6 +123,8 @@ object TorrentNative {
     // throws - when the hash isn't found, or (first/last priority only)
     // when the torrent's metadata isn't ready yet; it never crashes.
     external fun setSequentialDownload(hash: String, enabled: Boolean): Boolean
+    external fun streamPrepare(index: Int, fileIndex: Int): String
+    external fun streamWait(index: Int, fileIndex: Int, offset: Long, length: Long, timeoutMs: Int): Boolean
     external fun getSequentialDownload(hash: String): Boolean
     external fun setTorrentDhtDisabled(hash: String, disabled: Boolean): Boolean
     external fun getTorrentDhtDisabled(hash: String): Boolean

@@ -675,6 +675,34 @@ object WebUiServer {
                 // requests (handleFileServe), which is what lets a video
                 // or audio element seek, rather than only ever play from
                 // the start.
+                // Free-space check the Stream button runs before starting playback.
+                method == "GET" && path == "/api/stream_check" -> {
+                    val tIdx = parseQueryParam(query, "index")?.toIntOrNull()
+                    val fIdx = parseQueryParam(query, "file")?.toIntOrNull()
+                    val problem = if (tIdx != null && fIdx != null) {
+                        StreamSupport.spaceProblem(tIdx, fIdx)
+                    } else {
+                        "Bad request"
+                    }
+                    if (problem == null) {
+                        sendJson(output, "{\"ok\":true}")
+                    } else {
+                        sendJson(output, "{\"ok\":false,\"low\":true,\"error\":\"" + problem.replace("\"", "'") + "\"}")
+                    }
+                }
+
+                // The user confirmed "Stream anyway" on the low-space prompt.
+                method == "GET" && path == "/api/stream_allow" -> {
+                    val tIdx = parseQueryParam(query, "index")?.toIntOrNull()
+                    val fIdx = parseQueryParam(query, "file")?.toIntOrNull()
+                    if (tIdx != null && fIdx != null) {
+                        StreamSupport.allowLowSpace(tIdx, fIdx)
+                        sendJson(output, "{\"ok\":true}")
+                    } else {
+                        sendJson(output, "{\"ok\":false}")
+                    }
+                }
+
                 method == "GET" && path.startsWith("/stream/") ->
                     handleStreamOrDownload(path.removePrefix("/stream/"), headers["range"], false, output)
 
@@ -3121,6 +3149,19 @@ object WebUiServer {
             return
         }
 
+        // Video/audio played inline go through StreamSupport, which waits
+        // for the needed pieces, so playback works while the file is still
+        // downloading (and behaves exactly like before when it is complete).
+        if (!attachment) {
+            val ct = StreamSupport.contentType(
+                segments.getOrNull(2)?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: ""
+            )
+            if (ct.startsWith("video/") || ct.startsWith("audio/") || ct.startsWith("image/") || ct.startsWith("text/")) {
+                StreamSupport.serve(torrentIndex, fileIndex, rangeHeader, output)
+                return
+            }
+        }
+
         handleFileServe(torrentIndex, fileIndex, rangeHeader, attachment, output)
     }
 
@@ -4062,7 +4103,7 @@ object WebUiServer {
   <div class="status" id="statusLine">Loading...</div>
 
 <script>
-const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#4DA3FF",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#4DA3FF",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"settings":[["M12 2.5v3",null,"#90A4AE",3],["M12 18.5v3",null,"#90A4AE",3],["M2.5 12h3",null,"#90A4AE",3],["M18.5 12h3",null,"#90A4AE",3],["M5.3 5.3l2.1 2.1",null,"#90A4AE",3],["M16.6 16.6l2.1 2.1",null,"#90A4AE",3],["M18.7 5.3l-2.1 2.1",null,"#90A4AE",3],["M7.4 16.6l-2.1 2.1",null,"#90A4AE",3],["M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0z",null,"#78909C",3],["M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z","#FFA726",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#4DA3FF","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#4DA3FF",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#4DA3FF",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#4DA3FF",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#4DA3FF",null,0],["M17 2v4",null,"#4DA3FF",1.6],["M15 4h4",null,"#4DA3FF",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]],"addfeed":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0],["M13 18a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M18 15.5v5",null,"#FFFFFF",2],["M15.5 18h5",null,"#FFFFFF",2]],"refresh":[["M20.5 15a9 9 0 1 1-2.1-9.4L22 9",null,"#26A69A",2.6],["M22 3v6h-6",null,"#FFA726",2.6]],"clock":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#E3F2FD","#42A5F5",2],["M12 6.5V12l3.5 2.5",null,"#FFA726",2.4]],"checklist":[["M4.9 8.2L7.4 10.7L11.2 6.4",null,"#22B14C",2.4],["M12.8 8.7H18.8",null,"#42A5F5",2.2],["M7.6 12.9h.01",null,"#42A5F5",2.2],["M10.8 12.9H18.8",null,"#42A5F5",2.2],["M7.6 17.2h.01",null,"#42A5F5",2.2],["M10.8 17.2H18.8",null,"#42A5F5",2.2]],"plus":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M12 7v10",null,"#FFFFFF",2.6],["M7 12h10",null,"#FFFFFF",2.6]],"share":[["M8.6 10.7l6.8-4",null,"#90A4AE",2],["M8.6 13.3l6.8 4",null,"#90A4AE",2],["M15 5a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#42A5F5",null,0],["M3 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#66BB6A",null,0],["M15 19a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#AB47BC",null,0]],"encryption":[["M12 4.5V2.2",null,"#2E7D32",1.4],["M12 19.5v2.3",null,"#2E7D32",1.4],["M4.5 12H2.2",null,"#2E7D32",1.4],["M19.5 12h2.3",null,"#2E7D32",1.4],["M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M4.5 12a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#1E88E5",null,0],["M9.8 11.5V9.8a2.2 2.2 0 0 1 4.4 0V11.5",null,"#FFFFFF",1.8],["M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z","#FFFFFF",null,0],["M12 13.6v1.6",null,"#1E88E5",1.4]]};
+const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#4DA3FF",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#4DA3FF",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"settings":[["M12 2.5v3",null,"#90A4AE",3],["M12 18.5v3",null,"#90A4AE",3],["M2.5 12h3",null,"#90A4AE",3],["M18.5 12h3",null,"#90A4AE",3],["M5.3 5.3l2.1 2.1",null,"#90A4AE",3],["M16.6 16.6l2.1 2.1",null,"#90A4AE",3],["M18.7 5.3l-2.1 2.1",null,"#90A4AE",3],["M7.4 16.6l-2.1 2.1",null,"#90A4AE",3],["M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0z",null,"#78909C",3],["M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z","#FFA726",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"stream":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z","#26C6DA",null,0],["M10 7v6l5-3z","#FFFFFF",null,0],["M8 21h8",null,"#26C6DA",2.6],["M12 17v4",null,"#26C6DA",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#4DA3FF","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#4DA3FF",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#4DA3FF",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#4DA3FF",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#4DA3FF",null,0],["M17 2v4",null,"#4DA3FF",1.6],["M15 4h4",null,"#4DA3FF",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]],"addfeed":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0],["M13 18a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M18 15.5v5",null,"#FFFFFF",2],["M15.5 18h5",null,"#FFFFFF",2]],"refresh":[["M20.5 15a9 9 0 1 1-2.1-9.4L22 9",null,"#26A69A",2.6],["M22 3v6h-6",null,"#FFA726",2.6]],"clock":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#E3F2FD","#42A5F5",2],["M12 6.5V12l3.5 2.5",null,"#FFA726",2.4]],"checklist":[["M4.9 8.2L7.4 10.7L11.2 6.4",null,"#22B14C",2.4],["M12.8 8.7H18.8",null,"#42A5F5",2.2],["M7.6 12.9h.01",null,"#42A5F5",2.2],["M10.8 12.9H18.8",null,"#42A5F5",2.2],["M7.6 17.2h.01",null,"#42A5F5",2.2],["M10.8 17.2H18.8",null,"#42A5F5",2.2]],"plus":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M12 7v10",null,"#FFFFFF",2.6],["M7 12h10",null,"#FFFFFF",2.6]],"share":[["M8.6 10.7l6.8-4",null,"#90A4AE",2],["M8.6 13.3l6.8 4",null,"#90A4AE",2],["M15 5a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#42A5F5",null,0],["M3 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#66BB6A",null,0],["M15 19a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#AB47BC",null,0]],"encryption":[["M12 4.5V2.2",null,"#2E7D32",1.4],["M12 19.5v2.3",null,"#2E7D32",1.4],["M4.5 12H2.2",null,"#2E7D32",1.4],["M19.5 12h2.3",null,"#2E7D32",1.4],["M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M4.5 12a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#1E88E5",null,0],["M9.8 11.5V9.8a2.2 2.2 0 0 1 4.4 0V11.5",null,"#FFFFFF",1.8],["M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z","#FFFFFF",null,0],["M12 13.6v1.6",null,"#1E88E5",1.4]]};
 function iconSvg(name) {
   const layers = ICONS[name];
   if (!layers) return '';
@@ -4613,6 +4654,7 @@ function render(torrents) {
         '<button onclick="doAction(\'pause\', ' + t.index + ')">' + iconSvg('pause') + 'Pause</button>' +
         '<button onclick="doAction(\'resume\', ' + t.index + ')">' + iconSvg('play') + 'Resume</button>' +
         '<button class="secondary" onclick="toggleFiles(' + t.index + ')">' + iconSvg('files') + 'Files</button>' +
+        '<button class="secondary" onclick="streamTorrent(' + t.index + ')">' + iconSvg('stream') + 'Stream</button>' +
         // Feature: Force Recheck / Force Reannounce right on this card,
         // matching the app's own main torrent card - reuses the exact
         // same server endpoints (/api/force_recheck/<index> and
@@ -7171,7 +7213,7 @@ async function applyFilePriorities(torrentIndex) {
 function fileKind(name) {
   const ext = (name.split('.').pop() || '').toLowerCase();
   if (['mp4', 'm4v', 'webm', 'mkv', 'avi', 'mov'].indexOf(ext) !== -1) return 'video';
-  if (['mp3', 'm4a', 'flac', 'wav', 'ogg', 'oga'].indexOf(ext) !== -1) return 'audio';
+  if (['mp3', 'm4a', 'flac', 'wav', 'ogg', 'oga', 'aac', 'opus'].indexOf(ext) !== -1) return 'audio';
   if (['txt', 'nfo', 'srt', 'vtt', 'log', 'md'].indexOf(ext) !== -1) return 'text';
   if (['jpg', 'jpeg', 'png', 'gif', 'webp'].indexOf(ext) !== -1) return 'image';
   return 'other';
@@ -7207,13 +7249,14 @@ function fileTypeIcon(name) {
 
 function renderFileRow(torrentIndex, f) {
   const rowId = 'frow_' + torrentIndex + '_' + f.index;
-  const streamUrl = '/stream/' + torrentIndex + '/' + f.index;
+  const baseName = String(f.name || '').split('/').pop();
+  const streamUrl = '/stream/' + torrentIndex + '/' + f.index + '/' + encodeURIComponent(baseName).replace(/'/g, '%27');
   const downloadUrl = '/download/' + torrentIndex + '/' + f.index;
   const kind = fileKind(f.name);
 
   let actionBtn = '';
   if (kind === 'video' || kind === 'audio') {
-    actionBtn = '<button onclick="playMedia(\'' + rowId + '\', \'' + streamUrl + '\', \'' + kind + '\')">Play</button>';
+    actionBtn = '<button onclick="playMedia(\'' + rowId + '\', \'' + streamUrl + '\', \'' + kind + '\')">' + ((Number(f.percent) || 0) < 100 ? 'Stream' : 'Play') + '</button>';
   } else if (kind === 'text') {
     actionBtn = '<button onclick="viewText(\'' + rowId + '\', \'' + streamUrl + '\')">View</button>';
   } else if (kind === 'image') {
@@ -7335,12 +7378,149 @@ function hideButton(rowId) {
   return '<div class="actions"><button class="secondary" onclick="closeViewer(\'' + rowId + '\')">Hide</button></div>';
 }
 
-function playMedia(rowId, url, kind) {
+// Stream button on a torrent card: picks the biggest video (else audio) file,
+// checks free space, then plays it in a panel at the bottom of the page while
+// it is still downloading.
+function closeStreamPanel() {
+  const old = document.getElementById('streamPanel');
+  if (old) old.remove();
+}
+
+// Low-space confirmation: shows the warning with "Stream anyway" / "Cancel".
+function askStreamAnyway(status, box, message, onConfirm) {
+  status.textContent = '\u26A0 Low disk space - ' + (message || 'there may not be enough room for this file.');
+  box.innerHTML = '<div class="actions"><button id="streamAnywayBtn">' + iconSvg('stream') + 'Stream anyway</button>' +
+    '<button class="secondary" id="streamCancelBtn">Cancel</button></div>';
+  document.getElementById('streamAnywayBtn').addEventListener('click', onConfirm);
+  document.getElementById('streamCancelBtn').addEventListener('click', function() {
+    box.innerHTML = '';
+    status.textContent = 'Streaming cancelled.';
+  });
+}
+
+async function streamTorrent(index) {
+  closeStreamPanel();
+  const panel = document.createElement('div');
+  panel.id = 'streamPanel';
+  panel.style.cssText = 'position:fixed;left:8px;right:8px;bottom:8px;z-index:60;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:12px;box-shadow:0 4px 20px #000a;';
+  panel.innerHTML = '<div class="name">Stream</div><div class="meta" id="streamStatus">Looking for a video file...</div>' +
+    '<div id="streamBox"></div>' +
+    '<div class="actions"><button class="secondary" onclick="closeStreamPanel()">Close</button></div>';
+  document.body.appendChild(panel);
+
+  const status = document.getElementById('streamStatus');
+  const box = document.getElementById('streamBox');
+
+  try {
+    const res = await api('/api/torrent_files?index=' + index);
+    const data = await res.json();
+    if (!data.ok || !data.ready) {
+      status.textContent = 'Not ready yet - still fetching metadata. Try again in a moment.';
+      return;
+    }
+
+    const videos = [];
+    const audios = [];
+    (data.files || []).forEach(function(f) {
+      const k = fileKind(f.name);
+      if (k === 'video') videos.push({ f: f, kind: k });
+      else if (k === 'audio') audios.push({ f: f, kind: k });
+    });
+    videos.sort(function(a, b) { return Number(b.f.size || 0) - Number(a.f.size || 0); });
+    audios.sort(function(a, b) { return String(a.f.name).toLowerCase() < String(b.f.name).toLowerCase() ? -1 : 1; });
+
+    if (videos.length === 0 && audios.length === 0) {
+      status.textContent = 'No video or audio file found in this torrent.';
+      return;
+    }
+
+    const playFile = async function(best) {
+      const chk = await api('/api/stream_check?index=' + index + '&file=' + best.f.index);
+      const chkData = await chk.json();
+
+      const baseName = String(best.f.name || '').split('/').pop();
+      const url = '/stream/' + index + '/' + best.f.index + '/' + encodeURIComponent(baseName).replace(/'/g, '%27');
+
+      const begin = function() {
+        const tag = best.kind === 'video' ? 'video' : 'audio';
+        box.innerHTML = '<' + tag + ' id="streamEl" controls autoplay style="width:100%;max-height:300px;" src="' + url + '"></' + tag + '>';
+        status.textContent = 'Buffering ' + baseName + ' - the first pieces are loading...';
+
+        const el = document.getElementById('streamEl');
+        el.addEventListener('waiting', function() { status.textContent = 'Buffering...'; });
+        el.addEventListener('stalled', function() { status.textContent = 'Waiting for more data from peers...'; });
+        el.addEventListener('playing', function() { status.textContent = 'Playing ' + baseName; });
+        el.addEventListener('error', function() {
+          status.textContent = 'This browser cannot play this file (MKV and some codecs are not supported). Use the Stream button in the app instead.';
+        });
+      };
+
+      if (chkData.ok) {
+        begin();
+      } else if (chkData.low) {
+        askStreamAnyway(status, box, chkData.error, async function() {
+          await api('/api/stream_allow?index=' + index + '&file=' + best.f.index);
+          box.innerHTML = '';
+          begin();
+        });
+      } else {
+        status.textContent = chkData.error || 'Cannot stream right now.';
+      }
+    };
+
+    if (videos.length > 0 && audios.length > 0) {
+      // Both kinds in this torrent: let the user choose what to play.
+      status.textContent = 'This torrent has video and audio. Choose what to stream:';
+      box.innerHTML = '';
+      const list = document.createElement('div');
+      list.style.cssText = 'max-height:220px;overflow:auto;margin:8px 0;';
+      videos.concat(audios).forEach(function(c) {
+        const b = document.createElement('button');
+        b.className = 'secondary';
+        b.style.cssText = 'display:block;width:100%;text-align:left;margin:4px 0;';
+        b.textContent = (c.kind === 'video' ? '\u{1F3AC} ' : '\u{1F3B5} ') + String(c.f.name || '').split('/').pop() + ' (' + formatSize(c.f.size) + ')';
+        b.addEventListener('click', function() {
+          list.remove();
+          playFile(c);
+        });
+        list.appendChild(b);
+      });
+      box.appendChild(list);
+      return;
+    }
+
+    await playFile(videos.length > 0 ? videos[0] : audios.slice().sort(function(a, b) { return Number(b.f.size || 0) - Number(a.f.size || 0); })[0]);
+  } catch (e) {
+    status.textContent = 'Could not start streaming.';
+  }
+}
+
+function startPlayback(rowId, url, kind) {
   const el = document.getElementById(rowId);
   if (kind === 'video') {
     el.innerHTML = '<video controls autoplay style="width:100%;max-height:360px;" src="' + url + '"></video>' + hideButton(rowId);
   } else {
     el.innerHTML = '<audio controls autoplay style="width:100%;" src="' + url + '"></audio>' + hideButton(rowId);
+  }
+}
+
+async function playMedia(rowId, url, kind) {
+  const el = document.getElementById(rowId);
+  const m = /^\/stream\/(\d+)\/(\d+)/.exec(url);
+  if (!m) { startPlayback(rowId, url, kind); return; }
+
+  try {
+    const chk = await api('/api/stream_check?index=' + m[1] + '&file=' + m[2]);
+    const chkData = await chk.json();
+    if (chkData.ok || !chkData.low) { startPlayback(rowId, url, kind); return; }
+
+    el.innerHTML = '<div class="meta" id="pmStatus"></div><div id="pmBox"></div>';
+    askStreamAnyway(document.getElementById('pmStatus'), document.getElementById('pmBox'), chkData.error, async function() {
+      await api('/api/stream_allow?index=' + m[1] + '&file=' + m[2]);
+      startPlayback(rowId, url, kind);
+    });
+  } catch (e) {
+    startPlayback(rowId, url, kind);
   }
 }
 
@@ -7389,7 +7569,7 @@ const AUTO_ICONS = {
   'Pause Selected': 'pause', 'Resume Selected': 'play',
   'Remove Selected': 'trash', 'Remove Selected + Files': 'trash',
   'Force Recheck Selected': 'recheck', 'Force Reannounce Selected': 'reannounce',
-  'Filters': 'filter', 'Providers': 'settings', 'Search': 'search', 'View': 'files', 'Play': 'play'
+  'Filters': 'filter', 'Providers': 'settings', 'Search': 'search', 'View': 'files', 'Play': 'play', 'Stream': 'stream'
 };
 function addMissingIcons() {
   document.querySelectorAll('button').forEach(function(btn) {

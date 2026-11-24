@@ -5,6 +5,8 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <thread>
+#include <chrono>
 #include <deque>
 #include <sstream>
 #include <algorithm>
@@ -3441,6 +3443,169 @@ Java_com_example_torrentor_TorrentNative_getTorrentSpeedLimits(
             std::to_string(downloadLimit);
 
     return env->NewStringUTF(output.c_str());
+}
+
+// Streaming (step 1). streamPrepare: switches the torrent to sequential
+// mode and gives the chosen file top priority so its pieces come first.
+// Returns "OK|fileSize|pieceLength" or "ERR|reason". Never throws.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_streamPrepare(
+        JNIEnv* env,
+        jobject,
+        jint index,
+        jint fileIndex) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    try {
+        int i = index - 1;
+        if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+            return env->NewStringUTF("ERR|torrent not found");
+        }
+
+        auto handle = g_handles[i];
+        if (!handle.is_valid()) {
+            return env->NewStringUTF("ERR|torrent not found");
+        }
+
+        auto info = handle.torrent_file();
+        if (!info || fileIndex < 0 || fileIndex >= info->num_files()) {
+            return env->NewStringUTF("ERR|metadata not ready");
+        }
+
+        handle.set_sequential_download(true);
+        handle.file_priority(lt::file_index_t(fileIndex), lt::top_priority);
+        handle.resume();
+
+        std::int64_t fsize = info->files().file_size(lt::file_index_t(fileIndex));
+
+        // Bytes of this file already downloaded (used for the free-space check).
+        std::int64_t done = 0;
+        try {
+            std::vector<std::int64_t> prog;
+            handle.file_progress(prog);
+            if (fileIndex < static_cast<int>(prog.size())) done = prog[fileIndex];
+        } catch (...) {
+            done = 0;
+        }
+
+        // Some containers (MP4/MOV "moov" index, MKV cues) keep their index at
+        // the very end of the file, and a player can't start until it has it.
+        // Ask for the last ~8 MB (at least 2 pieces, at most 32) early; the
+        // deadlines come after the first pieces of the file so playback of
+        // the start is not delayed.
+        if (fsize > 0) {
+            std::int64_t plen = info->piece_length();
+            if (plen < 1) plen = 1;
+            int tailPieces = static_cast<int>((8LL * 1024 * 1024 + plen - 1) / plen);
+            if (tailPieces < 2) tailPieces = 2;
+            if (tailPieces > 32) tailPieces = 32;
+
+            int lastP = static_cast<int>(
+                    info->map_file(lt::file_index_t(fileIndex), fsize - 1, 1).piece);
+            int firstP = static_cast<int>(
+                    info->map_file(lt::file_index_t(fileIndex), 0, 1).piece);
+
+            for (int k = 0; k < tailPieces; ++k) {
+                int pp = lastP - k;
+                if (pp < firstP) break;
+                if (!handle.have_piece(lt::piece_index_t(pp))) {
+                    handle.set_piece_deadline(lt::piece_index_t(pp), 3000 + k * 400);
+                }
+            }
+        }
+
+        std::string out = "OK|" + std::to_string(fsize) + "|" +
+                std::to_string(info->piece_length()) + "|" +
+                std::to_string(done);
+        return env->NewStringUTF(out.c_str());
+    } catch (...) {
+        return env->NewStringUTF("ERR|native error");
+    }
+}
+
+// streamWait: makes sure the pieces covering [offset, offset+length) of the
+// file (plus a small read-ahead) are urgent, then waits until the pieces
+// for the requested range are on disk or timeoutMs passes.
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_example_torrentor_TorrentNative_streamWait(
+        JNIEnv*,
+        jobject,
+        jint index,
+        jint fileIndex,
+        jlong offset,
+        jlong length,
+        jint timeoutMs) {
+
+    int firstPiece = 0;
+    int lastPiece = 0;
+    lt::torrent_handle handle;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+
+        try {
+            int i = index - 1;
+            if (i < 0 || i >= static_cast<int>(g_handles.size())) return JNI_FALSE;
+
+            handle = g_handles[i];
+            if (!handle.is_valid()) return JNI_FALSE;
+
+            auto info = handle.torrent_file();
+            if (!info || fileIndex < 0 || fileIndex >= info->num_files()) return JNI_FALSE;
+
+            std::int64_t fileSize = info->files().file_size(lt::file_index_t(fileIndex));
+            if (fileSize <= 0 || offset < 0 || offset >= fileSize) return JNI_TRUE;
+            if (length < 1) length = 1;
+
+            std::int64_t endByte = offset + length - 1;
+            if (endByte >= fileSize) endByte = fileSize - 1;
+
+            firstPiece = static_cast<int>(
+                    info->map_file(lt::file_index_t(fileIndex), offset, 1).piece);
+            lastPiece = static_cast<int>(
+                    info->map_file(lt::file_index_t(fileIndex), endByte, 1).piece);
+
+            // Read-ahead: up to 16 more pieces, never past the file's end.
+            std::int64_t readAheadEnd = endByte + 16LL * info->piece_length();
+            if (readAheadEnd >= fileSize) readAheadEnd = fileSize - 1;
+            int aheadPiece = static_cast<int>(
+                    info->map_file(lt::file_index_t(fileIndex), readAheadEnd, 1).piece);
+
+            int n = 0;
+            for (int p = firstPiece; p <= aheadPiece && n < 40; ++p, ++n) {
+                if (!handle.have_piece(lt::piece_index_t(p))) {
+                    handle.set_piece_deadline(lt::piece_index_t(p), 100 + n * 400);
+                }
+            }
+        } catch (...) {
+            return JNI_FALSE;
+        }
+    }
+
+    int waited = 0;
+    while (waited <= timeoutMs) {
+        bool all = true;
+        try {
+            for (int p = firstPiece; p <= lastPiece; ++p) {
+                if (!handle.have_piece(lt::piece_index_t(p))) {
+                    all = false;
+                    break;
+                }
+            }
+        } catch (...) {
+            return JNI_FALSE;
+        }
+
+        if (all) return JNI_TRUE;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        waited += 100;
+    }
+
+    return JNI_FALSE;
 }
 
 // Feature 3: Sequential Download. set_sequential_download()/
