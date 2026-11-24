@@ -2127,6 +2127,11 @@ class TorrentService : Service() {
     // above the threshold, so a later drop warns again.
     private var lowSpaceWarned = false
 
+    // The threshold the last warning was for. Changing the threshold in
+    // Storage Space starts a new warning even if one was already shown.
+    private var lowSpaceWarnedThresholdMb = -1
+    private var lowSpaceSavedAtSeen = 0L
+
     private fun storageSettingsPrefs() =
         getSharedPreferences("storage_settings", MODE_PRIVATE)
 
@@ -2141,9 +2146,16 @@ class TorrentService : Service() {
             val thresholdMb = storageSettingsPrefs().getInt("low_space_threshold_mb", 500)
             val thresholdBytes = thresholdMb.toLong() * 1024L * 1024L
 
+            // Pressing Save in Storage Space counts as a fresh request to
+            // check, even when the value is unchanged.
+            val savedAt = storageSettingsPrefs().getLong("low_space_saved_at", 0L)
+            val resaved = savedAt != lowSpaceSavedAtSeen
+            lowSpaceSavedAtSeen = savedAt
+
             if (free < thresholdBytes) {
-                if (!lowSpaceWarned) {
+                if (!lowSpaceWarned || lowSpaceWarnedThresholdMb != thresholdMb || resaved) {
                     lowSpaceWarned = true
+                    lowSpaceWarnedThresholdMb = thresholdMb
 
                     val mbFree = free / (1024 * 1024)
 
@@ -2161,6 +2173,7 @@ class TorrentService : Service() {
                 }
             } else {
                 lowSpaceWarned = false
+                lowSpaceWarnedThresholdMb = -1
             }
         } catch (_: Throwable) {
             // Not fatal - a storage read error should never crash the update loop.

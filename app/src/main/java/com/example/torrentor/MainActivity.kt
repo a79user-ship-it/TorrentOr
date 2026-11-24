@@ -126,6 +126,7 @@ class MainActivity : AppCompatActivity() {
     private var filesBuiltForIndex = -1
     private var filesPendingSelection: MutableSet<Int>? = null
     private val filesProgressViews = mutableMapOf<Int, Pair<TextView, ProgressBar>>()
+    private val filesPercentLabels = mutableMapOf<Int, TextView>()
 
     // Feature: per-file download speed + ETA. libtorrent only reports one
     // combined download rate for the whole torrent (used for the
@@ -297,7 +298,9 @@ class MainActivity : AppCompatActivity() {
                 addState(intArrayOf(), normal)
             }
 
-            if (whiteText) {
+            // Buttons that show an on/off state with their own text colour
+            // (Network Features) keep it; the restyle must not reset it.
+            if (whiteText && button.tag != "keep_text_color") {
                 button.setTextColor(Color.WHITE)
             }
 
@@ -314,6 +317,19 @@ class MainActivity : AppCompatActivity() {
     // rebuilt often, so this runs after each layout pass and only touches
     // buttons that still have the default look. Check boxes, radio buttons
     // and anything with its own custom color are left alone.
+    // The text colour a plain button ends up with after the theme restyle:
+    // white on themes where the teal text would be hard to read, otherwise
+    // the normal button text colour.
+    private fun normalButtonTextColors(): android.content.res.ColorStateList {
+        val teal = Color.parseColor("#4FD1C5")
+        val whiteText = androidx.core.graphics.ColorUtils.calculateContrast(teal, cardColor()) < 3.0
+        return if (whiteText) {
+            android.content.res.ColorStateList.valueOf(Color.WHITE)
+        } else {
+            Button(this).textColors
+        }
+    }
+
     private fun restyleDeepBlueTree(view: android.view.View) {
         if (view is Button && view !is CompoundButton) {
             val bg = view.background
@@ -918,6 +934,20 @@ class MainActivity : AppCompatActivity() {
             intent.removeExtra("OPEN_TORRENT_HASH")
             setIntent(Intent(this, MainActivity::class.java))
             openTorrentDetailsByHash(openHash)
+            return
+        }
+
+        // Tap on the low-disk-space notification: open the Storage Space screen.
+        val openScreen = intent.getStringExtra("OPEN_SCREEN")
+
+        if (!openScreen.isNullOrBlank()) {
+            intent.removeExtra("OPEN_SCREEN")
+            setIntent(Intent(this, MainActivity::class.java))
+
+            if (openScreen == "storage") {
+                stopNetworkFeaturesAutoRefresh()
+                showStorageSpaceScreen()
+            }
             return
         }
 
@@ -4291,6 +4321,10 @@ class MainActivity : AppCompatActivity() {
             .apply()
     }
 
+    // Re-applies the Protocol encryption button colours (set by buildEncryptionSection,
+    // called every second while the Network Features screen is open).
+    private var encryptionColorsRefresh: (() -> Unit)? = null
+
     private fun showNetworkFeaturesScreen() {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
@@ -4331,7 +4365,11 @@ class MainActivity : AppCompatActivity() {
             updateFeatureColors()
         }
 
-        startNetworkFeaturesAutoRefresh(statusText)
+        encryptionColorsRefresh = null
+        startNetworkFeaturesAutoRefresh(statusText) {
+            updateFeatureColors()
+            encryptionColorsRefresh?.invoke()
+        }
 
         val dhtRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -4463,8 +4501,31 @@ class MainActivity : AppCompatActivity() {
             Triple("lsd", enableLsd, disableLsd),
             Triple("announce_all", enableAnnounceAll, disableAnnounceAll)
         )
-        val normalButtonText = enableDht.textColors
+        // The theme restyles every plain button after the first layout pass and
+        // resets its text colour, so the "normal" colour is read from the Refresh
+        // button (restyled the same way) at the time the colours are applied,
+        // and the colours are applied again once that pass has run.
+        val fallbackButtonText = enableDht.textColors
+        var referenceButton: Button? = null
+        // Mark the buttons so the theme restyle leaves their text colour alone.
+        for ((_, enableBtn, disableBtn) in featureButtons) {
+            enableBtn.tag = "keep_text_color"
+            disableBtn.tag = "keep_text_color"
+        }
+        // The plain label of every button, so the active one can be shown in
+        // [brackets] (like the Protocol encryption buttons) as well as in colour.
+        val plainLabels = HashMap<Button, String>()
+        for ((_, enableBtn, disableBtn) in featureButtons) {
+            plainLabels[enableBtn] = enableBtn.text.toString()
+            plainLabels[disableBtn] = disableBtn.text.toString()
+        }
+        fun setActiveLabel(button: Button, active: Boolean) {
+            val plain = plainLabels[button] ?: return
+            val wanted = if (active) "[" + plain + "]" else plain
+            if (button.text.toString() != wanted) button.text = wanted
+        }
         updateFeatureColors = {
+            val normalButtonText = normalButtonTextColors()
             val prefs = getSharedPreferences("network_features", MODE_PRIVATE)
             for ((key, enableBtn, disableBtn) in featureButtons) {
                 val on = prefs.getBoolean(key, true)
@@ -4475,6 +4536,8 @@ class MainActivity : AppCompatActivity() {
                     enableBtn.setTextColor(normalButtonText)
                     disableBtn.setTextColor(Color.parseColor("#FF1744"))
                 }
+                setActiveLabel(enableBtn, on)
+                setActiveLabel(disableBtn, !on)
             }
         }
         updateFeatureColors()
@@ -4485,6 +4548,7 @@ class MainActivity : AppCompatActivity() {
                 refreshStatus()
             }
         }
+        referenceButton = refreshButton
 
         val backButton = Button(this).apply {
             text = "Back"
@@ -4500,7 +4564,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(pexRow)
         root.addView(lsdRow)
         root.addView(announceAllRow)
-        root.addView(buildEncryptionSection())
+        root.addView(buildEncryptionSection { referenceButton?.textColors })
         root.addView(refreshButton)
         root.addView(backButton)
 
@@ -4509,12 +4573,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(outerScroll)
+
+        // After the first layout pass (which restyles the buttons), put the
+        // on/off colours back so the screen shows each feature's state as soon
+        // as it opens, not only after a button is pressed.
+        outerScroll.viewTreeObserver.addOnGlobalLayoutListener(
+            object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    if (outerScroll.viewTreeObserver.isAlive) {
+                        outerScroll.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    }
+                    outerScroll.post { updateFeatureColors() }
+                    outerScroll.postDelayed({ updateFeatureColors() }, 150L)
+                    outerScroll.postDelayed({ updateFeatureColors() }, 500L)
+                }
+            }
+        )
     }
 
     // Protocol encryption (like qBittorrent's "Encryption mode"), shown on the
     // Network Features screen. It hides BitTorrent traffic from ISPs that
     // throttle it; it does not hide your IP address or make you anonymous.
-    private fun buildEncryptionSection(): LinearLayout {
+    private fun buildEncryptionSection(
+        referenceTextColors: () -> android.content.res.ColorStateList? = { null }
+    ): LinearLayout {
         val section = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 24, 0, 8)
@@ -4561,7 +4643,6 @@ class MainActivity : AppCompatActivity() {
             // Require amber, Disable red. The other two keep the theme colour.
             val selectedColors = listOf("#00E676", "#FFB300", "#FF1744")
             for ((index, button) in modeButtons.withIndex()) {
-                if (normalModeTextColors == null) normalModeTextColors = button.textColors
                 button.text = if (index == mode) {
                     "[${EngineExtras.encryptionLabel(index)}]"
                 } else {
@@ -4571,7 +4652,7 @@ class MainActivity : AppCompatActivity() {
                     button.setTextColor(Color.parseColor(selectedColors[index.coerceIn(0, 2)]))
                 } else if (index == 0) {
                     // Allow when not chosen: back to the normal theme colour
-                    normalModeTextColors?.let { button.setTextColor(it) }
+                    button.setTextColor(normalButtonTextColors())
                 } else if (index == 2) {
                     // Disable when not chosen: a deeper red, like its icon
                     button.setTextColor(Color.parseColor("#E53935"))
@@ -4585,6 +4666,7 @@ class MainActivity : AppCompatActivity() {
         for (mode in 0..2) {
             val button = Button(this).apply {
                 text = EngineExtras.encryptionLabel(mode)
+                tag = "keep_text_color"
 
                 setOnClickListener {
                     EngineExtras.saveEncryptionMode(this@MainActivity, mode)
@@ -4629,6 +4711,24 @@ class MainActivity : AppCompatActivity() {
         section.addView(row)
 
         refreshInfo()
+        encryptionColorsRefresh = { refreshInfo() }
+
+        // The theme restyles plain buttons after the first layout pass and resets
+        // their text colour; apply the chosen mode's colours again afterwards so
+        // they show as soon as the screen opens.
+        section.viewTreeObserver.addOnGlobalLayoutListener(
+            object : android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    if (section.viewTreeObserver.isAlive) {
+                        section.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    }
+                    section.post {
+                        referenceTextColors()?.let { normalModeTextColors = it }
+                        refreshInfo()
+                    }
+                }
+            }
+        )
 
         return section
     }
@@ -4763,7 +4863,7 @@ class MainActivity : AppCompatActivity() {
         builder.append("\n")
     }
 
-    private fun startNetworkFeaturesAutoRefresh(statusText: TextView) {
+    private fun startNetworkFeaturesAutoRefresh(statusText: TextView, onTick: () -> Unit = {}) {
         stopNetworkFeaturesAutoRefresh()
 
         isNetworkFeaturesScreenActive = true
@@ -4778,6 +4878,13 @@ class MainActivity : AppCompatActivity() {
                     statusText.text = buildNetworkFeaturesColoredText()
                 } catch (_: Throwable) {
                     // Keep the screen alive even if native status is temporarily unavailable.
+                }
+
+                // The theme repaints button text white after layout passes, which
+                // wipes the green/red on/off colours; put them back every tick.
+                try {
+                    onTick()
+                } catch (_: Throwable) {
                 }
 
                 handler.postDelayed(this, 1000L)
@@ -7449,6 +7556,7 @@ class MainActivity : AppCompatActivity() {
         filesBuiltForIndex = -1
         filesPendingSelection = null
         filesProgressViews.clear()
+        filesPercentLabels.clear()
         filesPrevProgressSnapshot.clear()
 
         fun clearContent() {
@@ -8896,6 +9004,7 @@ class MainActivity : AppCompatActivity() {
 
         fileListLayout.removeAllViews()
         filesProgressViews.clear()
+        filesPercentLabels.clear()
         filesPrevProgressSnapshot.clear()
         filesBuiltForIndex = -1
         filesPendingSelection = null
@@ -9065,6 +9174,8 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, 0, 0, 4)
             }
 
+            // qBittorrent-style bar: blue fill on a dark track with the
+            // percentage centred on top of it.
             val progressBar = ProgressBar(
                 this,
                 null,
@@ -9072,8 +9183,58 @@ class MainActivity : AppCompatActivity() {
             ).apply {
                 max = 100
                 this.progress = percent
-                progressDrawable.setTint(Color.parseColor("#4FD1C5"))
+                val radius = 0f
+                val strokePx = (1 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+                val track = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.parseColor("#0F2036"))
+                    setStroke(strokePx, Color.parseColor("#2257A0"))
+                    cornerRadius = radius
+                }
+                val fill = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.parseColor("#2F7FD6"))
+                    setStroke(strokePx, Color.parseColor("#4A93E0"))
+                    cornerRadius = radius
+                }
+                progressDrawable = android.graphics.drawable.LayerDrawable(
+                    arrayOf(
+                        track,
+                        android.graphics.drawable.ClipDrawable(
+                            fill, android.view.Gravity.START,
+                            android.graphics.drawable.ClipDrawable.HORIZONTAL
+                        )
+                    )
+                ).apply {
+                    setId(0, android.R.id.background)
+                    setId(1, android.R.id.progress)
+                }
             }
+            val percentLabel = TextView(this).apply {
+                text = "$percent%"
+                setTextColor(Color.WHITE)
+                textSize = 12f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                gravity = android.view.Gravity.CENTER
+            }
+            val progressFrame = FrameLayout(this).apply {
+                addView(
+                    progressBar,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        (22 * resources.displayMetrics.density).toInt()
+                    )
+                )
+                addView(
+                    percentLabel,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        (22 * resources.displayMetrics.density).toInt()
+                    )
+                )
+            }
+            filesPercentLabels[index] = percentLabel
+            row.setBackgroundColor(
+                Color.parseColor(if (fileListLayout.childCount % 2 == 0) "#0E2238" else "#0A1726")
+            )
 
             val openButton = Button(this).apply {
                 text = "Open"
@@ -9112,7 +9273,7 @@ class MainActivity : AppCompatActivity() {
 
             row.addView(checkBox)
             row.addView(progressText)
-            row.addView(progressBar)
+            row.addView(progressFrame)
 
             if (isVideoFile || isAudioFile) {
                 val streamFileButton = Button(this).apply {
@@ -9189,6 +9350,7 @@ class MainActivity : AppCompatActivity() {
                         "  •  ↓ ${estimate.speedText}  •  ETA: ${estimate.etaText}\n$swarmText"
 
             views.second.progress = progress.percent
+            filesPercentLabels[index]?.text = "${progress.percent}%"
         }
     }
 
@@ -11600,6 +11762,7 @@ class MainActivity : AppCompatActivity() {
 
                 storageSettingsPrefs().edit()
                     .putInt("low_space_threshold_mb", mb)
+                    .putLong("low_space_saved_at", System.currentTimeMillis())
                     .apply()
 
                 Toast.makeText(

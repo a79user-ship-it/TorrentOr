@@ -183,6 +183,21 @@ class TorrentNotifier(private val ctx: Context) {
         )
     }
 
+    // Tap opens the app on a specific screen (e.g. "storage" = Storage Space).
+    private fun openScreenIntent(screen: String): PendingIntent {
+        val intent = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("OPEN_SCREEN", screen)
+        }
+
+        return PendingIntent.getActivity(
+            ctx,
+            ("screen:" + screen).hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
     private fun openAppIntent(): PendingIntent {
         val intent = Intent(ctx, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -222,7 +237,8 @@ class TorrentNotifier(private val ctx: Context) {
         hash: String?,
         idSeed: String,
         defaultChannel: String = CHANNEL_EVENTS,
-        icon: Int = android.R.drawable.stat_sys_warning
+        icon: Int = android.R.drawable.stat_sys_warning,
+        openScreen: String? = null
     ) {
         try {
             if (!NotificationSettings.isTypeEnabled(ctx, type)) return
@@ -238,7 +254,13 @@ class TorrentNotifier(private val ctx: Context) {
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
                 .setSmallIcon(icon)
-                .setContentIntent(if (hash != null) openDetailsIntent(hash) else openAppIntent())
+                .setContentIntent(
+                    when {
+                        hash != null -> openDetailsIntent(hash)
+                        openScreen != null -> openScreenIntent(openScreen)
+                        else -> openAppIntent()
+                    }
+                )
                 .setAutoCancel(true)
                 .setPriority(
                     if (quiet) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_DEFAULT
@@ -267,13 +289,21 @@ class TorrentNotifier(private val ctx: Context) {
     }
 
     fun lowStorage(mbFree: Long) {
+        // Clear a previous one first, so a new warning alerts again instead of
+        // silently updating the old notification in place.
+        try {
+            nm.cancel(notifyId("lowstorage"))
+        } catch (_: Throwable) {
+        }
+
         postEvent(
             type = "lowstorage",
             title = "Low disk space",
             text = "Only $mbFree MB free - downloads may fail if space runs out",
             hash = null,
             idSeed = "lowstorage",
-            defaultChannel = "low_space_warning"
+            defaultChannel = "low_space_warning",
+            openScreen = "storage"
         )
     }
 
