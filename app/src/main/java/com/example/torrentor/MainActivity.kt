@@ -1731,6 +1731,38 @@ class MainActivity : AppCompatActivity() {
                         )
                     )
                 }
+                // Installed version, directly under the app name's first letter.
+                // Read from the installed package so it always matches the build.
+                val versionView = TextView(this@MainActivity).apply {
+                    val v = try {
+                        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+                    } catch (_: Throwable) {
+                        ""
+                    }
+                    text = if (v.isBlank()) "" else "v" + v
+                    textSize = 16f
+                    maxLines = 1
+                    includeFontPadding = false
+                    setTextColor(Color.WHITE)
+                    gravity = android.view.Gravity.START or android.view.Gravity.TOP
+                }
+                val density = resources.displayMetrics.density
+                val versionHeightPx = if (versionView.text.isEmpty()) 0 else
+                    versionView.paint.fontMetricsInt.let { it.descent - it.ascent }
+                addView(
+                    versionView,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        // Tuck it up against the bottom of the title text, and
+                        // centre the "v" under the stem of the title's "T".
+                        val tWidth = title.paint.measureText("T")
+                        val vWidth = versionView.paint.measureText("v")
+                        val shift = ((tWidth - vWidth) / 2f).toInt().coerceAtLeast(0)
+                        setMargins(shift, -(4 * density).toInt(), 0, 0)
+                    }
+                )
                 addView(
                     infoRow,
                     LinearLayout.LayoutParams(
@@ -1738,9 +1770,11 @@ class MainActivity : AppCompatActivity() {
                         LinearLayout.LayoutParams.WRAP_CONTENT
                     ).apply {
                         // Lift the speed / free space / percentage block a little.
+                        // (Reduced by the version line's height so the block
+                        // stays exactly where it was.)
                         setMargins(
                             0,
-                            -(8 * resources.displayMetrics.density).toInt(),
+                            -(4 * density).toInt() - versionHeightPx,
                             48,
                             0
                         )
