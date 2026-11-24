@@ -969,7 +969,26 @@ object WebUiServer {
         val dhtOn = featurePrefs.getBoolean("dht", true)
         val pexOn = featurePrefs.getBoolean("pex", true)
         val lsdOn = featurePrefs.getBoolean("lsd", true)
-        return "{\"torrents\":$torrents,\"dht\":$dhtOn,\"pex\":$pexOn,\"lsd\":$lsdOn}"
+        var freeText = "--"
+        var freeLow = false
+        var usedPctText = ""
+        try {
+            val freeStat = StatFs(getGlobalSaveFolder(context))
+            val freeBytes = freeStat.availableBytes
+            val totalBytes = freeStat.totalBytes
+            val thresholdMb = context.getSharedPreferences("storage_settings", Context.MODE_PRIVATE)
+                .getInt("low_space_threshold_mb", 500)
+            freeLow = freeBytes < thresholdMb.toLong() * 1024L * 1024L
+            // Same size formatting as the Storage Space view.
+            freeText = formatStorageSize(freeBytes)
+            if (totalBytes > 0) {
+                val usedPct = (totalBytes - freeBytes).toDouble() / totalBytes.toDouble() * 100.0
+                usedPctText = String.format("%.1f", usedPct) + "% used"
+            }
+        } catch (_: Throwable) {
+        }
+        return "{\"torrents\":$torrents,\"dht\":$dhtOn,\"pex\":$pexOn,\"lsd\":$lsdOn" +
+                ",\"free\":" + jsonString(freeText) + ",\"usedPct\":" + jsonString(usedPctText) + ",\"low\":" + freeLow + "}"
     }
 
     private fun jsonString(value: String): String {
@@ -3701,6 +3720,8 @@ object WebUiServer {
     white-space: nowrap; overflow: hidden;
   }
   #statusBar .sbSep { color: #8A93A3; }
+  #freeSpace { font-size: 14px; margin: 0 0 8px 0; white-space: pre-line; }
+  #freeSpace.low { color: #FF5252; }
 </style>
 </head>
 <body>
@@ -3711,7 +3732,8 @@ object WebUiServer {
        smooth gradient-filled lines - fed by sampling /api/status every
        second (summing every torrent's speed) rather than a native
        history API, since the app's own graph works the same way. -->
-  <div id="speedSummary" class="meta" style="margin-bottom:4px;"></div>
+  <div id="speedSummary" class="meta" style="margin-bottom:2px;"></div>
+  <div id="freeSpace">Free space: --</div>
   <canvas id="speedGraphCanvas" width="600" height="110" style="width:100%;height:110px;display:block;margin-bottom:12px;"></canvas>
 
   <div class="row">
@@ -4167,6 +4189,13 @@ window.addEventListener('popstate', function() {
 // Bottom strip: "DHT PEX LSD | seeds: 7 . peers: 42". The dots are green
 // when the global switch is on and red when it is off; seeds and peers are
 // the connected counts added up over every torrent.
+function updateFreeSpace(data) {
+  const el = document.getElementById('freeSpace');
+  if (!el || typeof data.free !== 'string') return;
+  el.textContent = 'Free space: ' + data.free + (data.usedPct ? '\n' + data.usedPct : '');
+  el.className = data.low ? 'low' : '';
+}
+
 function updateStatusBar(data) {
   const el = document.getElementById('statusBar');
   if (!el) return;
@@ -4192,6 +4221,7 @@ async function refresh() {
     const torrents = data.torrents || [];
     render(torrents);
     updateStatusBar(data);
+    updateFreeSpace(data);
     document.getElementById('statusLine').textContent =
       torrents.length + ' torrent(s) - updated ' + new Date().toLocaleTimeString();
 

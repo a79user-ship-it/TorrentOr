@@ -1687,12 +1687,63 @@ class MainActivity : AppCompatActivity() {
                     setPadding(0, 4, 0, 0)
                 }
                 mainSpeedText = speedView
+
+                // Free space of the download folder, right under the speeds.
+                val freeView = TextView(this@MainActivity).apply {
+                    textSize = 14f
+                    maxLines = 1
+                    gravity = android.view.Gravity.END
+                    setPadding(0, 2, 0, 0)
+                }
+                val usedView = TextView(this@MainActivity).apply {
+                    textSize = 14f
+                    maxLines = 1
+                    gravity = android.view.Gravity.END
+                    setPadding(0, 2, 0, 0)
+                }
+                mainUsedPercentText = usedView
+                applyFreeSpaceView(freeView)
+                mainFreeSpaceText = freeView
+
+                // Speeds on top, free space right under them, both right-aligned.
+                val infoRow = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        speedView,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        freeView,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                    addView(
+                        usedView,
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                }
                 addView(
-                    speedView,
+                    infoRow,
                     LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
                         LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, 0, 48, 0) }
+                    ).apply {
+                        // Lift the speed / free space / percentage block a little.
+                        setMargins(
+                            0,
+                            -(8 * resources.displayMetrics.density).toInt(),
+                            48,
+                            0
+                        )
+                    }
                 )
             }
 
@@ -9373,6 +9424,9 @@ class MainActivity : AppCompatActivity() {
     // written like qBittorrent's window title: "[D: 0 B/s, U: 0 B/s]" in
     // plain white.
     private var mainSpeedText: TextView? = null
+    private var mainFreeSpaceText: TextView? = null
+    private var mainUsedPercentText: TextView? = null
+    private var lastFreeSpaceCheckMs = 0L
 
     // Bottom status strip: "● DHT  ● PEX  ● LSD | seeds: 7 · peers: 42".
     // The dots are green when the feature is on and red when it is off (the
@@ -9452,6 +9506,45 @@ class MainActivity : AppCompatActivity() {
     private fun updateMainSpeedText(downloadKb: Int, uploadKb: Int) {
         val view = mainSpeedText ?: return
         view.text = "[D: " + formatBarSpeed(downloadKb) + ", U: " + formatBarSpeed(uploadKb) + "]"
+
+        // Refresh the free space about once a second.
+        val now = System.currentTimeMillis()
+        if (now - lastFreeSpaceCheckMs >= 900L) {
+            lastFreeSpaceCheckMs = now
+            mainFreeSpaceText?.let { applyFreeSpaceView(it) }
+        }
+    }
+
+    // Sets "Free space: 1.18 GB" and "98.9% used" on the header, using exactly the
+    // same numbers and formatting as the Storage Space tab, and colors both
+    // lines red when the free space is below the Low Space Warning Threshold
+    // from that screen (default 500 MB); white otherwise.
+    private fun applyFreeSpaceView(view: TextView) {
+        var freeText = "--"
+        var usedText = ""
+        var low = false
+        try {
+            val stat = StatFs(getGlobalSaveFolder())
+            val total = stat.totalBytes
+            val free = stat.availableBytes
+            freeText = formatSize(free)
+            if (total > 0L) {
+                val usedPercent = ((total - free).toDouble() / total.toDouble()) * 100.0
+                usedText = String.format("%.1f", usedPercent) + "% used"
+            }
+            low = free < getLowSpaceThresholdBytes()
+        } catch (_: Throwable) {
+        }
+
+        val color = if (low) Color.parseColor("#FF5252") else Color.WHITE
+        view.text = "Free space: " + freeText
+        view.setTextColor(color)
+
+        mainUsedPercentText?.let {
+            it.text = usedText
+            it.setTextColor(color)
+            it.visibility = if (usedText.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+        }
     }
 
     private fun addSpeedSample(downloadKb: Int, uploadKb: Int) {
