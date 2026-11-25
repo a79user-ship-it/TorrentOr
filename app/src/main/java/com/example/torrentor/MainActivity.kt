@@ -11185,6 +11185,30 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
+            // Status colours for the network lines in Statistics.
+            val netColor: String? = when {
+                line.startsWith("Listening port: ") ->
+                    if (line.contains("(not forwarded)")) "#FFD54F" else "#4CD964"
+                line.startsWith("Incoming connections: ") -> {
+                    val n = line.removePrefix("Incoming connections: ")
+                        .substringBefore(" ").toIntOrNull() ?: 0
+                    if (n > 0) "#4CD964" else "#9AA3B2"
+                }
+                line.startsWith("Reachable: Yes") -> "#4CD964"
+                line.startsWith("Reachable: Probably") -> "#FFD54F"
+                line.startsWith("Reachable: No") -> "#FF5252"
+                line.startsWith("Reachable: Unknown") -> "#9AA3B2"
+                else -> null
+            }
+            if (netColor != null) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(Color.parseColor(netColor)),
+                    lineStart,
+                    lineEnd,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
+
             lineStart = lineEnd + 1
         }
 

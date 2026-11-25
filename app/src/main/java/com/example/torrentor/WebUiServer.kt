@@ -7189,6 +7189,24 @@ function colorTimeLinesHtml(html) {
     if (/^(Elapsed|Time active|Seeding time|Time to complete): /.test(line)) {
       return '<span style="color:#B794F6;">' + line + '</span>';
     }
+    // Status colours for the network lines in Statistics.
+    var netColor = null;
+    if (line.indexOf('Listening port: ') === 0) {
+      netColor = line.indexOf('(not forwarded)') >= 0 ? '#FFD54F' : '#4CD964';
+    } else if (line.indexOf('Incoming connections: ') === 0) {
+      netColor = (parseInt(line.substring(22), 10) || 0) > 0 ? '#4CD964' : '#9AA3B2';
+    } else if (line.indexOf('Reachable: Yes') === 0) {
+      netColor = '#4CD964';
+    } else if (line.indexOf('Reachable: Probably') === 0) {
+      netColor = '#FFD54F';
+    } else if (line.indexOf('Reachable: No') === 0) {
+      netColor = '#FF5252';
+    } else if (line.indexOf('Reachable: Unknown') === 0) {
+      netColor = '#9AA3B2';
+    }
+    if (netColor) {
+      return '<span style="color:' + netColor + ';">' + line + '</span>';
+    }
     return line;
   }).join('\n');
 }
