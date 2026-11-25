@@ -1419,7 +1419,7 @@ class TorrentService : Service() {
         return if (value.startsWith("magnet:")) {
             value
         } else {
-            "magnet:?xt=urn:btih:$value"
+            TorrentNative.hashToMagnet(value)
         }
     }
 
@@ -1427,7 +1427,7 @@ class TorrentService : Service() {
         val key = "btih:"
         val start = magnet.indexOf(key)
 
-        if (start == -1) return ""
+        if (start == -1) return TorrentNative.v2HashFromMagnet(magnet) ?: ""
 
         val hashStart = start + key.length
         val end = magnet.indexOf("&", hashStart)

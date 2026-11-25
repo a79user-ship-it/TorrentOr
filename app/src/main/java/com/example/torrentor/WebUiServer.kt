@@ -1813,7 +1813,9 @@ object WebUiServer {
 
         sendJson(
             output,
-            "{\"ok\":true,\"hash\":" + jsonString(hash) + ",\"magnet\":" + jsonString(magnet) + "}"
+            "{\"ok\":true,\"hash\":" + jsonString(hash) + ",\"magnet\":" + jsonString(magnet) +
+                ",\"hashV1\":" + jsonString(TorrentNative.infoHashV1(hash, magnet)) +
+                ",\"hashV2\":" + jsonString(TorrentNative.infoHashV2(hash, magnet)) + "}"
         )
     }
 
@@ -2159,7 +2161,7 @@ object WebUiServer {
         val magnet = if (raw.startsWith("magnet:", ignoreCase = true)) {
             raw
         } else {
-            "magnet:?xt=urn:btih:$raw"
+            TorrentNative.hashToMagnet(raw)
         }
 
         val intent = Intent(context, TorrentService::class.java)
@@ -2253,7 +2255,7 @@ object WebUiServer {
         val magnet = if (raw.startsWith("magnet:", ignoreCase = true)) {
             raw
         } else {
-            "magnet:?xt=urn:btih:$raw"
+            TorrentNative.hashToMagnet(raw)
         }
 
         val requestedHash = normalizeHash(extractHashFromMagnetInput(magnet))
@@ -2710,6 +2712,13 @@ object WebUiServer {
         text.append(swarmHealth).append("\n")
         text.append("Web Seeds: ").append(webSeedCount).append("\n")
         text.append("Private: ").append(privateTorrent).append("\n")
+        val magnetForHashes = try {
+            TorrentNative.getTorrentMagnet(torrentIndex)
+        } catch (_: Throwable) {
+            ""
+        }
+        text.append("Info Hash v1: ").append(TorrentNative.infoHashV1(hash, magnetForHashes)).append("\n")
+        text.append("Info Hash v2: ").append(TorrentNative.infoHashV2(hash, magnetForHashes)).append("\n")
         val peerSources = try {
             TorrentNative.getTorrentPeerSources(torrentIndex)
         } catch (e: Throwable) {
@@ -3365,6 +3374,8 @@ object WebUiServer {
             }
         }
 
+        TorrentNative.v2HashFromMagnet(text)?.let { return it }
+
         return text
             .removePrefix("magnet:?xt=urn:")
             .removePrefix("btih:")
@@ -3818,7 +3829,10 @@ object WebUiServer {
   <canvas id="speedGraphCanvas" width="600" height="110" style="width:100%;height:110px;display:block;margin-bottom:12px;"></canvas>
 
   <div class="row">
-    <input type="text" id="magnetInput" placeholder="Paste magnet link or hash">
+    <div style="position:relative;flex:1;min-width:200px;display:flex;">
+      <input type="text" id="magnetInput" placeholder="Paste magnet link or hash" style="padding-right:38px;">
+      <button type="button" id="magnetClearBtn" title="Clear" style="display:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:2px 9px;background:none;border:0;box-shadow:none;min-width:0;font-size:18px;line-height:1;color:var(--text);">&times;</button>
+    </div>
     <button id="addBtn">Add</button>
   </div>
 
@@ -6757,6 +6771,7 @@ function renderFilesPanel() {
         '<button class="secondary" onclick="copyTorrentInfo(' + index + ', \'magnet\')">' + iconSvg('magnet') + 'Copy Magnet</button>' +
         '<button class="secondary" onclick="shareTorrentMagnet(' + index + ')">' + iconSvg('share') + 'Share Magnet</button>' +
         '<button class="secondary" onclick="copyTorrentInfo(' + index + ', \'hash\')">' + iconSvg('hash') + 'Copy Hash</button>' +
+        '<button class="secondary" id="copyHashV2Btn" style="display:none;" onclick="copyTorrentInfo(' + index + ', \'hashv2\')">' + iconSvg('hash') + 'Copy Hash v2</button>' +
         '<button onclick="doAction(\'pause\', ' + index + ')">' + iconSvg('pause') + 'Pause</button>' +
         '<button onclick="doAction(\'resume\', ' + index + ')">' + iconSvg('play') + 'Resume</button>' +
         '<button class="danger" onclick="deleteTorrentFromDetails(' + index + ')">' + iconSvg('trash') + 'Delete Torrent</button>' +
@@ -6802,6 +6817,7 @@ function renderFilesPanel() {
   if (openFilesTab === 'general') {
     loadTorrentSaveFolder(index);
     loadPieceSettings(index);
+    revealHashV2Button(index);
   }
 
   if (textTabEndpoints[openFilesTab]) loadTextTab(index, openFilesTab);
@@ -6889,14 +6905,24 @@ function copyText(text) {
   }
 }
 
+// "Copy Hash v2" only appears for hybrid / v2 torrents (those that have one).
+async function revealHashV2Button(index) {
+  try {
+    const res = await api('/api/torrent_info?index=' + index);
+    const data = await res.json();
+    const btn = document.getElementById('copyHashV2Btn');
+    if (btn && data.ok && data.hashV2 && data.hashV2 !== 'N/A') btn.style.display = '';
+  } catch (e) {}
+}
+
 async function copyTorrentInfo(index, what) {
   try {
     const res = await api('/api/torrent_info?index=' + index);
     const data = await res.json();
-    const text = what === 'magnet' ? data.magnet : data.hash;
-    if (!data.ok || !text) { alert('Not available yet'); return; }
+    const text = what === 'magnet' ? data.magnet : (what === 'hashv2' ? data.hashV2 : data.hash);
+    if (!data.ok || !text || text === 'N/A') { alert('Not available yet'); return; }
     const ok = await copyText(text);
-    if (ok) alert(what === 'magnet' ? 'Magnet copied' : 'Hash copied');
+    if (ok) alert(what === 'magnet' ? 'Magnet copied' : (what === 'hashv2' ? 'Hash v2 copied' : 'Hash copied'));
     else window.prompt('Copy this manually:', text);
   } catch (e) {
     alert('Could not load the torrent info');
@@ -7632,6 +7658,22 @@ function addMissingIcons() {
 }
 addMissingIcons();
 setInterval(addMissingIcons, 500);
+// ---- Clear "x" inside the magnet / hash box ----------------------------
+(function() {
+  const magnet = document.getElementById('magnetInput');
+  const clearBtn = document.getElementById('magnetClearBtn');
+  if (!magnet || !clearBtn) return;
+  function sync() { clearBtn.style.display = magnet.value ? '' : 'none'; }
+  magnet.addEventListener('input', sync);
+  clearBtn.addEventListener('click', function() {
+    magnet.value = '';
+    sync();
+    magnet.focus();
+  });
+  setInterval(sync, 300);   // also covers the box being filled / emptied by code
+  sync();
+})();
+
 // ---- Floating "+ Add" on every full-screen panel -----------------------
 // The magnet / .torrent rows normally live at the top of the main page. On
 // any other screen (Files, General, Statistics, RSS, ...) a "+ Add" button
@@ -7642,8 +7684,8 @@ setInterval(addMissingIcons, 500);
   const magnet = document.getElementById('magnetInput');
   const fileIn = document.getElementById('torrentFileInput');
   if (!magnet || !fileIn) return;
-  const rowA = magnet.parentElement;
-  const rowB = fileIn.parentElement;
+  const rowA = magnet.closest('.row');
+  const rowB = fileIn.closest('.row');
   const anchor = document.createElement('div');
   rowA.parentNode.insertBefore(anchor, rowA);
 

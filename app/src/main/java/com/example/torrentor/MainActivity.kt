@@ -523,6 +523,12 @@ class MainActivity : AppCompatActivity() {
 
         installDeepBlueButtonWatcher()
 
+        try {
+            (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
+                .addPrimaryClipChangedListener(clipboardChangeListener)
+        } catch (_: Throwable) {
+        }
+
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
 
@@ -697,6 +703,16 @@ class MainActivity : AppCompatActivity() {
     // is showing. Used to fill it from the clipboard (see below).
     private var mainMagnetInput: EditText? = null
 
+    // Set whenever anything is copied to the clipboard (even the same text
+    // again). Some phones keep the old "copied at" time when identical text
+    // is copied twice, so that time alone cannot tell a new copy from an old
+    // one; this flag can.
+    private var clipboardChangedSinceOffer = false
+
+    private val clipboardChangeListener = ClipboardManager.OnPrimaryClipChangedListener {
+        clipboardChangedSinceOffer = true
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
 
@@ -727,7 +743,7 @@ class MainActivity : AppCompatActivity() {
             val magnet = Regex("magnet:\\?[^\\s]+", RegexOption.IGNORE_CASE).find(raw)?.value
             val value = when {
                 magnet != null -> magnet
-                Regex("[0-9a-fA-F]{40}").matches(raw) -> raw
+                Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}").matches(raw) -> raw
                 else -> null
             }
 
@@ -751,11 +767,16 @@ class MainActivity : AppCompatActivity() {
                 .edit()
                 .putString("last_offered", "$copiedAt|$value")
                 .apply()
+            clipboardChangedSinceOffer = false
 
             input.setText(value)
             input.setSelection(input.text.length)
 
-            Toast.makeText(this, "Magnet link pasted", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                if (magnet != null) "Magnet link pasted" else "Hash pasted",
+                Toast.LENGTH_SHORT
+            ).show()
         } catch (_: Throwable) {
             Toast.makeText(this, "Could not read the clipboard", Toast.LENGTH_SHORT).show()
         }
@@ -769,7 +790,7 @@ class MainActivity : AppCompatActivity() {
     private fun fillMagnetFromClipboard() {
         val input = mainMagnetInput ?: return
 
-        if (!input.isAttachedToWindow || input.text.isNotEmpty()) return
+        if (!input.isAttachedToWindow) return
 
         try {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
@@ -784,7 +805,7 @@ class MainActivity : AppCompatActivity() {
             val magnet = Regex("magnet:\\?[^\\s]+", RegexOption.IGNORE_CASE).find(raw)?.value
             val value = when {
                 magnet != null -> magnet
-                Regex("[0-9a-fA-F]{40}").matches(raw) -> raw
+                Regex("[0-9a-fA-F]{40}|[0-9a-fA-F]{64}").matches(raw) -> raw
                 else -> return
             }
 
@@ -800,14 +821,34 @@ class MainActivity : AppCompatActivity() {
 
             val prefs = getSharedPreferences("clipboard_magnet", MODE_PRIVATE)
 
-            if (prefs.getString("last_offered", "") == key) return
+            // Same copy as last time AND nothing copied since: do not offer it
+            // again. A fresh copy (even of identical text) sets the flag.
+            if (prefs.getString("last_offered", "") == key && !clipboardChangedSinceOffer) return
 
+            clipboardChangedSinceOffer = false
             prefs.edit().putString("last_offered", key).apply()
+
+            // The box already has text: never overwrite it, but still say a
+            // new magnet link / hash was copied and how to use it.
+            if (input.text.isNotEmpty()) {
+                val what = if (magnet != null) "Magnet link" else "Hash"
+                Toast.makeText(
+                    this,
+                    if (input.text.toString().trim() == value) "$what already in the box"
+                    else "$what copied from clipboard. Tap Paste from Clipboard to use it",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
 
             input.setText(value)
             input.setSelection(input.text.length)
 
-            Toast.makeText(this, "Magnet link pasted from clipboard", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                if (magnet != null) "Magnet link pasted from clipboard" else "Hash pasted from clipboard",
+                Toast.LENGTH_SHORT
+            ).show()
         } catch (_: Throwable) {
             // Clipboard not readable right now - nothing to do.
         }
@@ -835,6 +876,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        try {
+            (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
+                .removePrimaryClipChangedListener(clipboardChangeListener)
+        } catch (_: Throwable) {
+        }
         stopRssUiRefresh()
         stopLogUiRefresh()
         super.onDestroy()
@@ -1264,8 +1310,58 @@ class MainActivity : AppCompatActivity() {
             hint = "Paste magnet link or hash"
             setHintTextColor(Color.LTGRAY)
             setTextColor(Color.WHITE)
+            // Room on the right for the clear "x".
+            setPadding(
+                paddingLeft, paddingTop,
+                (44 * resources.displayMetrics.density).toInt(), paddingBottom
+            )
         }
         mainMagnetInput = magnetInput
+
+        // Small "x" inside the box: shows only while there is text, one tap
+        // empties the box and keeps the keyboard / focus ready for a new paste.
+        val magnetClear = TextView(this).apply {
+            text = "\u2715"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            visibility = android.view.View.GONE
+            contentDescription = "Clear"
+            setOnClickListener {
+                magnetInput.setText("")
+                magnetInput.requestFocus()
+            }
+        }
+        magnetInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+            override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                magnetClear.visibility =
+                    if (s.isNullOrEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+            }
+        })
+        val magnetBox = FrameLayout(this).apply {
+            addView(
+                magnetInput,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+            val size = (44 * resources.displayMetrics.density).toInt()
+            addView(
+                magnetClear,
+                FrameLayout.LayoutParams(
+                    size, size,
+                    android.view.Gravity.END or android.view.Gravity.CENTER_VERTICAL
+                )
+            )
+        }
+
+        // Coming back to this screen from inside the app (for example after
+        // Copy Hash on a torrent) gives the window no new focus event, so
+        // look at the clipboard here too. Each copy is still only offered once.
+        magnetInput.post { fillMagnetFromClipboard() }
 
         // Reads the clipboard when tapped, so it does not depend on the
         // automatic paste noticing the copy when the app regains focus.
@@ -1285,7 +1381,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (!magnet.startsWith("magnet:")) {
-                    magnet = "magnet:?xt=urn:btih:$magnet"
+                    magnet = TorrentNative.hashToMagnet(magnet)
                 }
 
                 val hash = extractHashFromMagnetInput(magnet)
@@ -1596,7 +1692,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(pauseSelected)
         root.addView(resumeSelected)
         root.addView(removeSelected)
-        root.addView(magnetInput)
+        root.addView(magnetBox)
         root.addView(pasteMagnet)
         root.addView(addMagnet)
         root.addView(selectFile)
@@ -1680,6 +1776,9 @@ class MainActivity : AppCompatActivity() {
             addView(barItem("\u25B6") { resumeSelected.performClick() })
 
             val menuAnchor = barItem("\u22EE") {}
+            // Shift the three dots a little to the LEFT of the original spot:
+            // more padding on the right pushes the dots left and widens the tap area.
+            menuAnchor.setPadding(0, 30, 111, 30)
             menuAnchor.setOnClickListener {
                 showIconMenu(
                     menuAnchor,
@@ -6538,6 +6637,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        TorrentNative.v2HashFromMagnet(text)?.let { return it }
+
         return text
             .removePrefix("magnet:?xt=urn:")
             .removePrefix("btih:")
@@ -7789,6 +7890,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Hybrid / v2 torrents also get a "Copy Hash v2" button.
+        val hashV2ForButton = try {
+            TorrentNative.infoHashV2(
+                TorrentNative.getTorrentHash(torrentIndex),
+                TorrentNative.getTorrentMagnet(torrentIndex)
+            )
+        } catch (e: Throwable) {
+            "N/A"
+        }
+        val copyHashV2 = Button(this).apply {
+            text = "Copy Hash v2"
+            setOnClickListener {
+                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Hash v2", hashV2ForButton))
+                Toast.makeText(this@MainActivity, "Hash v2 copied", Toast.LENGTH_SHORT).show()
+            }
+        }
+
         val pauseButton = Button(this).apply {
             text = "Pause"
             setOnClickListener {
@@ -8232,6 +8351,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(copyMagnet, "magnet", 18, 6)
         TabIcons.apply(copyHash, "hash", 18, 6)
         TabIcons.apply(shareMagnet, "share", 18, 6)
+        TabIcons.apply(copyHashV2, "hash", 18, 6)
         TabIcons.apply(streamButton, "stream", 18, 6)
         TabIcons.apply(pauseButton, "pause", 18, 6)
         TabIcons.apply(resumeButton, "play", 18, 6)
@@ -8251,7 +8371,7 @@ class MainActivity : AppCompatActivity() {
 
         deepBlueButtons(
             true,
-            copyMagnet, copyHash, shareMagnet, streamButton, pauseButton, resumeButton, deleteButton,
+            copyMagnet, copyHash, copyHashV2, shareMagnet, streamButton, pauseButton, resumeButton, deleteButton,
             sequentialButton, firstLastButton, dhtButton, pexButton, lsdButton, applySpeedLimitButton,
             forceReannounce, forceRecheck, openFolderButton,
             saveTorrentFileButton, changeSaveFolderButton
@@ -8260,6 +8380,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(actionTitle)
         root.addView(copyMagnet)
         root.addView(copyHash)
+        if (hashV2ForButton != "N/A") {
+            root.addView(copyHashV2)
+        }
         root.addView(shareMagnet)
         root.addView(streamButton)
         root.addView(pauseButton)
@@ -8758,7 +8881,9 @@ class MainActivity : AppCompatActivity() {
             getSavedSaveFolderForHash(hash) ?: getGlobalSaveFolder()
 
         text.append("\nSave path:\n").append(currentTorrentSaveFolder).append("\n\n")
-        text.append("Hash:\n").append(hash).append("\n\n")
+        // Like qBittorrent: v1 hash and v2 hash, "N/A" when a version is missing.
+        text.append("Info Hash v1: ").append(TorrentNative.infoHashV1(hash, magnet)).append("\n")
+        text.append("Info Hash v2: ").append(TorrentNative.infoHashV2(hash, magnet)).append("\n\n")
         text.append("Magnet:\n").append(magnet)
 
         contentText.text = highlightTimeLines(colorSwarmHealth(text.toString()))

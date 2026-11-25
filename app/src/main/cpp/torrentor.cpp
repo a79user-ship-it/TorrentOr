@@ -252,6 +252,13 @@ static std::string extractHashFromMagnet(const std::string& magnet) {
     size_t pos = magnet.find(key);
 
     if (pos == std::string::npos) {
+        // v2-only torrents have no btih; their magnet carries the SHA-256
+        // info hash as "urn:btmh:1220<64 hex>". Use those 64 hex digits as
+        // the torrent's key so duplicates, resume data and backups work.
+        size_t v2 = magnet.find("btmh:1220");
+        if (v2 != std::string::npos && magnet.size() >= v2 + 9 + 64) {
+            return normalizeHash(magnet.substr(v2 + 9, 64));
+        }
         return normalizeHash(magnet);
     }
 
@@ -4257,6 +4264,69 @@ Java_com_example_torrentor_TorrentNative_getTorrentStatistics(
     output += "Progress: ";
     output += std::to_string(progressPercent);
     output += "%\n";
+
+    // Total open connections to other clients (seeds and peers together).
+    output += "Connections: ";
+    output += std::to_string(st.num_connections);
+    output += "\n";
+
+    // Connected (and total known) seeds and peers, like the General tab.
+    output += "Seeds: ";
+    output += std::to_string(st.num_seeds);
+    output += " (";
+    output += std::to_string(st.list_seeds);
+    output += ")\n";
+
+    output += "Peers: ";
+    output += std::to_string(st.num_peers);
+    output += " (";
+    output += std::to_string(st.list_peers);
+    output += ")\n";
+
+    // Listening port and whether other peers can reach us. Incoming
+    // connections (peers that connected to us, not the other way round)
+    // are the real proof; port forwarding state is the likely reason.
+    {
+        int incoming = 0;
+        int totalPeers = 0;
+        try {
+            std::vector<lt::peer_info> pinfo;
+            handle.get_peer_info(pinfo);
+            totalPeers = static_cast<int>(pinfo.size());
+            for (auto& pi : pinfo) {
+                if (!(pi.flags & lt::peer_info::local_connection)) {
+                    incoming++;
+                }
+            }
+        } catch (...) {
+        }
+
+        bool forwarded =
+                g_upnpState == "Success" || g_natpmpState == "Success";
+
+        output += "Listening port: ";
+        output += std::to_string(g_listenPort);
+        output += forwarded ? " (port forwarded)" : " (not forwarded)";
+        output += "\n";
+
+        output += "Incoming connections: ";
+        output += std::to_string(incoming);
+        output += " of ";
+        output += std::to_string(totalPeers);
+        output += "\n";
+
+        output += "Reachable: ";
+        if (incoming > 0) {
+            output += "Yes";
+        } else if (forwarded) {
+            output += "Probably (no incoming peers yet)";
+        } else if (totalPeers == 0) {
+            output += "Unknown (no peers)";
+        } else {
+            output += "No - peers cannot connect to you";
+        }
+        output += "\n";
+    }
 
     output += "Download speed: ";
     output += formatBytes(st.download_payload_rate);

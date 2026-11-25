@@ -2,6 +2,38 @@ package com.example.torrentor
 
 object TorrentNative {
 
+    // A bare 40-char (v1) or 64-char (v2) hex hash, or a 32-char base32 v1
+    // hash, becomes a magnet link; anything else already starting with
+    // "magnet:" is returned as is.
+    fun hashToMagnet(value: String): String {
+        val v = value.trim()
+        if (v.startsWith("magnet:", ignoreCase = true)) return v
+        if (Regex("[0-9a-fA-F]{64}").matches(v)) return "magnet:?xt=urn:btmh:1220" + v.lowercase()
+        if (Regex("1220[0-9a-fA-F]{64}").matches(v)) return "magnet:?xt=urn:btmh:" + v.lowercase()
+        return "magnet:?xt=urn:btih:" + v
+    }
+
+    // "Info Hash v1" / "Info Hash v2" for the General tab: the hash when the
+    // torrent has it, otherwise "N/A". Hybrid torrents have both.
+    fun infoHashV1(hash: String, magnet: String): String {
+        val m = Regex("btih:([0-9a-fA-F]{40})", RegexOption.IGNORE_CASE).find(magnet)
+        if (m != null) return m.groupValues[1].lowercase()
+        val h = hash.trim().lowercase()
+        return if (Regex("[0-9a-f]{40}").matches(h)) h else "N/A"
+    }
+
+    fun infoHashV2(hash: String, magnet: String): String {
+        v2HashFromMagnet(magnet)?.let { return it }
+        val h = hash.trim().lowercase()
+        return if (Regex("[0-9a-f]{64}").matches(h)) h else "N/A"
+    }
+
+    // The 64-hex SHA-256 (v2) info hash inside a magnet link, or null.
+    fun v2HashFromMagnet(text: String): String? {
+        val m = Regex("btmh:1220([0-9a-fA-F]{64})", RegexOption.IGNORE_CASE).find(text)
+        return m?.groupValues?.get(1)?.lowercase()
+    }
+
     init {
         System.loadLibrary("torrent-rasterbar")
         System.loadLibrary("torrentor")

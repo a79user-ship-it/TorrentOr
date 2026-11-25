@@ -96,8 +96,8 @@ object BackupManager {
 
     private val prefNameRegex = Regex("^prefs/([A-Za-z0-9_]{1,64})\\.json$")
     private val torrentNameRegex = Regex("^torrents/([0-9]{1,6})\\.torrent$")
-    private val resumeNameRegex = Regex("^resume/([0-9a-f]{40})\\.fastresume$")
-    private val hexHashRegex = Regex("^[0-9a-f]{40}$")
+    private val resumeNameRegex = Regex("^resume/([0-9a-f]{40}|[0-9a-f]{64})\\.fastresume$")
+    private val hexHashRegex = Regex("^([0-9a-f]{40}|[0-9a-f]{64})$")
 
     // ---------------------------------------------------------------- create
 
@@ -611,7 +611,7 @@ object BackupManager {
     private fun normalizeHash(raw: String): String? {
         val s = raw.trim()
 
-        if (s.length == 40 && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+        if ((s.length == 40 || s.length == 64) && s.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
             return s.lowercase(Locale.ROOT)
         }
 
