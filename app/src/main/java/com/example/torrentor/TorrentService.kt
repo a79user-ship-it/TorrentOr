@@ -2099,8 +2099,8 @@ class TorrentService : Service() {
     }
 
     private fun extractPercent(line: String): Int {
-        val match = Regex("""(\d+)%""").find(line)
-        return match?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        val match = Regex("""(\d+(?:\.\d+)?)%""").find(line)
+        return match?.groupValues?.getOrNull(1)?.toDoubleOrNull()?.toInt() ?: 0
     }
 
     // The status line looks like "Name • State • 100% • ..." (the same

@@ -889,7 +889,7 @@ object WebUiServer {
                 val fields = line.split(" • ")
                 val name = fields.getOrNull(0) ?: "Torrent $index"
                 val state = fields.getOrNull(1) ?: ""
-                val percent = fields.getOrNull(2)?.removeSuffix("%")?.toIntOrNull() ?: 0
+                val percent = fields.getOrNull(2)?.removeSuffix("%")?.toDoubleOrNull() ?: 0.0
                 val downSpeed = fields.getOrNull(3)?.removePrefix("↓ ") ?: ""
                 val upSpeed = fields.getOrNull(4)?.removePrefix("↑ ") ?: ""
                 val size = fields.getOrNull(5)?.removePrefix("Size ") ?: ""
@@ -2931,6 +2931,7 @@ object WebUiServer {
     // getTorrentFileSwarm themselves return for anything not ready yet.
     private fun buildFilesJsonArrayWithProgress(context: Context, torrentIndex: Int, fileData: String): String {
         val progressByIndex = mutableMapOf<Int, Int>()
+        val exactPercentByIndex = mutableMapOf<Int, Double>()
         val downloadedByIndex = mutableMapOf<Int, Long>()
 
         val progressData = try {
@@ -2950,6 +2951,15 @@ object WebUiServer {
 
             progressByIndex[fileIndex] = percent
             downloadedByIndex[fileIndex] = parts[2].toLongOrNull() ?: 0L
+
+            // Exact percent with one decimal, rounded down (100 only when done).
+            val doneBytes = parts[2].toLongOrNull() ?: 0L
+            val totalBytes = parts[3].toLongOrNull() ?: 0L
+            exactPercentByIndex[fileIndex] = when {
+                totalBytes <= 0L -> 0.0
+                doneBytes >= totalBytes -> 100.0
+                else -> Math.floor(doneBytes * 1000.0 / totalBytes) / 10.0
+            }
         }
 
         data class Swarm(
@@ -3002,7 +3012,7 @@ object WebUiServer {
             val index = parts[0].toIntOrNull() ?: continue
             val name = parts[1]
             val size = parts[2].toLongOrNull() ?: 0L
-            val percent = progressByIndex[index] ?: 0
+            val percent = exactPercentByIndex[index] ?: (progressByIndex[index] ?: 0).toDouble()
             val swarm = swarmByIndex[index]
             val selected = savedSelection?.contains(index) ?: true
 
@@ -3698,17 +3708,32 @@ object WebUiServer {
   .name { font-weight: 600; font-size: 15px; margin-bottom: 6px; word-break: break-word; color: var(--text); }
   .meta { font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
   .bar {
-    height: 7px;
-    border-radius: 999px;
-    background: var(--track);
+    position: relative;
+    height: 20px;
+    border-radius: 0;
+    background: #0A0A0A;
+    border: 1px solid #2E2E2E;
     overflow: hidden;
     margin: 10px 0 12px;
   }
+  .fbar { background: #0F2036; border-color: #2257A0; }
   .fill {
     height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    border-radius: 0;
+    background: #2F7FD6;
     transition: width 0.4s ease;
+  }
+  .barText {
+    position: absolute;
+    left: 0; right: 0; top: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 0 2px rgba(0,0,0,0.7);
+    pointer-events: none;
   }
   .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .actions button { padding: 8px 12px; font-size: 13px; }
@@ -3750,6 +3775,21 @@ object WebUiServer {
     margin-bottom: 14px;
   }
   .overlayHeader .name { margin: 0; font-size: 18px; }
+
+  /* Floating "+ Add" button: shown on every full-screen panel (Files tabs,
+     Statistics, RSS...) so a torrent can be added from anywhere. It sits in
+     extra room at the top of each panel and opens the same magnet / file
+     rows in a small window. */
+  .overlayPanel { padding-top: 62px; }
+  #floatAddBtn {
+    position: fixed; top: 12px; left: 16px; z-index: 60; display: none;
+    padding: 8px 14px; font-size: 14px;
+  }
+  #addModal {
+    display: none; position: fixed; inset: 0; background: #000a; z-index: 70;
+    align-items: center; justify-content: center;
+  }
+  #addModal .card { max-width: 520px; width: 92%; }
 
   /* Bottom status strip: DHT / PEX / LSD state dots + total seeds and peers. */
   body { padding-bottom: 46px; }
@@ -4169,6 +4209,13 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// One-decimal percent like qBittorrent ("11.5%", "99.9%"); "100%" only when done.
+function fmtPct(p) {
+  p = Number(p) || 0;
+  if (p >= 100) return '100%';
+  return (Math.floor(p * 100 + 1e-6) / 100).toFixed(2) + '%';
+}
+
 function formatSize(bytes) {
   bytes = Number(bytes) || 0;
   if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(2) + ' GB';
@@ -4517,6 +4564,8 @@ async function refreshFilesPanelProgress() {
 
       if (textEl) textEl.textContent = info.progress;
       if (barEl) barEl.style.width = percent + '%';
+      const barTextEl = document.getElementById('pbt_' + rowId);
+      if (barTextEl) barTextEl.textContent = fmtPct(percent);
 
       const availEl = document.getElementById('pavail_' + rowId);
       if (availEl) availEl.textContent = info.swarm;
@@ -4645,11 +4694,11 @@ function render(torrents) {
     return '<div class="card" data-tindex="' + t.index + '">' +
       checkbox +
       '<div class="name">' + escapeHtml(t.name) + '</div>' +
-      '<div class="meta">' + escapeHtml(t.state) + ' &middot; ' + t.percent + '% &middot; &darr; ' +
+      '<div class="meta">' + escapeHtml(t.state) + ' &middot; ' + fmtPct(t.percent) + ' &middot; &darr; ' +
         escapeHtml(t.downSpeed) + ' &middot; &uarr; ' + escapeHtml(t.upSpeed) + ' &middot; ' + escapeHtml(t.size) + '</div>' +
       '<div class="meta">Seeds ' + escapeHtml(t.seeds) + ' &middot; Peers ' + escapeHtml(t.peers) +
         ' &middot; ' + escapeHtml(t.eta) + '</div>' +
-      '<div class="bar"><div class="fill" style="width:' + t.percent + '%"></div></div>' +
+      '<div class="bar"><div class="fill" style="width:' + (Number(t.percent) >= 100 ? 0 : t.percent) + '%"></div><span class="barText">' + fmtPct(t.percent) + '</span></div>' +
       '<div class="actions">' +
         '<button onclick="doAction(\'pause\', ' + t.index + ')">' + iconSvg('pause') + 'Pause</button>' +
         '<button onclick="doAction(\'resume\', ' + t.index + ')">' + iconSvg('play') + 'Resume</button>' +
@@ -7276,7 +7325,7 @@ function renderFileRow(torrentIndex, f) {
     '<div class="meta">' + fileTypeIcon(f.name) + ' ' + escapeHtml(f.name) + ' (' + formatSize(f.size) + ')</div>' +
     '<div class="meta" id="ptext_' + rowId + '">' + escapeHtml(info.progress) + '</div>' +
     '<div class="meta" id="pavail_' + rowId + '">' + escapeHtml(info.swarm) + '</div>' +
-    '<div class="bar"><div class="fill" id="pbar_' + rowId + '" style="width:' + percent + '%"></div></div>' +
+    '<div class="bar fbar"><div class="fill" id="pbar_' + rowId + '" style="width:' + percent + '%"></div><span class="barText" id="pbt_' + rowId + '">' + fmtPct(percent) + '</span></div>' +
     '<div class="actions">' + actionBtn +
       '<button class="secondary" onclick="window.location.href=\'' + downloadUrl + '\'">Download</button>' +
     '</div>' +
@@ -7348,7 +7397,7 @@ function fileInfoParts(torrentIndex, f, update) {
   const sep = '  \u2022  ';
 
   return {
-    progress: 'Progress: ' + (Number(f.percent) || 0) + '%' + sep +
+    progress: 'Progress: ' + fmtPct(f.percent) + sep +
       formatSize(downloaded) + ' / ' + formatSize(size) + sep +
       '\u2193 ' + formatSize(Math.floor(bytesPerSecond)) + '/s' + sep + 'ETA: ' + eta,
     swarm: 'Seeds ' + (Number(f.seeds) || 0) + ' (' + (Number(f.totalSeeds) || 0) + ')' +
@@ -7583,6 +7632,74 @@ function addMissingIcons() {
 }
 addMissingIcons();
 setInterval(addMissingIcons, 500);
+// ---- Floating "+ Add" on every full-screen panel -----------------------
+// The magnet / .torrent rows normally live at the top of the main page. On
+// any other screen (Files, General, Statistics, RSS, ...) a "+ Add" button
+// appears at the top; it moves those same rows into a small window (so the
+// existing Add / Upload code keeps working untouched) and puts them back
+// afterwards.
+(function() {
+  const magnet = document.getElementById('magnetInput');
+  const fileIn = document.getElementById('torrentFileInput');
+  if (!magnet || !fileIn) return;
+  const rowA = magnet.parentElement;
+  const rowB = fileIn.parentElement;
+  const anchor = document.createElement('div');
+  rowA.parentNode.insertBefore(anchor, rowA);
+
+  const floatBtn = document.createElement('button');
+  floatBtn.id = 'floatAddBtn';
+  floatBtn.textContent = '+ Add';
+  document.body.appendChild(floatBtn);
+
+  const modal = document.createElement('div');
+  modal.id = 'addModal';
+  modal.innerHTML =
+    '<div class="card">' +
+    '<div class="overlayHeader"><div class="name">Add Torrent</div>' +
+    '<button class="secondary" id="addModalCloseBtn">Close</button></div>' +
+    '<div id="addModalBody"></div></div>';
+  document.body.appendChild(modal);
+  const body = document.getElementById('addModalBody');
+
+  function isOpen() { return modal.style.display === 'flex'; }
+
+  function openAdd() {
+    body.appendChild(rowA);
+    body.appendChild(rowB);
+    modal.style.display = 'flex';
+    floatBtn.style.display = 'none';
+  }
+
+  function closeAdd() {
+    if (!isOpen()) return;
+    anchor.parentNode.insertBefore(rowA, anchor.nextSibling);
+    anchor.parentNode.insertBefore(rowB, rowA.nextSibling);
+    modal.style.display = 'none';
+  }
+
+  floatBtn.addEventListener('click', openAdd);
+  document.getElementById('addModalCloseBtn').addEventListener('click', closeAdd);
+  modal.addEventListener('click', function(e) { if (e.target === modal) closeAdd(); });
+
+  // Close once something was really submitted (not on an empty click).
+  document.getElementById('addBtn').addEventListener('click', function() {
+    if (isOpen() && magnet.value.trim() !== '') setTimeout(closeAdd, 400);
+  });
+  document.getElementById('uploadBtn').addEventListener('click', function() {
+    if (isOpen() && fileIn.files && fileIn.files.length > 0) setTimeout(closeAdd, 400);
+  });
+
+  // Show the button only while some full-screen panel is open.
+  setInterval(function() {
+    if (isOpen()) { floatBtn.style.display = 'none'; return; }
+    let any = false;
+    document.querySelectorAll('.overlayPanel').forEach(function(p) {
+      if (getComputedStyle(p).display !== 'none') any = true;
+    });
+    floatBtn.style.display = any ? 'block' : 'none';
+  }, 300);
+})();
 </script>
   <div id="statusBar"></div>
 </body>

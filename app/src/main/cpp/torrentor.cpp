@@ -10,6 +10,8 @@
 #include <deque>
 #include <sstream>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cctype>
 #include <cstdio>
 #include <ctime>
@@ -1713,6 +1715,20 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
                         st.progress * 100.0f
                 );
 
+        // Rounded DOWN so 99.996% never shows as 100%
+        // (100 is only printed when the wanted data is really complete).
+        char pctBuf[16];
+        {
+            // Always two decimals, rounded down (11.58, 99.96); "100" only
+            // when the wanted data is really complete.
+            double pct2 = std::floor(static_cast<double>(st.progress) * 10000.0) / 100.0;
+            if (st.progress >= 1.0f || pct2 >= 100.0) {
+                std::snprintf(pctBuf, sizeof(pctBuf), "100");
+            } else {
+                std::snprintf(pctBuf, sizeof(pctBuf), "%.2f", pct2);
+            }
+        }
+
         int downKb = st.download_payload_rate / 1024;
         int upKb = st.upload_payload_rate / 1024;
 
@@ -1804,7 +1820,7 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
 
         output += name +
                   " • " + state +
-                  " • " + std::to_string(pct) + "%" +
+                  " • " + std::string(pctBuf) + "%" +
                   " • ↓ " + formatBytes(st.download_payload_rate) + "/s" +
                   " • ↑ " + formatBytes(st.upload_payload_rate) + "/s" +
                   " • Size " + downloadedText +

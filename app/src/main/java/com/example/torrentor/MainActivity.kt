@@ -9150,6 +9150,7 @@ class MainActivity : AppCompatActivity() {
 
             val progress = progressMap[index]
             val percent = progress?.percent ?: 0
+            val exactPct = if (progress != null) pctOf(progress.downloadedBytes, progress.totalBytes) else 0.0
             val downloadedText = if (progress != null) {
                 "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}"
             } else {
@@ -9194,7 +9195,7 @@ class MainActivity : AppCompatActivity() {
             checkBoxes.add(checkBox)
 
             val progressText = TextView(this).apply {
-                text = "Progress: $percent%  •  $downloadedText  •  " +
+                text = "Progress: ${pctLabel(exactPct)}  •  $downloadedText  •  " +
                         "↓ $speedText  •  ETA: $etaText\n$swarmText"
                 setTextColor(Color.WHITE)
                 textSize = 13f
@@ -9208,8 +9209,8 @@ class MainActivity : AppCompatActivity() {
                 null,
                 android.R.attr.progressBarStyleHorizontal
             ).apply {
-                max = 100
-                this.progress = percent
+                max = 1000
+                this.progress = (exactPct * 10).toInt()
                 val radius = 0f
                 val strokePx = (1 * resources.displayMetrics.density).toInt().coerceAtLeast(1)
                 val track = android.graphics.drawable.GradientDrawable().apply {
@@ -9234,9 +9235,14 @@ class MainActivity : AppCompatActivity() {
                     setId(0, android.R.id.background)
                     setId(1, android.R.id.progress)
                 }
+                // The app theme can tint a ProgressBar's layers; clear that so
+                // the black track and blue fill show exactly as drawn.
+                progressTintList = null
+                progressBackgroundTintList = null
+                secondaryProgressTintList = null
             }
             val percentLabel = TextView(this).apply {
-                text = "$percent%"
+                text = pctLabel(exactPct)
                 setTextColor(Color.WHITE)
                 textSize = 12f
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -9371,13 +9377,15 @@ class MainActivity : AppCompatActivity() {
                     "  •  ${formatUploadingTo(swarm?.uploading ?: 0)}" +
                     "  •  ${formatFileAvailability(swarm)}"
 
+            val exactPct = pctOf(progress.downloadedBytes, progress.totalBytes)
+
             views.first.text =
-                "Progress: ${progress.percent}%  •  " +
+                "Progress: ${pctLabel(exactPct)}  •  " +
                         "${formatSize(progress.downloadedBytes)} / ${formatSize(progress.totalBytes)}" +
                         "  •  ↓ ${estimate.speedText}  •  ETA: ${estimate.etaText}\n$swarmText"
 
-            views.second.progress = progress.percent
-            filesPercentLabels[index]?.text = "${progress.percent}%"
+            views.second.progress = (exactPct * 10).toInt()
+            filesPercentLabels[index]?.text = pctLabel(exactPct)
         }
     }
 
@@ -10273,15 +10281,9 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            val progressBar = ProgressBar(
-                this,
-                null,
-                android.R.attr.progressBarStyleHorizontal
-            ).apply {
-                max = 100
-                progress = extractPercent(line)
-                progressDrawable.setTint(Color.BLACK)
-            }
+            // qBittorrent-style bar: square, blue fill on a dark track,
+            // percentage centred on top.
+            val progressBar = qbProgressBar(extractPercentExact(line))
 
             val buttonRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -10491,10 +10493,77 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun extractPercent(line: String): Int {
-        val match = Regex("""(\d+)%""").find(line)
-        return match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+    private fun qbProgressBar(percent: Double): FrameLayout {
+        val density = resources.displayMetrics.density
+        val strokePx = density.toInt().coerceAtLeast(1)
+        val bar = ProgressBar(
+            this,
+            null,
+            android.R.attr.progressBarStyleHorizontal
+        ).apply {
+            max = 1000
+            // A finished torrent shows a plain black bar (no blue fill).
+            progress = if (percent >= 100.0) 0 else (percent * 10).toInt()
+            val track = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#0A0A0A"))
+                setStroke(strokePx, Color.parseColor("#2E2E2E"))
+            }
+            val fill = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#2F7FD6"))
+                setStroke(strokePx, Color.parseColor("#4A93E0"))
+            }
+            progressDrawable = android.graphics.drawable.LayerDrawable(
+                arrayOf(
+                    track,
+                    android.graphics.drawable.ClipDrawable(
+                        fill, android.view.Gravity.START,
+                        android.graphics.drawable.ClipDrawable.HORIZONTAL
+                    )
+                )
+            ).apply {
+                setId(0, android.R.id.background)
+                setId(1, android.R.id.progress)
+            }
+            // Clear any theme tint so the black track / blue fill show as drawn.
+            progressTintList = null
+            progressBackgroundTintList = null
+            secondaryProgressTintList = null
+        }
+        val label = TextView(this).apply {
+            text = pctLabel(percent)
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+        }
+        val h = (22 * density).toInt()
+        return FrameLayout(this).apply {
+            addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, h))
+            addView(label, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, h))
+        }
     }
+
+    private fun extractPercentExact(line: String): Double {
+        val match = Regex("""(\d+(?:\.\d+)?)%""").find(line)
+        return match?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun extractPercent(line: String): Int = extractPercentExact(line).toInt()
+
+    // Exact percent with one decimal, rounded DOWN so 99.96% is 99.9%;
+    // 100 only when every byte is there.
+    private fun pctOf(done: Long, total: Long): Double {
+        if (total <= 0L) return 0.0
+        if (done >= total) return 100.0
+        return Math.floor(done * 10000.0 / total) / 100.0
+    }
+
+    // "11.58%" / "99.96%" / "100%".
+    // Always two decimals, rounded down (11.58%, 99.96%), so "100%" only shows
+    // when the download is really complete.
+    private fun pctLabel(p: Double): String =
+        if (p >= 100.0) "100%"
+        else String.format(java.util.Locale.US, "%.2f%%", Math.floor(p * 100.0 + 1e-6) / 100.0)
 
     // ---- Sort helpers --------------------------------------------------
     // The visible list is one plain-text status line per torrent (built

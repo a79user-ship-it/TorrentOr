@@ -152,7 +152,7 @@ class TorrentNotifier(private val ctx: Context) {
         val tail = parts.takeLast(8)
         val name = parts.dropLast(8).joinToString(SEP).trim().ifBlank { "Torrent" }
         val state = tail[0].trim()
-        val pct = Regex("(\\d+)%").find(tail[1])?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val pct = Regex("(\\d+(?:\\.\\d+)?)%").find(tail[1])?.groupValues?.get(1)?.toDoubleOrNull()?.toInt() ?: 0
 
         return Snap(
             index = index,
