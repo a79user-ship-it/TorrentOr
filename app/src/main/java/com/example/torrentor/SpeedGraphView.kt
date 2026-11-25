@@ -95,10 +95,18 @@ class SpeedGraphView @JvmOverloads constructor(
             val y = h * (0.06f + 0.235f * i)
             canvas.drawLine(0f, y, w, y, gridPaint)
         }
-        for (i in 0..6) {
-            val x = w * (0.068f + 0.155f * i)
-            canvas.drawLine(x, 0f, x, h, gridPaint)
+        // The first two vertical lines pass through the download and upload
+        // zeros of the readout; the rest continue at the normal spacing.
+        val (gridX1, gridX2) = readoutCenters(w)
+        val step = w * 0.155f
+        canvas.drawLine(gridX1, 0f, gridX1, h, gridPaint)
+        var gx = gridX2
+        while (gx < w) {
+            canvas.drawLine(gx, 0f, gx, h, gridPaint)
+            gx += step
         }
+
+        drawReadout(canvas, w, h)
 
         if (downloadValues.size < 2 && uploadValues.size < 2) {
             return
@@ -113,6 +121,53 @@ class SpeedGraphView @JvmOverloads constructor(
         // sits on top, matching which number people care about most.
         drawSeries(canvas, uploadValues, maxValue, w, h, uploadLinePaint, uploadFillPaint)
         drawSeries(canvas, downloadValues, maxValue, w, h, downloadLinePaint, downloadFillPaint)
+    }
+
+    private val readoutPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 14f * resources.displayMetrics.scaledDensity
+    }
+
+    private val gapPx get() = readoutPaint.measureText(" ")
+
+    private fun downNumber() = (downloadValues.lastOrNull() ?: 0).toString()
+    private fun upNumber() = (uploadValues.lastOrNull() ?: 0).toString()
+
+    // X centres of the download and upload numbers. Download sits on the
+    // first grid position; upload sits on the next one, pushed right only
+    // as far as needed so the arrow clears the download "KB/s". The grid
+    // lines are then drawn through these two centres.
+    private fun readoutCenters(w: Float): Pair<Float, Float> {
+        val gap = gapPx
+        val downCenter = w * 0.068f
+        val downNumW = readoutPaint.measureText(downNumber())
+        val arrowW = readoutPaint.measureText("\u2193")
+        val unitW = readoutPaint.measureText("KB/s")
+        val downEnd = downCenter + downNumW / 2f + gap + unitW
+        val upNumW = readoutPaint.measureText(upNumber())
+        val upArrowW = readoutPaint.measureText("\u2191")
+        val minUpCenter = downEnd + gap * 1.5f + upArrowW + gap + upNumW / 2f
+        val upCenter = maxOf(w * (0.068f + 0.155f), minUpCenter)
+        return Pair(downCenter.coerceAtLeast(8f + arrowW + gap + downNumW / 2f), upCenter)
+    }
+
+    private fun drawReadout(canvas: Canvas, w: Float, h: Float) {
+        val fm = readoutPaint.fontMetrics
+        val baseline = h * 0.18f - (fm.ascent + fm.descent) / 2f
+        val gap = gapPx
+        val (downCenter, upCenter) = readoutCenters(w)
+
+        fun block(arrow: String, number: String, center: Float, color: Int) {
+            readoutPaint.color = color
+            val arrowW = readoutPaint.measureText(arrow)
+            val numW = readoutPaint.measureText(number)
+            val numLeft = center - numW / 2f
+            canvas.drawText(arrow, numLeft - gap - arrowW, baseline, readoutPaint)
+            canvas.drawText(number, numLeft, baseline, readoutPaint)
+            canvas.drawText("KB/s", numLeft + numW + gap, baseline, readoutPaint)
+        }
+
+        block("\u2193", downNumber(), downCenter, downloadColor)
+        block("\u2191", upNumber(), upCenter, uploadColor)
     }
 
     private fun verticalFade(color: Int, h: Float): LinearGradient {

@@ -1606,13 +1606,7 @@ class MainActivity : AppCompatActivity() {
         // The graph keeps its own height and bottom margin; the speed text
         // floats over its top-left corner.
         speedGraphFrame.addView(speedGraphView)
-        speedGraphFrame.addView(
-            speedGraphText,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
+        // The readout is now drawn by SpeedGraphView itself (aligned to its grid lines).
         root.addView(speedGraphFrame)
         root.addView(pauseAll)
         root.addView(resumeAll)
@@ -1862,8 +1856,8 @@ class MainActivity : AppCompatActivity() {
             )
 
             // Thin status strip pinned to the bottom: DHT / PEX / LSD
-            // state dots and the total seeds and peers. Tap it to open
-            // Network Features.
+            // state dots and the total seeds and peers. Tapping the
+            // DHT / PEX / LSD part opens Network Features.
             addView(
                 android.view.View(this@MainActivity).apply {
                     setBackgroundColor(outlineColor())
@@ -1883,7 +1877,21 @@ class MainActivity : AppCompatActivity() {
                     setBackgroundColor(
                         androidx.core.graphics.ColorUtils.blendARGB(bgColor(), Color.BLACK, 0.35f)
                     )
-                    setOnClickListener { showNetworkFeaturesScreen() }
+                    // Only the "DHT PEX LSD" part opens Network Features;
+                    // tapping the seeds / peers part (after the "|") does nothing.
+                    setOnTouchListener { v, event ->
+                        if (event.action == android.view.MotionEvent.ACTION_UP) {
+                            val tv = v as TextView
+                            val layout = tv.layout
+                            val bar = tv.text.indexOf('|')
+                            if (layout != null && bar > 0) {
+                                val x = event.x - tv.totalPaddingLeft + tv.scrollX
+                                val offset = layout.getOffsetForHorizontal(0, x)
+                                if (offset < bar) showNetworkFeaturesScreen(scrollToButtons = true)
+                            }
+                        }
+                        true
+                    }
                     mainBottomBar = this
                     updateMainBottomBarText()
                 }
@@ -4337,7 +4345,7 @@ class MainActivity : AppCompatActivity() {
     // called every second while the Network Features screen is open).
     private var encryptionColorsRefresh: (() -> Unit)? = null
 
-    private fun showNetworkFeaturesScreen() {
+    private fun showNetworkFeaturesScreen(scrollToButtons: Boolean = false) {
         currentDetailsTab = ""
         currentDetailsTorrentIndex = -1
         currentDetailsContentText = null
@@ -4601,6 +4609,13 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+
+        // Opened from the bottom DHT / PEX / LSD bar: jump straight down to
+        // the Enable / Disable buttons instead of showing the top.
+        if (scrollToButtons) {
+            outerScroll.post { outerScroll.fullScroll(android.view.View.FOCUS_DOWN) }
+            outerScroll.postDelayed({ outerScroll.fullScroll(android.view.View.FOCUS_DOWN) }, 200L)
+        }
     }
 
     // Protocol encryption (like qBittorrent's "Encryption mode"), shown on the
@@ -10055,7 +10070,7 @@ class MainActivity : AppCompatActivity() {
 
         val downPart = "↓ $latestDown KB/s"
         val upPart = "↑ $latestUp KB/s"
-        val text = "$downPart   $upPart"
+        val text = "$downPart  $upPart"
 
         val builder = android.text.SpannableStringBuilder(text)
 
@@ -10073,6 +10088,25 @@ class MainActivity : AppCompatActivity() {
             text.length,
             android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
         )
+
+        // Numbers drawn bold and narrow so the 0 is a tall oval, like the
+        // sketch (condensed bold sans-serif).
+        fun styleNumber(partStart: Int, number: String) {
+            val st = text.indexOf(number, partStart)
+            if (st < 0) return
+            builder.setSpan(
+                android.text.style.TypefaceSpan("sans-serif-condensed"),
+                st, st + number.length,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            builder.setSpan(
+                android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                st, st + number.length,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        styleNumber(0, latestDown.toString())
+        styleNumber(upStart, latestUp.toString())
 
         return builder
     }
