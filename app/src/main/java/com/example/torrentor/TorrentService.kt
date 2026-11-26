@@ -2410,18 +2410,43 @@ class TorrentService : Service() {
     }
 
     private fun updateNotification(text: String) {
+        // Tapping the notification opens TorrentOr.
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("open_main_screen", true)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val firstLine = text.lines().firstOrNull() ?: "Running"
+
+        // Body: the full-colour planet at the left, title + text to its
+        // right. The collapsed view shows only the first line.
+        val collapsed = android.widget.RemoteViews(packageName, R.layout.notif_torrentor).apply {
+            setTextViewText(R.id.notif_title, "TorrentOr")
+            setTextViewText(R.id.notif_text, firstLine)
+            setInt(R.id.notif_text, "setMaxLines", 1)
+        }
+        val expanded = android.widget.RemoteViews(packageName, R.layout.notif_torrentor).apply {
+            setTextViewText(R.id.notif_title, "TorrentOr")
+            setTextViewText(R.id.notif_text, text)
+        }
+
         val notification: Notification =
             NotificationCompat.Builder(this, "torrent")
                 .setContentTitle("TorrentOr")
-                .setContentText(
-                    text.lines().firstOrNull() ?: "Running"
-                )
-                .setStyle(
-                    NotificationCompat.BigTextStyle().bigText(text)
-                )
-                .setSmallIcon(
-                    android.R.drawable.stat_sys_download
-                )
+                .setContentText(firstLine)
+                .setStyle(NotificationCompat.DecoratedCustomViewStyle())
+                .setCustomContentView(collapsed)
+                .setCustomBigContentView(expanded)
+                // Header icon: flat planet (Android shows one colour only),
+                // tinted blue to match the planet.
+                .setSmallIcon(R.drawable.ic_stat_torrentor)
+                .setColor(0xFF4FA3E8.toInt())
+                .setContentIntent(openApp)
                 .build()
 
         startForeground(1, notification)

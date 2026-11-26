@@ -532,6 +532,11 @@ class MainActivity : AppCompatActivity() {
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
 
+        // Quiet once-a-day check for a newer GitHub release.
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
+            { UpdateChecker.check(this, false) }, 4000L
+        )
+
         // HTTPS tracker certificates (must be ready before the session starts).
         CaBundle.prepare(applicationContext)
 
@@ -688,9 +693,48 @@ class MainActivity : AppCompatActivity() {
         return null
     }
 
+    // Number of dialogs with a text box that are open right now. While one
+    // is open, tapping the notification must not switch screens (that would
+    // close it and lose what was typed).
+    private var inputDialogsOpen = 0
+
+    private fun AlertDialog.Builder.showTracked(): AlertDialog {
+        val dialog = create()
+        inputDialogsOpen++
+        dialog.setOnDismissListener {
+            inputDialogsOpen = (inputDialogsOpen - 1).coerceAtLeast(0)
+        }
+        dialog.show()
+        return dialog
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingIntent(intent)
+
+        // Tapping the TorrentOr notification always lands on the main
+        // torrent list, even if another screen (Torrent details, settings,
+        // search...) was open. If the list is already showing it is left
+        // alone, so selection mode is not reset.
+        if (intent.getBooleanExtra("open_main_screen", false)) {
+            intent.removeExtra("open_main_screen")
+            // Protection: if you are typing right now (the on-screen
+            // keyboard is open over a text box that has text), or a dialog
+            // with a text box is open, stay put so that input is not lost.
+            // A text box that merely keeps the cursor (settings fields, a
+            // finished search) does not count.
+            val keyboardOpen = try {
+                androidx.core.view.ViewCompat.getRootWindowInsets(window.decorView)
+                    ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+            } catch (_: Throwable) {
+                false
+            }
+            val typing = keyboardOpen &&
+                    (currentFocus as? EditText)?.text?.isNotBlank() == true
+            if (!isOnMainScreen && !typing && inputDialogsOpen == 0) {
+                showMainScreen()
+            }
+        }
     }
 
     override fun onStart() {
@@ -2641,7 +2685,7 @@ class MainActivity : AppCompatActivity() {
             }
             .setNeutralButton("Reset") { _, _ -> onApply(SearchFilters()) }
             .setNegativeButton("Cancel", null)
-            .show()
+            .showTracked()
     }
 
     // Past Online Search queries: tap one to search it again, X removes
@@ -4031,7 +4075,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Feed added", Toast.LENGTH_SHORT).show()
                 onAdded()
             }
-            .show()
+            .showTracked()
     }
 
     private fun loadRssFeeds(): List<String> {
@@ -5355,7 +5399,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("Cancel", null)
-            .show()
+            .showTracked()
     }
 
     // Used from the add-time file-selection screens (magnet metadata,
@@ -9957,7 +10001,7 @@ class MainActivity : AppCompatActivity() {
                     ).show()
                 }
             }
-            .show()
+            .showTracked()
     }
 
     private fun getMimeType(file: File): String {
@@ -12374,6 +12418,29 @@ class MainActivity : AppCompatActivity() {
         ).apply {
             setMargins(0, 0, 0, 0)
         }
+
+        val updateRow = TextView(this).apply {
+            text = "Check for updates"
+            textSize = 22f
+            setTextColor(Color.WHITE)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding((22 * d).toInt(), (10 * d).toInt(), (26 * d).toInt(), (10 * d).toInt())
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(13, 71, 161))
+                cornerRadius = 13f * d
+            }
+            setOnClickListener {
+                popup.dismiss()
+                UpdateChecker.check(this@MainActivity, true)
+            }
+        }
+        card.addView(
+            updateRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, (6 * d).toInt()) }
+        )
         card.addView(shutdownRow, rowParams)
 
         popup.showAsDropDown(anchor, (-28 * d).toInt(), 0, android.view.Gravity.END)

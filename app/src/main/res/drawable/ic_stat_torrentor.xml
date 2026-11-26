@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One-colour notification header icon: flat planet at the left with the
+     download arrow beside it. Android paints only the shape in a single
+     colour (set with setColor), so cut-outs hint at the planet's texture. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M8,4a5.5,8 0 1,0 0.001,0z M10.6,7.4a0.9,2.4 25,1,0 0.01,0z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M17.5,4.5h2.2v8h-2.2z M14.2,12h8.8l-4.4,5.4z M14.2,19h8.8v2h-8.8z" />
+</vector>
