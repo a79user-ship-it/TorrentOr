@@ -119,6 +119,8 @@ class MainActivity : AppCompatActivity() {
     private var currentDetailsTab = ""
     private var currentDetailsTorrentIndex = -1
     private var currentDetailsContentText: TextView? = null
+    private var currentDetailsPieceBox: LinearLayout? = null
+    private var currentDetailsPieceBar: PieceBarView? = null
     private var currentDetailsFileListLayout: LinearLayout? = null
 
     // Files tab state. The tick boxes the user has changed but not applied yet
@@ -7715,6 +7717,29 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, 24, 0, 24)
         }
 
+        // General tab progress bar: one thin bar made of the torrent's
+        // pieces (blue = have, green = downloading now, dark = missing).
+        val pieceBar = PieceBarView(this)
+        val pieceBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = android.view.View.GONE
+            setPadding(0, 16, 0, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = "Progress"
+                setTextColor(Color.rgb(157, 183, 232))
+                textSize = 13f
+            })
+            addView(
+                pieceBar,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (24 * resources.displayMetrics.density).toInt()
+                ).apply { topMargin = 6 }
+            )
+        }
+        currentDetailsPieceBox = pieceBox
+        currentDetailsPieceBar = pieceBar
+
         currentDetailsTorrentIndex = torrentIndex
         currentDetailsContentText = contentText
         currentDetailsTab = "General"
@@ -7734,6 +7759,7 @@ class MainActivity : AppCompatActivity() {
         fun clearContent() {
             fileListLayout.removeAllViews()
             contentText.text = ""
+            pieceBox.visibility = android.view.View.GONE
         }
 
         fun showGeneralTab() {
@@ -8390,6 +8416,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(title)
         root.addView(horizontalScrollFor(tabRowOne))
         root.addView(horizontalScrollFor(tabRowTwo))
+        root.addView(pieceBox)
         root.addView(contentText)
         root.addView(fileListLayout)
         TabIcons.apply(copyMagnet, "magnet", 18, 6)
@@ -8750,6 +8777,24 @@ class MainActivity : AppCompatActivity() {
         torrentIndex: Int,
         contentText: TextView
     ) {
+        // Progress bar of pieces (stays visible while seeding, solid blue
+        // when everything is there). Hidden until the metadata is ready.
+        try {
+            val st = TorrentNative.getTorrentPieceStates(torrentIndex)
+            val box = currentDetailsPieceBox
+            val bar = currentDetailsPieceBar
+            if (box != null && bar != null) {
+                if (st.startsWith("OK|")) {
+                    bar.setStates(st.substring(st.indexOf('\n') + 1))
+                    box.visibility = android.view.View.VISIBLE
+                } else {
+                    box.visibility = android.view.View.GONE
+                }
+            }
+        } catch (_: Throwable) {
+            currentDetailsPieceBox?.visibility = android.view.View.GONE
+        }
+
         val statusLine = getTorrentStatusLine(torrentIndex)
         val hash = try {
             TorrentNative.getTorrentHash(torrentIndex)
@@ -12529,3 +12574,79 @@ private class DeepBlueRipple(
     color: android.content.res.ColorStateList,
     content: android.graphics.drawable.Drawable
 ) : android.graphics.drawable.RippleDrawable(color, content, null)
+
+
+// One thin bar for the General tab, drawn from the piece states
+// ('2' have, '1' downloading now, '0' missing, 'x' skipped). Each pixel
+// column covers a range of pieces: all there = blue, any downloading =
+// green, some there = a lighter blue in proportion, none = dark track.
+class PieceBarView(context: android.content.Context) : android.view.View(context) {
+
+    private var states: String = ""
+
+    private val trackPaint = android.graphics.Paint().apply {
+        color = Color.rgb(6, 26, 61)
+    }
+    private val borderPaint = android.graphics.Paint().apply {
+        color = Color.rgb(27, 63, 134)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+    private val havePaint = android.graphics.Paint().apply {
+        color = Color.rgb(47, 127, 214)
+    }
+    private val downloadingPaint = android.graphics.Paint().apply {
+        color = Color.rgb(61, 220, 74)
+    }
+
+    fun setStates(newStates: String) {
+        if (newStates != states) {
+            states = newStates
+            invalidate()
+        }
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        super.onDraw(canvas)
+
+        val w = width
+        val h = height.toFloat()
+
+        canvas.drawRect(0f, 0f, w.toFloat(), h, trackPaint)
+
+        val n = states.length
+
+        if (n > 0 && w > 0) {
+            for (x in 0 until w) {
+                val from = (x.toLong() * n / w).toInt()
+                var to = ((x + 1).toLong() * n / w).toInt()
+                if (to <= from) to = from + 1
+                if (to > n) to = n
+
+                var have = 0
+                var downloading = false
+
+                for (i in from until to) {
+                    when (states[i]) {
+                        '2' -> have++
+                        '1' -> downloading = true
+                    }
+                }
+
+                val count = to - from
+
+                if (downloading) {
+                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, downloadingPaint)
+                } else if (have == count) {
+                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, havePaint)
+                } else if (have > 0) {
+                    havePaint.alpha = 60 + (195 * have / count)
+                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, havePaint)
+                    havePaint.alpha = 255
+                }
+            }
+        }
+
+        canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
+    }
+}

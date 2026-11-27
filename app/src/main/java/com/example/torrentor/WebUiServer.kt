@@ -6749,7 +6749,15 @@ function renderFilesPanel() {
       '</div>' +
       '<canvas id="piecesCanvas" width="600" height="10" style="width:100%;display:block;margin-top:6px;"></canvas>';
   } else if (textTabEndpoints[openFilesTab]) {
-    body = '<pre id="tabText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
+    // General tab: the piece progress bar goes above the text (hidden
+    // until the pieces are known; it stays visible while seeding).
+    const generalBar = (openFilesTab === 'general')
+      ? '<div id="generalBarBox" style="display:none;margin-bottom:8px;">' +
+          '<div class="meta" style="margin-bottom:4px;">Progress</div>' +
+          '<canvas id="generalPieceBar" width="600" height="24" style="width:100%;height:24px;display:block;"></canvas>' +
+        '</div>'
+      : '';
+    body = generalBar + '<pre id="tabText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
   } else {
     body = '<div class="actions" style="position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;margin:0;">' +
         '<button class="secondary" onclick="toggleFiles(' + index + ')">Close</button>' +
@@ -7070,6 +7078,7 @@ async function loadTextTab(index, tab) {
       el.textContent = (data.ok ? data.text : 'Could not load') || 'Nothing to show';
     }
     if (tab === 'pieces') drawPieceMap(data.states || '');
+    if (tab === 'general') loadGeneralPieceBar(index);
   } catch (e) {
     const el = document.getElementById('tabText');
     if (el && openFilesIndex === index && openFilesTab === tab) el.textContent = 'Could not load';
@@ -7234,6 +7243,76 @@ function colorSwarmText(text) {
     }
     return esc(line);
   }).join('\n');
+}
+
+// General tab: one thin bar drawn from the piece states, like the app's.
+// Each pixel column covers a range of pieces: all there = blue, any
+// downloading = green, some there = lighter blue in proportion, none =
+// dark track.
+async function loadGeneralPieceBar(index) {
+  try {
+    const res = await api('/api/torrent_pieces?index=' + index);
+    const data = await res.json();
+    const box = document.getElementById('generalBarBox');
+    if (!box || openFilesIndex !== index || openFilesTab !== 'general') return;
+    if (data.ok && data.states) {
+      box.style.display = 'block';
+      drawGeneralPieceBar(data.states);
+    } else {
+      box.style.display = 'none';
+    }
+  } catch (e) {}
+}
+
+function drawGeneralPieceBar(states) {
+  const canvas = document.getElementById('generalPieceBar');
+  if (!canvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 300;
+  const cssH = 24;
+  const w = Math.floor(cssW * dpr);
+  const h = Math.floor(cssH * dpr);
+  canvas.width = w;
+  canvas.height = h;
+
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgb(6,26,61)';
+  ctx.fillRect(0, 0, w, h);
+
+  const n = states.length;
+  if (n > 0 && w > 0) {
+    for (let x = 0; x < w; x++) {
+      const from = Math.floor(x * n / w);
+      let to = Math.floor((x + 1) * n / w);
+      if (to <= from) to = from + 1;
+      if (to > n) to = n;
+
+      let have = 0;
+      let downloading = false;
+      for (let i = from; i < to; i++) {
+        const c = states.charAt(i);
+        if (c === '2') have++;
+        else if (c === '1') downloading = true;
+      }
+      const count = to - from;
+
+      if (downloading) {
+        ctx.fillStyle = 'rgb(61,220,74)';
+      } else if (have === count) {
+        ctx.fillStyle = 'rgb(47,127,214)';
+      } else if (have > 0) {
+        ctx.fillStyle = 'rgba(47,127,214,' + ((60 + 195 * have / count) / 255) + ')';
+      } else {
+        continue;
+      }
+      ctx.fillRect(x, 0, 1, h);
+    }
+  }
+
+  ctx.strokeStyle = 'rgb(27,63,134)';
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeRect(dpr, dpr, w - 2 * dpr, h - 2 * dpr);
 }
 
 // Four-state piece map on a canvas: one square per piece.
