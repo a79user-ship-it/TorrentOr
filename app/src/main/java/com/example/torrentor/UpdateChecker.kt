@@ -205,7 +205,7 @@ object UpdateChecker {
             panel.addView(
                 android.widget.TextView(activity).apply {
                     text = "WHAT'S NEW"
-                    setTextColor(grey)
+                    setTextColor(android.graphics.Color.rgb(76, 217, 100)) // green
                     textSize = 14f
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                     gravity = android.view.Gravity.START
@@ -228,7 +228,7 @@ object UpdateChecker {
                 addView(
                     android.widget.TextView(activity).apply {
                         text = notesText
-                        setTextColor(grey)
+                        setTextColor(android.graphics.Color.rgb(255, 193, 7)) // amber
                         textSize = 16f
                         setLineSpacing(0f, 1.1f)
                     }

@@ -10418,7 +10418,8 @@ class MainActivity : AppCompatActivity() {
             v <= 0 -> "0 B/s"
             v < 1024 -> "$v KB/s"
             v < 1024 * 1024 -> String.format("%.1f MB/s", v / 1024.0)
-            else -> String.format("%.2f GB/s", v / 1024.0 / 1024.0)
+            v < 1024L * 1024L * 1024L -> String.format("%.2f GB/s", v / 1024.0 / 1024.0)
+            else -> String.format("%.2f TB/s", v / 1024.0 / 1024.0 / 1024.0)
         }
     }
 
@@ -10497,8 +10498,8 @@ class MainActivity : AppCompatActivity() {
         val latestDown = downloadSpeedHistory.lastOrNull() ?: 0
         val latestUp = uploadSpeedHistory.lastOrNull() ?: 0
 
-        val downPart = "↓ $latestDown KB/s"
-        val upPart = "↑ $latestUp KB/s"
+        val downPart = "↓ " + formatBarSpeed(latestDown).replace("0 B/s", "0 KB/s")
+        val upPart = "↑ " + formatBarSpeed(latestUp).replace("0 B/s", "0 KB/s")
         val text = "$downPart  $upPart"
 
         val builder = android.text.SpannableStringBuilder(text)

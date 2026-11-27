@@ -129,8 +129,32 @@ class SpeedGraphView @JvmOverloads constructor(
 
     private val gapPx get() = readoutPaint.measureText(" ")
 
-    private fun downNumber() = (downloadValues.lastOrNull() ?: 0).toString()
-    private fun upNumber() = (uploadValues.lastOrNull() ?: 0).toString()
+    // Speeds arrive in KB/s. Show them in the unit that fits: KB/s up to
+    // 1023, then MB/s, GB/s and TB/s (steps of 1024, like the title bar).
+    private fun speedNumber(kb: Int): String {
+        val v = kb.coerceAtLeast(0)
+        return when {
+            v < 1024 -> v.toString()
+            v < 1024 * 1024 -> String.format("%.1f", v / 1024.0)
+            v < 1024L * 1024L * 1024L -> String.format("%.2f", v / 1024.0 / 1024.0)
+            else -> String.format("%.2f", v / 1024.0 / 1024.0 / 1024.0)
+        }
+    }
+
+    private fun speedUnit(kb: Int): String {
+        val v = kb.coerceAtLeast(0)
+        return when {
+            v < 1024 -> "KB/s"
+            v < 1024 * 1024 -> "MB/s"
+            v < 1024L * 1024L * 1024L -> "GB/s"
+            else -> "TB/s"
+        }
+    }
+
+    private fun downNumber() = speedNumber(downloadValues.lastOrNull() ?: 0)
+    private fun upNumber() = speedNumber(uploadValues.lastOrNull() ?: 0)
+    private fun downUnit() = speedUnit(downloadValues.lastOrNull() ?: 0)
+    private fun upUnit() = speedUnit(uploadValues.lastOrNull() ?: 0)
 
     // X centres of the download and upload numbers. Download sits on the
     // first grid position; upload sits on the next one, pushed right only
@@ -141,7 +165,7 @@ class SpeedGraphView @JvmOverloads constructor(
         val downCenter = w * 0.068f
         val downNumW = readoutPaint.measureText(downNumber())
         val arrowW = readoutPaint.measureText("\u2193")
-        val unitW = readoutPaint.measureText("KB/s")
+        val unitW = readoutPaint.measureText(downUnit())
         val downEnd = downCenter + downNumW / 2f + gap + unitW
         val upNumW = readoutPaint.measureText(upNumber())
         val upArrowW = readoutPaint.measureText("\u2191")
@@ -156,18 +180,18 @@ class SpeedGraphView @JvmOverloads constructor(
         val gap = gapPx
         val (downCenter, upCenter) = readoutCenters(w)
 
-        fun block(arrow: String, number: String, center: Float, color: Int) {
+        fun block(arrow: String, number: String, unit: String, center: Float, color: Int) {
             readoutPaint.color = color
             val arrowW = readoutPaint.measureText(arrow)
             val numW = readoutPaint.measureText(number)
             val numLeft = center - numW / 2f
             canvas.drawText(arrow, numLeft - gap - arrowW, baseline, readoutPaint)
             canvas.drawText(number, numLeft, baseline, readoutPaint)
-            canvas.drawText("KB/s", numLeft + numW + gap, baseline, readoutPaint)
+            canvas.drawText(unit, numLeft + numW + gap, baseline, readoutPaint)
         }
 
-        block("\u2193", downNumber(), downCenter, downloadColor)
-        block("\u2191", upNumber(), upCenter, uploadColor)
+        block("\u2193", downNumber(), downUnit(), downCenter, downloadColor)
+        block("\u2191", upNumber(), upUnit(), upCenter, uploadColor)
     }
 
     private fun verticalFade(color: Int, h: Float): LinearGradient {
