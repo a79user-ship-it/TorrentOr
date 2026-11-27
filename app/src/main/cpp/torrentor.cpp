@@ -4408,14 +4408,18 @@ Java_com_example_torrentor_TorrentNative_getGlobalStatistics(
         try {
             lt::torrent_status st = handle.status();
 
+            // Real traffic moved since the app started (libtorrent's
+            // per-session payload counters, which begin at 0 on every start).
+            // The old values (data held on disk / lifetime upload) were added
+            // again after every restart, inflating the all-time totals.
             sessionDownloaded +=
                     static_cast<long long>(
-                            st.total_wanted_done
+                            st.total_payload_download
                     );
 
             sessionUploaded +=
                     static_cast<long long>(
-                            st.all_time_upload
+                            st.total_payload_upload
                     );
 
         } catch (...) {

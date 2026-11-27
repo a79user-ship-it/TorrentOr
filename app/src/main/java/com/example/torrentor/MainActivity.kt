@@ -5619,18 +5619,7 @@ class MainActivity : AppCompatActivity() {
     // Same text as buildConnectionStatusText(), with the trailing
     // "Auto-refresh" line drawn in amber so it stands out from the status.
     private fun buildConnectionStatusStyled(): CharSequence {
-        val plain = buildConnectionStatusText()
-        val spannable = android.text.SpannableString(plain)
-        val idx = plain.lastIndexOf("Auto-refresh:")
-        if (idx >= 0) {
-            spannable.setSpan(
-                android.text.style.ForegroundColorSpan(Color.parseColor("#FFB74D")),
-                idx,
-                plain.length,
-                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-        }
-        return spannable
+        return withAutoRefreshIcon(buildConnectionStatusText())
     }
 
     private fun buildConnectionStatusText(): String {
@@ -6726,18 +6715,59 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(bgColor())
         }
 
-        val title = TextView(this).apply {
-            text = "Global Statistics"
-            textSize = 24f
-            setTextColor(Color.WHITE)
+        val density = resources.displayMetrics.density
+
+        // Heading: globe icon, statistics icon, then the title.
+        val title = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
             setPadding(0, 0, 0, 16)
+
+            addView(TextView(this@MainActivity).apply {
+                TabIcons.apply(this, "globe", 28, 0, true)
+                setPadding(0, 0, (10 * density).toInt(), 0)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "Global Statistics"
+                textSize = 24f
+                setTextColor(Color.WHITE)
+                TabIcons.apply(this, "statsbars", 28, 10, true)
+            })
+        }
+
+        // "User statistics": user icon, statistics icon, then the words.
+        val userHeading = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, 8, 0, 0)
+
+            addView(TextView(this@MainActivity).apply {
+                TabIcons.apply(this, "user", 22, 0, true)
+                setPadding(0, 0, (8 * density).toInt(), 0)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = "User statistics"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                TabIcons.apply(this, "statsbars", 22, 8, true)
+            })
         }
 
         val statsText = TextView(this).apply {
-            text = buildQBittorrentGlobalStatisticsText()
+            text = globalStatsBody()
             textSize = 16f
             setTextColor(Color.WHITE)
             setPadding(0, 16, 0, 16)
+        }
+
+        val autoRefreshNote = TextView(this).apply {
+            text = "Auto-refresh: Every 1 second"
+            textSize = 16f
+            setTextColor(Color.parseColor("#4FD1C5"))
+            autoRefreshDrawable()?.let {
+                setCompoundDrawablesRelativeWithIntrinsicBounds(it, null, null, null)
+            }
+            compoundDrawablePadding = (8 * density).toInt()
         }
 
         startGlobalStatsAutoRefresh(statsText)
@@ -6745,7 +6775,7 @@ class MainActivity : AppCompatActivity() {
         val refreshButton = Button(this).apply {
             text = "Refresh"
             setOnClickListener {
-                statsText.text = buildQBittorrentGlobalStatisticsText()
+                statsText.text = globalStatsBody()
             }
         }
 
@@ -6758,7 +6788,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(title)
+        root.addView(userHeading)
         root.addView(statsText)
+        root.addView(autoRefreshNote)
         root.addView(refreshButton)
         root.addView(backButton)
 
@@ -6781,7 +6813,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 try {
-                    statsText.text = buildQBittorrentGlobalStatisticsText()
+                    statsText.text = globalStatsBody()
                 } catch (_: Throwable) {
                     // Keep the screen alive even if statistics are temporarily unavailable.
                 }
@@ -6803,6 +6835,13 @@ class MainActivity : AppCompatActivity() {
 
         globalStatsRefreshRunnable = null
     }
+
+    // The counters part only: the "User statistics" heading and the
+    // Auto-refresh note are drawn separately (with icons) on this screen.
+    private fun globalStatsBody(): String =
+        buildQBittorrentGlobalStatisticsText()
+            .removePrefix("User statistics\n\n")
+            .substringBefore("\n\nAuto-refresh:")
 
     private fun buildQBittorrentGlobalStatisticsText(): String {
         val prefs = getSharedPreferences("global_stats", MODE_PRIVATE)
@@ -11426,6 +11465,40 @@ class MainActivity : AppCompatActivity() {
     // Shows the time lines (Elapsed / Time active / Seeding time / Time to
     // complete) in purple on the General and Statistics tabs. Display only;
     // the text itself is unchanged.
+    // The "Auto-refresh: Every 1 second" picture (res/drawable-nodpi/ic_autorefresh.png).
+    private fun autoRefreshDrawable(sizeDp: Int = 30): android.graphics.drawable.Drawable? {
+        val d = androidx.core.content.ContextCompat.getDrawable(this, R.drawable.ic_autorefresh)
+            ?: return null
+        val px = (sizeDp * resources.displayMetrics.density).toInt()
+        d.setBounds(0, 0, px, px)
+        return d
+    }
+
+    // Puts the picture in front of the "Auto-refresh: Every 1 second" line of
+    // a text and draws that line in teal. Text without the line is unchanged.
+    private fun withAutoRefreshIcon(text: CharSequence): android.text.SpannableStringBuilder {
+        val out = if (text is android.text.SpannableStringBuilder) {
+            text
+        } else {
+            android.text.SpannableStringBuilder(text)
+        }
+        val label = "Auto-refresh: Every 1 second"
+        val idx = out.toString().lastIndexOf(label)
+        if (idx < 0) return out
+        val icon = autoRefreshDrawable() ?: return out
+
+        out.setSpan(
+            android.text.style.ForegroundColorSpan(Color.parseColor("#4FD1C5")),
+            idx, idx + label.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        out.insert(idx, "\uFFFC ")
+        out.setSpan(
+            CenteredImageSpan(icon), idx, idx + 1,
+            android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        return out
+    }
+
     private fun mediumWeight(sb: android.text.SpannableStringBuilder, start: Int, end: Int) {
         if (android.os.Build.VERSION.SDK_INT >= 28 && end > start) {
             sb.setSpan(
@@ -11523,7 +11596,7 @@ class MainActivity : AppCompatActivity() {
             lineStart = lineEnd + 1
         }
 
-        return out
+        return withAutoRefreshIcon(out)
     }
 
     // Colours the Swarm Health text: the "Health:" word and the bar follow
@@ -12429,7 +12502,7 @@ class MainActivity : AppCompatActivity() {
             builder.append("Could not read storage space\n\n$monitoredPath")
         }
 
-        return builder
+        return withAutoRefreshIcon(builder)
     }
 
     private fun appendStorageSpan(
@@ -12870,5 +12943,29 @@ class PieceBarView(context: android.content.Context) : android.view.View(context
         }
 
         canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
+    }
+}
+
+// An inline picture centred on its line of text (the Auto-refresh icon).
+private class CenteredImageSpan(d: android.graphics.drawable.Drawable) :
+    android.text.style.ImageSpan(d) {
+
+    override fun draw(
+        canvas: android.graphics.Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: android.graphics.Paint
+    ) {
+        val b = drawable
+        canvas.save()
+        val transY = top + (bottom - top - b.bounds.height()) / 2
+        canvas.translate(x, transY.toFloat())
+        b.draw(canvas)
+        canvas.restore()
     }
 }

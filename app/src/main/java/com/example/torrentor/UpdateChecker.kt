@@ -97,9 +97,59 @@ object UpdateChecker {
                     prefs.edit().putInt("popup_count", count + 1).apply()
                 }
 
+                // Automatic check: post the notification together with the
+                // pop-up, so it follows the same limit (3 times a day).
+                if (!manual) {
+                    postUpdateNotification(activity, r.tag)
+                }
+
                 showDialog(activity, prefs, r, installed)
             }
         }.start()
+    }
+
+    // "TorrentOr vX is available" - tapping it opens the app and shows the
+    // update dialog. Needs notifications to be allowed; otherwise it is
+    // simply skipped (the dialog still shows).
+    private fun postUpdateNotification(context: Context, tag: String) {
+        try {
+            val nm = androidx.core.app.NotificationManagerCompat.from(context)
+            if (!nm.areNotificationsEnabled()) return
+
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                val channel = android.app.NotificationChannel(
+                    "updates",
+                    "App updates",
+                    android.app.NotificationManager.IMPORTANCE_DEFAULT
+                )
+                (context.getSystemService(Context.NOTIFICATION_SERVICE)
+                        as android.app.NotificationManager).createNotificationChannel(channel)
+            }
+
+            val open = android.app.PendingIntent.getActivity(
+                context,
+                7,
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra("check_update", true)
+                },
+                android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+                        android.app.PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val version = tag.removePrefix("v").removePrefix("V")
+            val n = androidx.core.app.NotificationCompat.Builder(context, "updates")
+                .setSmallIcon(R.drawable.ic_stat_torrentor)
+                .setColor(0xFF4FA3E8.toInt())
+                .setContentTitle("TorrentOr update available")
+                .setContentText("Version v$version is ready to download. Tap to see what's new.")
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .build()
+
+            nm.notify(7001, n)
+        } catch (_: Throwable) {
+        }
     }
 
     private fun showDialog(
