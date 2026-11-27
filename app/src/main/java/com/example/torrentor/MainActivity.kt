@@ -159,6 +159,31 @@ class MainActivity : AppCompatActivity() {
     private var logUiRefreshRunnable: Runnable? = null
     private var isLogScreenActive = false
 
+    // Black and AMOLED only: the top bar is the Web UI's near-black, the
+    // status bar above it matches, and the title gets the Web UI's
+    // teal-to-purple gradient. Every other theme is unchanged.
+    private var defaultStatusBarColor: Int? = null
+
+    private fun isBlackFamilyTheme(): Boolean {
+        val theme = getSharedPreferences("prefs", MODE_PRIVATE)
+            .getString("theme_color", "blue")
+        return theme == "black" || theme == "amoled"
+    }
+
+    private fun applyStatusBarForTheme() {
+        try {
+            if (defaultStatusBarColor == null) {
+                defaultStatusBarColor = window.statusBarColor
+            }
+            window.statusBarColor = if (isBlackFamilyTheme()) {
+                Color.parseColor("#0D1016")
+            } else {
+                defaultStatusBarColor ?: window.statusBarColor
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
     private fun bgColor(): Int {
         val theme = getSharedPreferences("prefs", MODE_PRIVATE)
             .getString("theme_color", "blue")
@@ -404,6 +429,10 @@ class MainActivity : AppCompatActivity() {
 
             if (child is Button) {
                 deepBlueButtons(false, child)
+            } else if (child is LinearLayout && child.tag == "theme_row") {
+                for (j in 0 until child.childCount) {
+                    (child.getChildAt(j) as? Button)?.let { deepBlueButtons(false, it) }
+                }
             } else if (child is HorizontalScrollView) {
                 val row = child.getChildAt(0) as? LinearLayout ?: continue
 
@@ -433,30 +462,113 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun switchTheme() {
+    private val themeOrder = listOf(
+        "blue", "red", "orange", "black", "purple", "green",
+        "rose", "amoled", "ash", "darkblue", "deepblue"
+    )
+
+    // step = +1 goes to the next theme, -1 to the previous one; both wrap.
+    // A pick-one list where the current choice is highlighted in teal, a row
+    // lights up while it is pressed, and the tapped row shows its colour for a
+    // moment before the dialog closes.
+    private fun showHighlightChoiceDialog(
+        title: String,
+        options: Array<String>,
+        current: String,
+        showCircles: Boolean = true,
+        onPick: (Int) -> Unit
+    ) {
+        val teal = Color.parseColor("#4FD1C5")
+        var selected = options.indexOf(current)
+        val density = resources.displayMetrics.density
+
+        val adapter = object : ArrayAdapter<String>(
+            this, android.R.layout.simple_list_item_1, options
+        ) {
+            override fun getView(
+                position: Int,
+                convertView: android.view.View?,
+                parent: android.view.ViewGroup
+            ): android.view.View {
+                val isSelected = position == selected
+                val tv: TextView
+                if (showCircles) {
+                    val radio = RadioButton(this@MainActivity)
+                    // The list handles the tap; the circle only shows the state.
+                    radio.isClickable = false
+                    radio.isFocusable = false
+                    radio.isChecked = isSelected
+                    radio.buttonTintList = android.content.res.ColorStateList(
+                        arrayOf(
+                            intArrayOf(android.R.attr.state_checked),
+                            intArrayOf()
+                        ),
+                        intArrayOf(teal, Color.parseColor("#CBC3D8"))
+                    )
+                    tv = radio
+                    tv.setPadding((20 * density).toInt(), (14 * density).toInt(),
+                        (24 * density).toInt(), (14 * density).toInt())
+                } else {
+                    tv = TextView(this@MainActivity)
+                    tv.setPadding((24 * density).toInt(), (16 * density).toInt(),
+                        (24 * density).toInt(), (16 * density).toInt())
+                }
+                tv.text = options[position]
+                tv.textSize = 18f
+                tv.setTextColor(if (isSelected) teal else Color.WHITE)
+                if (isSelected) tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
+                tv.background = android.graphics.drawable.StateListDrawable().apply {
+                    addState(
+                        intArrayOf(android.R.attr.state_pressed),
+                        android.graphics.drawable.ColorDrawable(Color.parseColor("#664FD1C5"))
+                    )
+                    addState(
+                        intArrayOf(),
+                        android.graphics.drawable.ColorDrawable(
+                            if (isSelected) Color.parseColor("#334FD1C5") else Color.TRANSPARENT
+                        )
+                    )
+                }
+                return tv
+            }
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setAdapter(adapter, null)
+            .create()
+
+        dialog.listView.setOnItemClickListener { _, _, which, _ ->
+            selected = which
+            adapter.notifyDataSetChanged()
+            dialog.listView.postDelayed({
+                dialog.dismiss()
+                onPick(which)
+            }, 180L)
+        }
+        dialog.show()
+    }
+
+    private fun switchTheme(step: Int = 1) {
         val prefs = getSharedPreferences("prefs", MODE_PRIVATE)
         val current = prefs.getString("theme_color", "blue")
 
-        val next = when (current) {
-            "blue" -> "red"
-            "red" -> "orange"
-            "orange" -> "black"
-            "black" -> "purple"
-            "purple" -> "green"
-            "green" -> "rose"
-            "rose" -> "amoled"
-            "amoled" -> "ash"
-            "ash" -> "darkblue"
-            "darkblue" -> "deepblue"
-            else -> "blue"
-        }
+        val index = themeOrder.indexOf(current).let { if (it < 0) 0 else it }
+        val next = themeOrder[(index + step + themeOrder.size) % themeOrder.size]
 
         prefs.edit()
             .putString("theme_color", next)
             .apply()
 
+        // Only the colours change, so skip asking the engine for the status
+        // again; the list is redrawn from the last status instead.
+        reuseStatusOnce = true
         showMainScreen()
     }
+
+    private var lastStatusText: String? = null
+    private var cachedVersionName: String? = null
+    private var reuseStatusOnce = false
 
     // Backup & Restore (v2.08)
     private var backupStatusView: TextView? = null
@@ -534,9 +646,12 @@ class MainActivity : AppCompatActivity() {
         AppLog.init(applicationContext)
         AppLog.info("TorrentOr opened")
 
-        // Quiet once-a-day check for a newer GitHub release.
+        // Quiet once-a-day check for a newer GitHub release. Opened from the
+        // "update available" notification: show the dialog right away.
+        val fromUpdateNotification = intent?.getBooleanExtra("check_update", false) == true
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
-            { UpdateChecker.check(this, false) }, 4000L
+            { UpdateChecker.check(this, fromUpdateNotification) },
+            if (fromUpdateNotification) 800L else 4000L
         )
 
         // HTTPS tracker certificates (must be ready before the session starts).
@@ -718,6 +833,11 @@ class MainActivity : AppCompatActivity() {
         // torrent list, even if another screen (Torrent details, settings,
         // search...) was open. If the list is already showing it is left
         // alone, so selection mode is not reset.
+        if (intent.getBooleanExtra("check_update", false)) {
+            intent.removeExtra("check_update")
+            UpdateChecker.check(this, true)
+        }
+
         if (intent.getBooleanExtra("open_main_screen", false)) {
             intent.removeExtra("open_main_screen")
             // Protection: if you are typing right now (the on-screen
@@ -1139,15 +1259,58 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(bgColor())
         }
 
+        applyStatusBarForTheme()
+
         val title = TextView(this).apply {
             text = getString(R.string.app_name)
             textSize = 26f
             setTextColor(Color.WHITE)
+            if (isBlackFamilyTheme()) {
+                val w = paint.measureText(text.toString())
+                paint.shader = android.graphics.LinearGradient(
+                    0f, 0f, w, 0f,
+                    Color.parseColor("#4FD1C5"),
+                    Color.parseColor("#B794F6"),
+                    android.graphics.Shader.TileMode.CLAMP
+                )
+            }
         }
 
         val themeButton = Button(this).apply {
             text = "Switch Theme: ${currentThemeName()}"
-            setOnClickListener { switchTheme() }
+            setOnClickListener { switchTheme(1) }
+        }
+
+        val themePrevButton = Button(this).apply {
+            text = "\u25C0"
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(36, paddingTop, 36, paddingBottom)
+            setOnClickListener { switchTheme(-1) }
+        }
+
+        val themeNextButton = Button(this).apply {
+            text = "\u25B6"
+            minWidth = 0
+            minimumWidth = 0
+            setPadding(36, paddingTop, 36, paddingBottom)
+            setOnClickListener { switchTheme(1) }
+        }
+
+        val themeRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            tag = "theme_row"
+            addView(themePrevButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
+            addView(themeButton, LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            ))
+            addView(themeNextButton, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ))
         }
 
         val selectModeButton = Button(this).apply {
@@ -1682,15 +1845,16 @@ class MainActivity : AppCompatActivity() {
         val sortButton = Button(this).apply {
             text = "Sort: $sortMode"
             setOnClickListener {
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Sort torrents by")
-                    .setItems(TORRENT_SORT_MODES) { _, which ->
-                        sortMode = TORRENT_SORT_MODES[which]
-                        torrentListViewPrefs().edit().putString("sort", sortMode).apply()
-                        scrollToFilterNext = true
-                        showMainScreen()
-                    }
-                    .show()
+                showHighlightChoiceDialog(
+                    "Sort torrents by", TORRENT_SORT_MODES, sortMode,
+                    showCircles = false
+                ) { which ->
+                    sortMode = TORRENT_SORT_MODES[which]
+                    torrentListViewPrefs().edit().putString("sort", sortMode).apply()
+                    // Stay where the screen was (showMainScreen restores the
+                    // scroll position) instead of jumping to the Filter row.
+                    showMainScreen()
+                }
             }
         }
 
@@ -1729,7 +1893,7 @@ class MainActivity : AppCompatActivity() {
         TabIcons.apply(onlineSearchButton, "search")
         TabIcons.apply(webUiButton, "webui")
 
-        root.addView(themeButton)
+        root.addView(themeRow)
         root.addView(selectModeButton)
         root.addView(selectAllButton)
         root.addView(selectNoneButton)
@@ -1850,7 +2014,10 @@ class MainActivity : AppCompatActivity() {
         val titleBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(13, 71, 161))
+            setBackgroundColor(
+                if (isBlackFamilyTheme()) Color.parseColor("#0D1016")
+                else Color.rgb(13, 71, 161)
+            )
             setPadding(32, 40, 96, 40)
             elevation = 12f
 
@@ -1915,10 +2082,14 @@ class MainActivity : AppCompatActivity() {
                 // Installed version, directly under the app name's first letter.
                 // Read from the installed package so it always matches the build.
                 val versionView = TextView(this@MainActivity).apply {
-                    val v = try {
-                        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
-                    } catch (_: Throwable) {
-                        ""
+                    var v = cachedVersionName
+                    if (v == null) {
+                        v = try {
+                            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+                        } catch (_: Throwable) {
+                            ""
+                        }
+                        cachedVersionName = v
                     }
                     text = if (v.isBlank()) "" else "v" + v
                     textSize = 16f
@@ -2465,15 +2636,12 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 val options = SearchFilters.SORT_MODES.toTypedArray()
 
-                AlertDialog.Builder(this@MainActivity)
-                    .setTitle("Sort by")
-                    .setItems(options) { _, which ->
-                        sortMode = options[which]
-                        SearchFilters.saveSortMode(this@MainActivity, sortMode)
-                        text = "Sort: $sortMode"
-                        redraw()
-                    }
-                    .show()
+                showHighlightChoiceDialog("Sort by", options, sortMode) { which ->
+                    sortMode = options[which]
+                    SearchFilters.saveSortMode(this@MainActivity, sortMode)
+                    text = "Sort: $sortMode"
+                    redraw()
+                }
             }
         }
 
@@ -10386,19 +10554,30 @@ class MainActivity : AppCompatActivity() {
 
         listLayout.removeAllViews()
 
-        val status = try {
-            TorrentNative.getDetailedStatus()
-        } catch (e: Exception) {
-            "Engine not ready"
+        val cachedStatus = lastStatusText
+        val reuse = reuseStatusOnce && cachedStatus != null
+        reuseStatusOnce = false
+
+        val status = if (reuse) {
+            cachedStatus!!
+        } else {
+            try {
+                TorrentNative.getDetailedStatus()
+            } catch (e: Exception) {
+                "Engine not ready"
+            }
         }
+        lastStatusText = status
 
         updateMainBottomBar(status)
 
-        if (status == "No torrents" || status == "Engine not ready") {
-            addSpeedSample(0, 0)
-        } else {
-            val speeds = extractTotalSpeedsFromStatus(status)
-            addSpeedSample(speeds.first, speeds.second)
+        if (!reuse) {
+            if (status == "No torrents" || status == "Engine not ready") {
+                addSpeedSample(0, 0)
+            } else {
+                val speeds = extractTotalSpeedsFromStatus(status)
+                addSpeedSample(speeds.first, speeds.second)
+            }
         }
 
         if (status == "No torrents" || status == "Engine not ready") {
@@ -11247,6 +11426,17 @@ class MainActivity : AppCompatActivity() {
     // Shows the time lines (Elapsed / Time active / Seeding time / Time to
     // complete) in purple on the General and Statistics tabs. Display only;
     // the text itself is unchanged.
+    private fun mediumWeight(sb: android.text.SpannableStringBuilder, start: Int, end: Int) {
+        if (android.os.Build.VERSION.SDK_INT >= 28 && end > start) {
+            sb.setSpan(
+                android.text.style.TypefaceSpan(
+                    android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, 600, false)
+                ),
+                start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
+
     private fun highlightTimeLines(text: CharSequence): CharSequence {
         val labels = listOf("Elapsed: ", "Time active: ", "Seeding time: ", "Time to complete: ")
         val out = if (text is android.text.SpannableStringBuilder) {
@@ -11257,6 +11447,7 @@ class MainActivity : AppCompatActivity() {
 
         val color = Color.parseColor("#B794F6")
         var lineStart = 0
+        var inTrackerHosts = false
         val plain = out.toString()
 
         while (lineStart <= plain.length) {
@@ -11272,6 +11463,37 @@ class MainActivity : AppCompatActivity() {
                     lineEnd,
                     android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
                 )
+            }
+
+            // General tab tracker lines: teal labels, the white text a bit
+            // bolder (medium weight; plain white on phones older than Android 9).
+            val trackerLabel = when {
+                line.startsWith("Tracker host: ") -> "Tracker host: "
+                line.startsWith("Tracker URL: ") -> "Tracker URL: "
+                else -> null
+            }
+            if (trackerLabel != null) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(Color.parseColor("#4FD1C5")),
+                    lineStart, lineStart + trackerLabel.length,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                mediumWeight(out, lineStart, lineEnd)
+                inTrackerHosts = false
+            } else if (line.startsWith("All tracker hosts:")) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(Color.parseColor("#4FD1C5")),
+                    lineStart, lineEnd, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                out.setSpan(
+                    android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                    lineStart, lineEnd, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+                inTrackerHosts = true
+            } else if (inTrackerHosts && line.startsWith("\u2022 ")) {
+                mediumWeight(out, lineStart, lineEnd)
+            } else {
+                inTrackerHosts = false
             }
 
             // Status colours for the network lines in Statistics.

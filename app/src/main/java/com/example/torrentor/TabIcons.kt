@@ -487,6 +487,8 @@ object TabIcons {
     }
 
     // Draws the coloured shapes scaled from the 24x24 design box to the bounds.
+    private val pathCache = HashMap<String, Path>()
+
     private class ColorIconDrawable(
         layers: List<Layer>,
         private val sizePx: Int,
@@ -499,9 +501,14 @@ object TabIcons {
 
         private class Shape(val path: Path, val layer: Layer)
 
+        // Parsed once per icon shape and reused: the main screen is rebuilt
+        // on every theme switch, and re-parsing every path made it slow.
         private val shapes: List<Shape> = layers.mapNotNull { layer ->
             try {
-                Shape(PathParser.createPathFromPathData(layer.d), layer)
+                val path = pathCache.getOrPut(layer.d) {
+                    PathParser.createPathFromPathData(layer.d)
+                }
+                Shape(path, layer)
             } catch (e: Throwable) {
                 null
             }
