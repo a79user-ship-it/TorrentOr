@@ -601,6 +601,9 @@ object WebUiServer {
                 method == "GET" && path == "/api/torrent_trackers" ->
                     handleTorrentTrackers(parseQueryParam(query, "index")?.toIntOrNull(), output)
 
+                method == "GET" && path == "/api/tracker_hosts" ->
+                    handleTrackerHosts(output)
+
                 method == "GET" && path == "/api/torrent_webseeds" ->
                     handleTorrentWebSeeds(parseQueryParam(query, "index")?.toIntOrNull(), output)
 
@@ -622,6 +625,20 @@ object WebUiServer {
 
                 method == "GET" && path == "/api/torrent_pieces" ->
                     handleTorrentPieces(parseQueryParam(query, "index")?.toIntOrNull(), output)
+
+                method == "GET" && path == "/api/torrent_piece_availability" -> {
+                    val idx = parseQueryParam(query, "index")?.toIntOrNull()
+                    if (idx == null) {
+                        sendJson(output, "{\"ok\":false,\"error\":\"missing index\"}", status = "400 Bad Request")
+                    } else {
+                        val avail = try {
+                            TorrentNative.getTorrentPieceAvailability(idx)
+                        } catch (_: Throwable) {
+                            ""
+                        }
+                        sendJson(output, "{\"ok\":true,\"avail\":${jsonString(avail)}}")
+                    }
+                }
 
                 method == "GET" && path == "/api/torrent_swarmhealth" ->
                     handleTorrentSwarmHealth(parseQueryParam(query, "index")?.toIntOrNull(), output)
@@ -1055,8 +1072,14 @@ object WebUiServer {
         }
 
         fun formatGiB(bytes: Long): String {
-            val gib = bytes.toDouble() / 1024.0 / 1024.0 / 1024.0
-            return String.format("%.2f GiB", gib)
+            val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+            var value = bytes.toDouble()
+            var unit = 0
+            while (value >= 1024.0 && unit < units.size - 1) {
+                value /= 1024.0
+                unit++
+            }
+            return if (unit == 0) "${bytes} B" else String.format(java.util.Locale.US, "%.2f %s", value, units[unit])
         }
 
         val text = StringBuilder()
@@ -2408,6 +2431,65 @@ object WebUiServer {
         sendJson(output, "{\"ok\":true,\"text\":${jsonString(text)}}")
     }
 
+    // Feature: Tracker Host sidebar - one entry per torrent with the tracker
+    // hosts it uses and whether any tracker is in error / warning. Built
+    // from the same getTorrentTrackerStatus text the app's own panel parses.
+    private val trackerHostRegex =
+        Regex("^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@]*@)?(\\[[^\\]]+\\]|[^/:?#]+)")
+    @Volatile private var trackerHostsJson: String = ""
+    @Volatile private var trackerHostsStamp: Long = 0L
+
+    private fun handleTrackerHosts(output: OutputStream) {
+        val now = System.currentTimeMillis()
+        if (trackerHostsJson.isNotEmpty() && now - trackerHostsStamp < 900L) {
+            sendJson(output, trackerHostsJson)
+            return
+        }
+
+        val raw = try {
+            TorrentNative.getDetailedStatus()
+        } catch (_: Throwable) {
+            ""
+        }
+        val count = if (raw.isBlank() || raw == "No torrents" || raw == "No active torrents") 0 else raw.lines().size
+
+        val sb = StringBuilder("{\"ok\":true,\"items\":[")
+        var first = true
+        for (i in 1..count) {
+            val text = try {
+                TorrentNative.getTorrentTrackerStatus(i)
+            } catch (_: Throwable) {
+                continue
+            }
+            if (!text.startsWith("Tracker Status")) continue
+
+            val hosts = LinkedHashSet<String>()
+            var error = false
+            var warning = false
+            for (block in text.split("URL: ").drop(1)) {
+                val line = block.lineSequence().firstOrNull() ?: continue
+                val host = trackerHostRegex.find(line.trim())?.groupValues?.get(1)?.lowercase(Locale.US) ?: ""
+                if (host.isNotEmpty()) hosts.add(host)
+                val status = block.lineSequence().firstOrNull { it.startsWith("Status: ") }
+                    ?.removePrefix("Status: ")?.trim() ?: ""
+                if (status == "Error / Failed") error = true
+                if (status == "Failing") warning = true
+            }
+
+            if (!first) sb.append(',')
+            first = false
+            sb.append("{\"i\":").append(i).append(",\"h\":[")
+            sb.append(hosts.joinToString(",") { jsonString(it) })
+            sb.append("],\"e\":").append(if (error) 1 else 0)
+            sb.append(",\"w\":").append(if (warning) 1 else 0).append('}')
+        }
+        sb.append("]}")
+
+        trackerHostsJson = sb.toString()
+        trackerHostsStamp = now
+        sendJson(output, trackerHostsJson)
+    }
+
     // Feature: "Web Seeds" tab - mirrors MainActivity's webSeedsButton
     // exactly: getTorrentWebSeeds under a "Web Seeds\n\n" header.
     private fun handleTorrentWebSeeds(torrentIndex: Int?, output: OutputStream) {
@@ -2687,6 +2769,9 @@ object WebUiServer {
         text.append("Created with: ").append(creator).append("\n")
         text.append("Created on: ").append(createdDate).append("\n\n")
         text.append("Status: ").append(state).append("\n")
+        if (state.startsWith("Missing files")) {
+            text.append("Files were deleted or moved. Try Force Recheck, or remove the torrent and add it again.\n")
+        }
         text.append("Progress: ").append(progress).append("\n")
         text.append("Download: ").append(download).append("\n")
         text.append("Upload: ").append(upload).append("\n")
@@ -2697,7 +2782,7 @@ object WebUiServer {
         text.append("Completed: ").append(completedDate).append("\n")
 
         val timeLines = try {
-            TorrentNative.getTorrentTimeLines(torrentIndex)
+            TorrentNative.localiseLastSeen(TorrentNative.getTorrentTimeLines(torrentIndex))
         } catch (_: Throwable) {
             ""
         }
@@ -3814,10 +3899,29 @@ object WebUiServer {
   #statusBar .sbSep { color: #8A93A3; }
   #freeSpace { font-size: 14px; margin: 0 0 8px 0; white-space: pre-line; }
   #freeSpace.low { color: #FF5252; }
+  #trkBtn { background: none; border: none; color: #9AA4B2; font-size: 26px; line-height: 1; padding: 0 10px 0 0; cursor: pointer; vertical-align: middle; }
+  #trkBtn.on { color: #4FD1C5; }
+  #trkTitleRow { display: flex; align-items: center; }
+  #trkTitleRow h1 { margin: 0; }
+  #trkScrim { display: none; position: fixed; inset: 0; background: #0009; z-index: 80; }
+  #trkPanel { position: fixed; top: 0; bottom: 0; left: 0; width: 280px; max-width: 85vw; background: #11151C;
+    border-right: 1px solid rgba(255,255,255,0.12); z-index: 81; overflow-y: auto; transform: translateX(-105%);
+    transition: transform .2s ease; padding: 14px 0; }
+  #trkPanel.open { transform: translateX(0); }
+  #trkPanel h2 { font-size: 18px; margin: 0 16px 10px 16px; color: #4FD1C5; }
+  .trkRow { display: flex; align-items: center; gap: 10px; padding: 11px 16px; cursor: pointer; font-size: 15px; }
+  .trkRow:hover { background: rgba(255,255,255,0.06); }
+  .trkRow.sel { background: #1F4A52; }
+  .trkRow .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trkRow .ct { color: #9AA4B2; }
+  .trkRow svg { flex: none; }
+
 </style>
 </head>
 <body>
-  <h1>TorrentOr</h1>
+  <div id="trkTitleRow"><button id="trkBtn" type="button" aria-label="Tracker hosts">&#9776;</button><h1>TorrentOr</h1></div>
+  <div id="trkScrim"></div>
+  <div id="trkPanel"><h2>Trackers</h2><div id="trkRows"></div></div>
 
   <!-- Feature: the same modern download/upload speed graph as the app's
        main screen (SpeedGraphView) - rounded dark panel, grid, two
@@ -3826,7 +3930,7 @@ object WebUiServer {
        history API, since the app's own graph works the same way. -->
   <div id="speedSummary" class="meta" style="margin-bottom:2px;"></div>
   <div id="freeSpace">Free space: --</div>
-  <canvas id="speedGraphCanvas" width="600" height="110" style="width:100%;height:110px;display:block;margin-bottom:12px;"></canvas>
+  <canvas id="speedGraphCanvas" width="600" height="230" style="width:100%;height:230px;display:block;margin-bottom:12px;"></canvas>
 
   <div class="row">
     <div style="position:relative;flex:1;min-width:200px;display:flex;">
@@ -3946,6 +4050,7 @@ object WebUiServer {
     <button class="secondary" data-filter="Downloading" onclick="setActiveFilter('Downloading')">Downloading</button>
     <button class="secondary" data-filter="Seeding" onclick="setActiveFilter('Seeding')">Seeding</button>
     <button class="secondary" data-filter="Paused" onclick="setActiveFilter('Paused')">Paused</button>
+    <button class="secondary" data-filter="Stalled" onclick="setActiveFilter('Stalled')">Stalled</button>
     <button class="secondary" data-filter="Completed" onclick="setActiveFilter('Completed')">Completed</button>
   </div>
   <div class="row">
@@ -4157,7 +4262,7 @@ object WebUiServer {
   <div class="status" id="statusLine">Loading...</div>
 
 <script>
-const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#4DA3FF",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#4DA3FF",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"settings":[["M12 2.5v3",null,"#90A4AE",3],["M12 18.5v3",null,"#90A4AE",3],["M2.5 12h3",null,"#90A4AE",3],["M18.5 12h3",null,"#90A4AE",3],["M5.3 5.3l2.1 2.1",null,"#90A4AE",3],["M16.6 16.6l2.1 2.1",null,"#90A4AE",3],["M18.7 5.3l-2.1 2.1",null,"#90A4AE",3],["M7.4 16.6l-2.1 2.1",null,"#90A4AE",3],["M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0z",null,"#78909C",3],["M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z","#FFA726",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"stream":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z","#26C6DA",null,0],["M10 7v6l5-3z","#FFFFFF",null,0],["M8 21h8",null,"#26C6DA",2.6],["M12 17v4",null,"#26C6DA",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#4DA3FF","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#4DA3FF",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#4DA3FF",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#4DA3FF",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#4DA3FF",null,0],["M17 2v4",null,"#4DA3FF",1.6],["M15 4h4",null,"#4DA3FF",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]],"addfeed":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0],["M13 18a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M18 15.5v5",null,"#FFFFFF",2],["M15.5 18h5",null,"#FFFFFF",2]],"refresh":[["M20.5 15a9 9 0 1 1-2.1-9.4L22 9",null,"#26A69A",2.6],["M22 3v6h-6",null,"#FFA726",2.6]],"clock":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#E3F2FD","#42A5F5",2],["M12 6.5V12l3.5 2.5",null,"#FFA726",2.4]],"checklist":[["M4.9 8.2L7.4 10.7L11.2 6.4",null,"#22B14C",2.4],["M12.8 8.7H18.8",null,"#42A5F5",2.2],["M7.6 12.9h.01",null,"#42A5F5",2.2],["M10.8 12.9H18.8",null,"#42A5F5",2.2],["M7.6 17.2h.01",null,"#42A5F5",2.2],["M10.8 17.2H18.8",null,"#42A5F5",2.2]],"plus":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M12 7v10",null,"#FFFFFF",2.6],["M7 12h10",null,"#FFFFFF",2.6]],"share":[["M8.6 10.7l6.8-4",null,"#90A4AE",2],["M8.6 13.3l6.8 4",null,"#90A4AE",2],["M15 5a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#42A5F5",null,0],["M3 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#66BB6A",null,0],["M15 19a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#AB47BC",null,0]],"encryption":[["M12 4.5V2.2",null,"#2E7D32",1.4],["M12 19.5v2.3",null,"#2E7D32",1.4],["M4.5 12H2.2",null,"#2E7D32",1.4],["M19.5 12h2.3",null,"#2E7D32",1.4],["M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M4.5 12a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#1E88E5",null,0],["M9.8 11.5V9.8a2.2 2.2 0 0 1 4.4 0V11.5",null,"#FFFFFF",1.8],["M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z","#FFFFFF",null,0],["M12 13.6v1.6",null,"#1E88E5",1.4]]};
+const ICONS = {"general":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M12 11v6",null,"#FFFFFF",2.6],["M12 7h.01",null,"#FFFFFF",3.4]],"files":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M8 13h8",null,"#FFFFFF",2],["M8 17h6",null,"#FFFFFF",2]],"priority":[["M5 3v18",null,"#90A4AE",2.2],["M12 3v18",null,"#90A4AE",2.2],["M19 3v18",null,"#90A4AE",2.2],["M1.8 15a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#EF5350",null,0],["M8.8 8a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#4DA3FF",null,0],["M15.8 14a3.2 3.2 0 1 0 6.4 0a3.2 3.2 0 1 0 -6.4 0z","#42A5F5",null,0]],"peers":[["M14 7a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#90CAF9",null,0],["M13 20v-1a4 4 0 0 1 4-4h1a4 4 0 0 1 4 4v1z","#90CAF9",null,0],["M5.5 8a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0z","#42A5F5",null,0],["M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v2z","#1E88E5",null,0]],"trackers":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#EF5350",null,0],["M6 12a6 6 0 1 0 12 0a6 6 0 1 0 -12 0z","#FFFFFF",null,0],["M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#EF5350",null,0]],"webseeds":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#42A5F5",null,0],["M7 6c2-1 3 1 5 1s1 3-1 3-1 2-3 2-3-2-2-4 1-2 1-2z","#66BB6A",null,0],["M14 14c2 0 4 1 4 3s-2 3-3 3-2-2-2-3 0-3 1-3z","#66BB6A",null,0]],"stalled":[["M7 20V5",null,"#78909C",2.8],["M3 9l4-4 4 4",null,"#78909C",2.8],["M17 4v15",null,"#8BC34A",2.8],["M13 15l4 4 4-4",null,"#8BC34A",2.8]],"swarm":[["M2 12h5l3-8 4 16 3-8h5",null,"#26A69A",2.6]],"pieces":[["M5 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#EF5350",null,0],["M15 3h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#4DA3FF",null,0],["M15 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#66BB6A",null,0],["M5 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1 -2 2h-4a2 2 0 0 1 -2 -2v-4a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"statistics":[["M4.5 11h2a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-7a1.5 1.5 0 0 1 1.5 -1.5z","#42A5F5",null,0],["M11 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M17.5 8h2a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-10a1.5 1.5 0 0 1 1.5 -1.5z","#66BB6A",null,0]],"settings":[["M12 2.5v3",null,"#90A4AE",3],["M12 18.5v3",null,"#90A4AE",3],["M2.5 12h3",null,"#90A4AE",3],["M18.5 12h3",null,"#90A4AE",3],["M5.3 5.3l2.1 2.1",null,"#90A4AE",3],["M16.6 16.6l2.1 2.1",null,"#90A4AE",3],["M18.7 5.3l-2.1 2.1",null,"#90A4AE",3],["M7.4 16.6l-2.1 2.1",null,"#90A4AE",3],["M5.5 12a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0z",null,"#78909C",3],["M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z","#FFA726",null,0]],"comment":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10l-5 4.5V17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#FFB300",null,0],["M7 8h10",null,"#FFFFFF",2],["M7 12h6",null,"#FFFFFF",2]],"pause":[["M6.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0],["M15.5 3h2a1.5 1.5 0 0 1 1.5 1.5v15a1.5 1.5 0 0 1 -1.5 1.5h-2a1.5 1.5 0 0 1 -1.5 -1.5v-15a1.5 1.5 0 0 1 1.5 -1.5z","#FFA726",null,0]],"play":[["M7 4.5v15l13-7.5z","#66BB6A","#66BB6A",2.4]],"stream":[["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z","#26C6DA",null,0],["M10 7v6l5-3z","#FFFFFF",null,0],["M8 21h8",null,"#26C6DA",2.6],["M12 17v4",null,"#26C6DA",2.4]],"select":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#66BB6A",null,0],["M7.5 12.5l3 3 6-7",null,"#FFFFFF",2.6]],"trash":[["M5 8h14l-1 12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z","#EF5350",null,0],["M3 5h18",null,"#B0BEC5",2.6],["M9 5V3.5A1.5 1.5 0 0 1 10.5 2h3A1.5 1.5 0 0 1 15 3.5V5",null,"#B0BEC5",2.2],["M10 11v6",null,"#FFFFFF",1.8],["M14 11v6",null,"#FFFFFF",1.8]],"portfwd":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#FFA726",null,0],["M7 12h9",null,"#FFFFFF",2.4],["M12.5 8l4 4-4 4",null,"#FFFFFF",2.4]],"network":[["M2.5 9.5a14 14 0 0 1 19 0",null,"#90CAF9",2.4],["M5.5 13a9.5 9.5 0 0 1 13 0",null,"#42A5F5",2.4],["M8.8 16.2a5 5 0 0 1 6.4 0",null,"#1E88E5",2.4],["M10.1 19.8a1.9 1.9 0 1 0 3.8 0a1.9 1.9 0 1 0 -3.8 0z","#1E88E5",null,0]],"connection":[["M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",null,"#42A5F5",2.6],["M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",null,"#FFA726",2.6]],"speed":[["M13 2L4 14h7l-1 8 10-12h-7l1-8z","#4DA3FF","#FFA000",1]],"storage":[["M5 6h14a3 3 0 0 1 3 3v6a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-6a3 3 0 0 1 3 -3z","#78909C",null,0],["M2 12V9a3 3 0 0 1 3-3h14a3 3 0 0 1 3 3v3z","#B0BEC5",null,0],["M5.9 15.2a1.1 1.1 0 1 0 2.2 0a1.1 1.1 0 1 0 -2.2 0z","#66BB6A",null,0],["M10.5 15.2h6",null,"#CFD8DC",1.8]],"folder":[["M2 6a2 2 0 0 1 2-2h5l2 2.5h9a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#FFA726",null,0],["M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z","#4DA3FF",null,0]],"rss":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0]],"log":[["M5 4h14a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-10a3 3 0 0 1 3 -3z","#37474F",null,0],["M6 9l3.5 3L6 15",null,"#66BB6A",2.2],["M12 16h6",null,"#B0BEC5",2.2]],"search":[["M3 10.5a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#E3F2FD","#42A5F5",2.6],["M16 16l5.5 5.5",null,"#EF5350",3]],"webui":[["M4 3h16a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2z","#5C6BC0",null,0],["M5 5h14a1 1 0 0 1 1 1v7a1 1 0 0 1 -1 1h-14a1 1 0 0 1 -1 -1v-7a1 1 0 0 1 1 -1z","#E8EAF6",null,0],["M12 16v4",null,"#7986CB",2.4],["M8 21h8",null,"#7986CB",2.6]],"magnet":[["M5 5v7a7 7 0 0 0 14 0V5",null,"#EF5350",4.6],["M5 4.5v3.2",null,"#B0BEC5",4.6],["M19 4.5v3.2",null,"#B0BEC5",4.6],["M10.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6],["M14.2 1.5l-1.6 3h2l-1.2 3",null,"#4DA3FF",1.6]],"recheck":[["M4 12a8 8 0 0 1 14-5.3",null,"#42A5F5",2.6],["M18.5 3v4.5H14",null,"#42A5F5",2.6],["M20 12a8 8 0 0 1-14 5.3",null,"#66BB6A",2.6],["M5.5 21v-4.5H10",null,"#66BB6A",2.6]],"reannounce":[["M22 2L2 9.5l7.5 3 3 7.5z","#42A5F5",null,0],["M22 2L9.5 12.5l3 7.5z","#1E88E5",null,0]],"sort":[["M3 6h18",null,"#EF5350",3],["M3 12h13",null,"#FFA726",3],["M3 18h8",null,"#66BB6A",3]],"filter":[["M3 4h18l-7 8.5V20l-4-2v-5.5z","#AB47BC",null,0]],"list":[["M9 6h12",null,"#90A4AE",2.4],["M9 12h12",null,"#90A4AE",2.4],["M9 18h12",null,"#90A4AE",2.4],["M2.8 6a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#EF5350",null,0],["M2.8 12a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#4DA3FF",null,0],["M2.8 18a1.7 1.7 0 1 0 3.4 0a1.7 1.7 0 1 0 -3.4 0z","#66BB6A",null,0]],"download":[["M12 3v12",null,"#42A5F5",3],["M6.5 10l5.5 5.5 5.5-5.5",null,"#42A5F5",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"upload":[["M12 15V3",null,"#66BB6A",3],["M6.5 8.5L12 3l5.5 5.5",null,"#66BB6A",3],["M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3",null,"#78909C",2.6]],"check":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M7 12.5l3.5 3.5 6.5-7",null,"#FFFFFF",2.8]],"copy":[["M5 3h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#90CAF9",null,0],["M11 9h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2z","#42A5F5",null,0]],"hash":[["M4 9h16",null,"#FFA726",2.6],["M4 15h16",null,"#FFA726",2.6],["M10 3L8 21",null,"#AB47BC",2.6],["M16 3l-2 18",null,"#AB47BC",2.6]],"sequential":[["M5 6l6 6-6 6",null,"#90CAF9",3],["M12 6l6 6-6 6",null,"#1E88E5",3]],"flag":[["M5 22V3",null,"#78909C",2.6],["M5 4h14l-3 4.5 3 4.5H5z","#EF5350",null,0]],"edit":[["M15.5 4.5l4 4L8 20l-4-4z","#4DA3FF",null,0],["M15.5 4.5l2-2a2.1 2.1 0 0 1 3 0l1 1a2.1 2.1 0 0 1 0 3l-2 2z","#EF5350",null,0],["M4 16l4 4-5 1z","#8D6E63",null,0]],"save":[["M5 3h12l4 4v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z","#42A5F5",null,0],["M7 3h8v6H7z","#E3F2FD",null,0],["M7 14h10v7H7z","#E3F2FD",null,0],["M12 4.5v3",null,"#1E88E5",1.8]],"back":[["M20 12H5",null,"#FFA726",3],["M11 5l-7 7 7 7",null,"#FFA726",3]],"theme":[["M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z","#4DA3FF",null,0],["M17 2v4",null,"#4DA3FF",1.6],["M15 4h4",null,"#4DA3FF",1.6]],"selectall":[["M2 13l4 4 8-9",null,"#66BB6A",2.8],["M10 15l2 2 9-11",null,"#42A5F5",2.8]],"selectnone":[["M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12a3 3 0 0 1 3 -3z","#EF5350",null,0],["M9 9l6 6",null,"#FFFFFF",2.4],["M15 9l-6 6",null,"#FFFFFF",2.4]],"addfile":[["M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z","#64B5F6",null,0],["M14 2v6h6z","#1E88E5",null,0],["M11.5 17a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M16.5 14.5v5",null,"#FFFFFF",2],["M14 17h5",null,"#FFFFFF",2]],"addfeed":[["M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1 -5 5h-10a5 5 0 0 1 -5 -5v-10a5 5 0 0 1 5 -5z","#FFA726",null,0],["M6.5 11a6.5 6.5 0 0 1 6.5 6.5",null,"#FFFFFF",2.2],["M6.5 6a11.5 11.5 0 0 1 11.5 11.5",null,"#FFFFFF",2.2],["M5.7 17a1.8 1.8 0 1 0 3.6 0a1.8 1.8 0 1 0 -3.6 0z","#FFFFFF",null,0],["M13 18a5 5 0 1 0 10 0a5 5 0 1 0 -10 0z","#66BB6A",null,0],["M18 15.5v5",null,"#FFFFFF",2],["M15.5 18h5",null,"#FFFFFF",2]],"refresh":[["M20.5 15a9 9 0 1 1-2.1-9.4L22 9",null,"#26A69A",2.6],["M22 3v6h-6",null,"#FFA726",2.6]],"clock":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#E3F2FD","#42A5F5",2],["M12 6.5V12l3.5 2.5",null,"#FFA726",2.4]],"checklist":[["M4.9 8.2L7.4 10.7L11.2 6.4",null,"#22B14C",2.4],["M12.8 8.7H18.8",null,"#42A5F5",2.2],["M7.6 12.9h.01",null,"#42A5F5",2.2],["M10.8 12.9H18.8",null,"#42A5F5",2.2],["M7.6 17.2h.01",null,"#42A5F5",2.2],["M10.8 17.2H18.8",null,"#42A5F5",2.2]],"plus":[["M2 12a10 10 0 1 0 20 0a10 10 0 1 0 -20 0z","#66BB6A",null,0],["M12 7v10",null,"#FFFFFF",2.6],["M7 12h10",null,"#FFFFFF",2.6]],"share":[["M8.6 10.7l6.8-4",null,"#90A4AE",2],["M8.6 13.3l6.8 4",null,"#90A4AE",2],["M15 5a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#42A5F5",null,0],["M3 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#66BB6A",null,0],["M15 19a3 3 0 1 0 6 0a3 3 0 1 0 -6 0z","#AB47BC",null,0]],"encryption":[["M12 4.5V2.2",null,"#2E7D32",1.4],["M12 19.5v2.3",null,"#2E7D32",1.4],["M4.5 12H2.2",null,"#2E7D32",1.4],["M19.5 12h2.3",null,"#2E7D32",1.4],["M10.5 2a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M10.5 22a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M0.7 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M20.3 12a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0 -3 0z","#2E7D32",null,0],["M4.5 12a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z","#1E88E5",null,0],["M9.8 11.5V9.8a2.2 2.2 0 0 1 4.4 0V11.5",null,"#FFFFFF",1.8],["M8.5 11.5h7a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-7a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1z","#FFFFFF",null,0],["M12 13.6v1.6",null,"#1E88E5",1.4]]};
 function iconSvg(name) {
   const layers = ICONS[name];
   if (!layers) return '';
@@ -4185,7 +4290,7 @@ function setBtnLabel(btn, iconName, label) {
     saveFolderBtn: ['folder', 'Save Folder'],
     uploadBtn: ['addfile', 'Upload .torrent']
   };
-  const filterIcons = { All: 'list', Downloading: 'download', Seeding: 'upload', Paused: 'pause', Completed: 'check' };
+  const filterIcons = { All: 'list', Downloading: 'download', Seeding: 'upload', Paused: 'pause', Stalled: 'stalled', Completed: 'check' };
   document.querySelectorAll('[data-filter]').forEach(function(btn) {
     setBtnLabel(btn, filterIcons[btn.dataset.filter] || 'list', btn.textContent);
   });
@@ -4626,13 +4731,16 @@ function torrentMatchesFilter(t) {
   const query = torrentSearchQuery.trim().toLowerCase();
   if (query && t.name.toLowerCase().indexOf(query) === -1) return false;
 
+  if (!trackerMatches(t)) return false;
+
   const state = (t.state || '').toLowerCase();
   const percent = t.percent || 0;
 
   switch (activeFilter) {
     case 'Downloading': return state.indexOf('downloading') !== -1;
     case 'Seeding': return state.indexOf('seeding') !== -1;
-    case 'Paused': return state.indexOf('paused') !== -1;
+    case 'Paused': return state.indexOf('paused') !== -1 || state.indexOf('missing files') !== -1;
+    case 'Stalled': return state.indexOf('stalled') !== -1;
     case 'Completed': return percent >= 100 || state.indexOf('seeding') !== -1;
     default: return true;
   }
@@ -4681,6 +4789,126 @@ document.getElementById('sortModeSelect').addEventListener('change', function(e)
   render(lastTorrents);
 });
 
+// ---- Tracker Host sidebar (same behaviour as the app's tracker panel) ----
+let trackerInfo = {};          // native index -> {h:[hosts], e, w}
+let trackerFilter = null;      // null | '#trackerless' | '#error' | '#warning' | host
+try { trackerFilter = localStorage.getItem('tracker_filter') || null; } catch (e) {}
+let trkOpen = false;
+let trkLastFetch = 0;
+let trkFetching = false;
+
+function trackerMatches(t) {
+  if (!trackerFilter) return true;
+  const info = trackerInfo[t.index];
+  if (!info) return false;
+  if (trackerFilter === '#trackerless') return info.h.length === 0;
+  if (trackerFilter === '#error') return !!info.e;
+  if (trackerFilter === '#warning') return !!info.w;
+  return info.h.indexOf(trackerFilter) !== -1;
+}
+
+function trkPin(color) {
+  return '<svg width="18" height="18" viewBox="0 0 24 24"><path fill="' + color + '" d="M12 2a7 7 0 0 0-7 7c0 5 7 13 7 13s7-8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.500a2.5 2.5 0 0 1 0 5z"/></svg>';
+}
+
+function setTrackerFilter(f) {
+  trackerFilter = f;
+  try {
+    if (f) localStorage.setItem('tracker_filter', f); else localStorage.removeItem('tracker_filter');
+  } catch (e) {}
+  document.getElementById('trkBtn').classList.toggle('on', !!f);
+  renderTrackerPanel();
+  render(lastTorrents);
+}
+
+function renderTrackerPanel() {
+  const counts = { all: 0, none: 0, err: 0, warn: 0 };
+  const hosts = {};
+  lastTorrents.forEach(function(t) {
+    counts.all++;
+    const info = trackerInfo[t.index];
+    if (!info) return;
+    if (info.h.length === 0) counts.none++;
+    if (info.e) counts.err++;
+    if (info.w) counts.warn++;
+    info.h.forEach(function(h) { hosts[h] = (hosts[h] || 0) + 1; });
+  });
+  if (trackerFilter && trackerFilter.charAt(0) !== '#' && !hosts[trackerFilter] && Object.keys(trackerInfo).length > 0) {
+    trackerFilter = null;
+    try { localStorage.removeItem('tracker_filter'); } catch (e) {}
+    document.getElementById('trkBtn').classList.remove('on');
+    render(lastTorrents);
+  }
+  function row(key, color, label, n) {
+    const sel = (trackerFilter === key) || (key === null && !trackerFilter);
+    return '<div class="trkRow' + (sel ? ' sel' : '') + '" data-key="' + (key === null ? '' : escapeHtml(key)) + '">' +
+      trkPin(color) + '<span class="nm">' + escapeHtml(label) + '</span><span class="ct">(' + n + ')</span></div>';
+  }
+  let html = row(null, '#CFD8DC', 'All', counts.all) +
+    row('#trackerless', '#78909C', 'Trackerless', counts.none) +
+    row('#error', '#EF5350', 'Tracker error', counts.err) +
+    row('#warning', '#FFA726', 'Warning', counts.warn);
+  Object.keys(hosts).sort().forEach(function(h) { html += row(h, '#42A5F5', h, hosts[h]); });
+  document.getElementById('trkRows').innerHTML = html;
+}
+
+async function fetchTrackerHosts() {
+  if (trkFetching) return;
+  trkFetching = true;
+  try {
+    const r = await fetch('/api/tracker_hosts');
+    const j = await r.json();
+    if (j && j.ok) {
+      const m = {};
+      j.items.forEach(function(it) { m[it.i] = { h: it.h, e: it.e, w: it.w }; });
+      trackerInfo = m;
+      trkLastFetch = Date.now();
+      renderTrackerPanel();
+      if (trackerFilter) render(lastTorrents);
+    }
+  } catch (e) {}
+  trkFetching = false;
+}
+
+function openTrackerPanel(open) {
+  trkOpen = open;
+  document.getElementById('trkPanel').classList.toggle('open', open);
+  document.getElementById('trkScrim').style.display = open ? 'block' : 'none';
+  if (open) { renderTrackerPanel(); fetchTrackerHosts(); }
+}
+
+document.getElementById('trkBtn').addEventListener('click', function() { openTrackerPanel(!trkOpen); });
+document.getElementById('trkScrim').addEventListener('click', function() { openTrackerPanel(false); });
+document.getElementById('trkRows').addEventListener('click', function(ev) {
+  let el = ev.target;
+  while (el && !(el.classList && el.classList.contains('trkRow'))) el = el.parentNode;
+  if (!el) return;
+  const key = el.getAttribute('data-key');
+  setTrackerFilter(key ? key : null);
+  openTrackerPanel(false);
+  const listEl = document.getElementById('list');
+  if (listEl && listEl.scrollIntoView) listEl.scrollIntoView({ block: 'start', behavior: 'smooth' });
+});
+// swipe in from the left edge
+(function() {
+  let sx = null, sy = 0;
+  document.addEventListener('touchstart', function(e) {
+    const t = e.touches[0];
+    sx = (t.clientX < 24) ? t.clientX : null; sy = t.clientY;
+  }, { passive: true });
+  document.addEventListener('touchend', function(e) {
+    if (sx === null) return;
+    const t = e.changedTouches[0];
+    if (t.clientX - sx > 60 && Math.abs(t.clientY - sy) < 50) openTrackerPanel(true);
+    sx = null;
+  }, { passive: true });
+})();
+document.getElementById('trkBtn').classList.toggle('on', !!trackerFilter);
+setInterval(function() {
+  if (Date.now() - trkLastFetch > (trkOpen ? 900 : 20000)) fetchTrackerHosts();
+}, 1000);
+fetchTrackerHosts();
+
 function render(torrents) {
   lastTorrents = torrents;
   // Don't rebuild the cards in the middle of a long-press, or the touch
@@ -4705,13 +4933,27 @@ function render(torrents) {
           ' onchange="toggleTorrentSelected(' + t.index + ', this.checked)"> Select</label>'
       : '';
 
+    const stLow = String(t.state || '').toLowerCase();
+    const isMissing = stLow.indexOf('missing files') === 0;
+    const isStalled = stLow.indexOf('stalled') === 0;
+    const dangerIcon = isMissing
+      ? '<span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#E53935;color:#fff;font-size:12px;font-weight:bold;text-align:center;line-height:16px;margin-right:6px;vertical-align:middle;">!</span>'
+      : '';
+    const stateHtml = isMissing
+      ? '<span style="color:#FF5252;font-weight:bold;">' + escapeHtml(t.state) + '</span>'
+      : (isStalled ? '<span style="color:#FFC107;font-weight:bold;">' + escapeHtml(t.state) + '</span>' : escapeHtml(t.state));
+    const missingHint = isMissing
+      ? '<div class="meta" style="color:#FFC107;">Files were deleted or moved. Try Force Recheck.</div>'
+      : '';
+
     return '<div class="card" data-tindex="' + t.index + '">' +
       checkbox +
-      '<div class="name">' + escapeHtml(t.name) + '</div>' +
-      '<div class="meta">' + escapeHtml(t.state) + ' &middot; ' + fmtPct(t.percent) + ' &middot; &darr; ' +
+      '<div class="name">' + dangerIcon + escapeHtml(t.name) + '</div>' +
+      '<div class="meta">' + stateHtml + ' &middot; ' + fmtPct(t.percent) + ' &middot; &darr; ' +
         escapeHtml(t.downSpeed) + ' &middot; &uarr; ' + escapeHtml(t.upSpeed) + ' &middot; ' + escapeHtml(t.size) + '</div>' +
       '<div class="meta">Seeds ' + escapeHtml(t.seeds) + ' &middot; Peers ' + escapeHtml(t.peers) +
         ' &middot; ' + escapeHtml(t.eta) + '</div>' +
+      missingHint +
       '<div class="bar"><div class="fill" style="width:' + (Number(t.percent) >= 100 ? 0 : t.percent) + '%"></div><span class="barText">' + fmtPct(t.percent) + '</span></div>' +
       '<div class="actions">' +
         '<button onclick="doAction(\'pause\', ' + t.index + ')">' + iconSvg('pause') + 'Pause</button>' +
@@ -6744,10 +6986,10 @@ function renderFilesPanel() {
   } else if (openFilesTab === 'pieces') {
     body = '<pre id="tabText" style="white-space:pre-wrap;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>' +
       '<div class="meta" style="margin-top:8px;">' +
-        '<span style="color:#4DA3FF;">&#9632;</span> downloaded &nbsp; ' +
-        '<span style="color:#4CD964;">&#9632;</span> downloading &nbsp; ' +
-        '<span style="color:#6B7686;">&#9632;</span> missing &nbsp; ' +
-        '<span style="color:#2C3442;">&#9632;</span> skipped (file not selected)' +
+        '<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#4DA3FF;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> downloaded &nbsp; ' +
+        '<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#4CD964;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> downloading &nbsp; ' +
+        '<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#6B7686;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> missing &nbsp; ' +
+        '<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#2C3442;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> skipped (file not selected)' +
       '</div>' +
       '<canvas id="piecesCanvas" width="600" height="10" style="width:100%;display:block;margin-top:6px;"></canvas>';
   } else if (textTabEndpoints[openFilesTab]) {
@@ -6756,7 +6998,11 @@ function renderFilesPanel() {
     const generalBar = (openFilesTab === 'general')
       ? '<div id="generalBarBox" style="display:none;margin-bottom:8px;">' +
           '<div class="meta" style="margin-bottom:4px;">Progress</div>' +
-          '<canvas id="generalPieceBar" width="600" height="24" style="width:100%;height:24px;display:block;"></canvas>' +
+          '<canvas id="generalPieceBar" width="600" height="34" style="width:100%;height:34px;display:block;"></canvas>' +
+          '<div class="meta" style="margin:4px 0 0;font-size:12px;"><span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#2EA8FF;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> Have&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#00FF6A;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> Downloading&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#242B33;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> Missing</div>' +
+          '<div class="meta" style="margin:10px 0 4px;">Availability</div>' +
+          '<canvas id="generalAvailBar" width="600" height="34" style="width:100%;height:34px;display:block;"></canvas>' +
+          '<div class="meta" style="margin:4px 0 0;font-size:12px;"><span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#FF0030;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> No peers&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#D500FF;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> Some peers&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="display:inline-block;width:9px;height:9px;margin:0 8px 0 7px;background:#00E1FF;outline:1.5px dashed #ECEFF1;outline-offset:3px;"></span> Most peers</div>' +
         '</div>'
       : '';
     body = generalBar + '<pre id="tabText" style="white-space:pre-wrap;max-height:360px;overflow:auto;background:#0003;padding:8px;border-radius:6px;">Loading...</pre>';
@@ -7260,10 +7506,87 @@ async function loadGeneralPieceBar(index) {
     if (data.ok && data.states) {
       box.style.display = 'block';
       drawGeneralPieceBar(data.states);
+      loadGeneralAvailBar(index);
     } else {
-      box.style.display = 'none';
+      // Metadata not known yet (magnet with no peers): empty bars.
+      box.style.display = 'block';
+      drawGeneralPieceBar('');
+      drawGeneralAvailBar('');
     }
   } catch (e) {}
+}
+
+async function loadGeneralAvailBar(index) {
+  try {
+    const res = await api('/api/torrent_piece_availability?index=' + index);
+    const data = await res.json();
+    if (openFilesIndex !== index || openFilesTab !== 'general') return;
+    if (data.ok) drawGeneralAvailBar(data.avail || '');
+  } catch (e) {}
+}
+
+// Availability: pixel average scaled between the torrent's lowest and
+// highest peer count, red (none) -> purple -> bright blue (most).
+function drawGeneralAvailBar(avail) {
+  const canvas = document.getElementById('generalAvailBar');
+  if (!canvas) return;
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor((canvas.clientWidth || 300) * dpr);
+  const h = Math.floor(34 * dpr);
+  canvas.width = w;
+  canvas.height = h;
+
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+
+  function val(c) {
+    const code = c.charCodeAt(0);
+    if (code >= 48 && code <= 57) return code - 48;
+    if (code >= 97 && code <= 122) return code - 97 + 10;
+    return 0;
+  }
+
+  const LOW = [255, 0, 48], MID = [213, 0, 255], HIGH = [0, 225, 255];
+  function scale(t) {
+    const a = t < 0.5 ? LOW : MID;
+    const b = t < 0.5 ? MID : HIGH;
+    const f = t < 0.5 ? t / 0.5 : (t - 0.5) / 0.5;
+    return 'rgb(' + [0, 1, 2].map(function(k) { return Math.round(a[k] + (b[k] - a[k]) * f); }).join(',') + ')';
+  }
+
+  const n = avail.length;
+  let max = 0;
+  let minPos = 1000;
+  for (let i = 0; i < n; i++) {
+    const v = val(avail.charAt(i));
+    if (v > max) max = v;
+    if (v > 0 && v < minPos) minPos = v;
+  }
+  const floor = max > 0 ? minPos * 0.6 : 0;
+
+  if (n > 0 && w > 0) {
+    for (let x = 0; x < w; x++) {
+      const from = Math.floor(x * n / w);
+      let to = Math.floor((x + 1) * n / w);
+      if (to <= from) to = from + 1;
+      if (to > n) to = n;
+      let sum = 0;
+      for (let i = from; i < to; i++) sum += val(avail.charAt(i));
+      const avg = sum / (to - from);
+      const t = (max <= 0 || avg <= 0) ? 0 : Math.min(1, Math.max(0, (avg - floor) / (max - floor)));
+      ctx.fillStyle = scale(t);
+      ctx.fillRect(x, 0, 1, h);
+    }
+  } else {
+    ctx.fillStyle = scale(0);
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  ctx.strokeStyle = '#ECEFF1';
+  ctx.lineWidth = 2 * dpr;
+  ctx.strokeRect(dpr, dpr, w - 2 * dpr, h - 2 * dpr);
 }
 
 function drawGeneralPieceBar(states) {
@@ -7272,18 +7595,21 @@ function drawGeneralPieceBar(states) {
 
   const dpr = window.devicePixelRatio || 1;
   const cssW = canvas.clientWidth || 300;
-  const cssH = 24;
+  const cssH = 34;
   const w = Math.floor(cssW * dpr);
   const h = Math.floor(cssH * dpr);
   canvas.width = w;
   canvas.height = h;
 
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = 'rgb(6,26,61)';
+  // have = bright blue, downloading = neon green, missing = grey.
+  const HAVE = [46, 168, 255], DL = [0, 255, 106];
+  ctx.fillStyle = 'rgb(36,43,51)';
   ctx.fillRect(0, 0, w, h);
 
   const n = states.length;
   if (n > 0 && w > 0) {
+    const cols = new Array(w).fill(null);
     for (let x = 0; x < w; x++) {
       const from = Math.floor(x * n / w);
       let to = Math.floor((x + 1) * n / w);
@@ -7291,28 +7617,33 @@ function drawGeneralPieceBar(states) {
       if (to > n) to = n;
 
       let have = 0;
-      let downloading = false;
+      let downloading = 0;
       for (let i = from; i < to; i++) {
         const c = states.charAt(i);
         if (c === '2') have++;
-        else if (c === '1') downloading = true;
+        else if (c === '1') downloading++;
       }
-      const count = to - from;
+      if (have === 0 && downloading === 0) continue;
 
-      if (downloading) {
-        ctx.fillStyle = 'rgb(61,220,74)';
-      } else if (have === count) {
-        ctx.fillStyle = 'rgb(47,127,214)';
-      } else if (have > 0) {
-        ctx.fillStyle = 'rgba(47,127,214,' + ((60 + 195 * have / count) / 255) + ')';
-      } else {
-        continue;
-      }
+      const count = to - from;
+      const a = have / count;
+      const b = downloading / count;
+      const rgb = [0, 1, 2].map(function(k) {
+        return Math.round(Math.max(HAVE[k] * a, DL[k] * b));
+      });
+      cols[x] = 'rgb(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ')';
+    }
+    // Lit pixels are widened by one pixel each side so single pieces show.
+    for (let x = 0; x < w; x++) {
+      if (!cols[x]) continue;
+      ctx.fillStyle = cols[x];
       ctx.fillRect(x, 0, 1, h);
+      if (x > 0 && !cols[x - 1]) ctx.fillRect(x - 1, 0, 1, h);
+      if (x < w - 1 && !cols[x + 1]) ctx.fillRect(x + 1, 0, 1, h);
     }
   }
 
-  ctx.strokeStyle = 'rgb(27,63,134)';
+  ctx.strokeStyle = '#ECEFF1';
   ctx.lineWidth = 2 * dpr;
   ctx.strokeRect(dpr, dpr, w - 2 * dpr, h - 2 * dpr);
 }
@@ -7728,6 +8059,78 @@ document.getElementById('resumeAllBtn').addEventListener('click', async function
 
 refresh();
 setInterval(refresh, 1000);
+
+// Keep the open screen across a page reload: a torrent's panel (with its
+// tab), or Global Statistics, Storage, Execution Log, Notifications,
+// Backup, Online Search, Save Folder or RSS. Remembered in this browser
+// tab only (sessionStorage) and restored once, right after the page starts.
+const VIEW_KEY = 'torrentor_wui_view';
+const VIEW_PANELS = [
+  ['globalStatsPanel', 'openGlobalStats'],
+  ['storagePanel', 'openStorage'],
+  ['executionLogPanel', 'openExecutionLog'],
+  ['notificationsPanel', 'openNotifications'],
+  ['backupPanel', 'openBackup'],
+  ['onlineSearchPanel', 'openOnlineSearch'],
+  ['saveFolderPanel', 'openSaveFolder'],
+  ['rssPanel', 'openRss']
+];
+let viewRestoreDone = false;
+
+function currentViewState() {
+  if (openFilesIndex !== null) {
+    return { kind: 'torrent', index: openFilesIndex, tab: openFilesTab, y: window.scrollY || 0 };
+  }
+  for (let i = 0; i < VIEW_PANELS.length; i++) {
+    const el = document.getElementById(VIEW_PANELS[i][0]);
+    if (el && el.style.display === 'block') {
+      return { kind: 'panel', fn: VIEW_PANELS[i][1], y: window.scrollY || 0 };
+    }
+  }
+  return null;
+}
+
+function saveViewState() {
+  if (!viewRestoreDone) return;
+  try {
+    const v = currentViewState();
+    if (v) sessionStorage.setItem(VIEW_KEY, JSON.stringify(v));
+    else sessionStorage.removeItem(VIEW_KEY);
+  } catch (e) {}
+}
+setInterval(saveViewState, 400);
+window.addEventListener('pagehide', saveViewState);
+
+async function restoreViewState() {
+  try {
+    const raw = sessionStorage.getItem(VIEW_KEY);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && v.kind === 'torrent' && typeof v.index === 'number' && openFilesIndex === null) {
+        await toggleFiles(v.index);
+        if (v.tab && v.tab !== 'files' && openFilesIndex === v.index) switchFilesTab(v.tab);
+      } else if (v && v.kind === 'panel' && typeof window[v.fn] === 'function') {
+        window[v.fn]();
+      }
+      if (v && v.y) setTimeout(function() { window.scrollTo(0, v.y); }, 700);
+    }
+  } catch (e) {}
+  viewRestoreDone = true;
+}
+// Old saved format (no kind) is treated as a torrent panel.
+(function() {
+  try {
+    const raw = sessionStorage.getItem(VIEW_KEY);
+    if (raw) {
+      const v = JSON.parse(raw);
+      if (v && !v.kind && typeof v.index === 'number') {
+        v.kind = 'torrent';
+        sessionStorage.setItem(VIEW_KEY, JSON.stringify(v));
+      }
+    }
+  } catch (e) {}
+})();
+setTimeout(restoreViewState, 300);
 
 const AUTO_ICONS = {
   'Refresh': 'refresh', 'Refresh All': 'refresh',

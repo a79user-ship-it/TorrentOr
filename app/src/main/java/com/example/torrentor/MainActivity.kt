@@ -75,6 +75,20 @@ class MainActivity : AppCompatActivity() {
     // their declared defaults). Both are now persisted - see
     // torrentListViewPrefs() - and reloaded once in onCreate().
     private var activeFilter = "All"
+
+    // Tracker Host panel (slides in from the left). null = All trackers.
+    private val TRACKERLESS_KEY = "\u0001trackerless"
+    private val TRACKER_ERROR_KEY = "\u0001error"
+    private val TRACKER_WARNING_KEY = "\u0001warning"
+    private var trackerFilter: String? = null
+    private val trackerInfo = java.util.concurrent.ConcurrentHashMap<Int, TrackerInfo>()
+    private var trackerInfoStamp = 0L
+    private var trackerInfoCount = -1
+    private val trackerRefreshing = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var trackerDrawerOpen = false
+    private var trackerDrawerClose: (() -> Unit)? = null
+    private var trackerDrawerRebuild: (() -> Unit)? = null
+    private var hamburgerView: TextView? = null
     private var searchQuery = ""
 
     // Bug fix: the phone's own Back button (hardware key or gesture) used
@@ -121,6 +135,8 @@ class MainActivity : AppCompatActivity() {
     private var currentDetailsContentText: TextView? = null
     private var currentDetailsPieceBox: LinearLayout? = null
     private var currentDetailsPieceBar: PieceBarView? = null
+    private var currentDetailsAvailBar: AvailabilityBarView? = null
+    private var currentDetailsAvailLabel: TextView? = null
     private var currentDetailsFileListLayout: LinearLayout? = null
 
     // Files tab state. The tick boxes the user has changed but not applied yet
@@ -662,6 +678,7 @@ class MainActivity : AppCompatActivity() {
         // the fields above are declared with (see torrentListViewPrefs()).
         val listViewPrefs = torrentListViewPrefs()
         activeFilter = listViewPrefs.getString("filter", "All") ?: "All"
+        trackerFilter = listViewPrefs.getString("tracker_filter", null)
         sortMode = listViewPrefs.getString("sort", "None") ?: "None"
 
         // Start TorrentService every time the app opens.
@@ -676,7 +693,9 @@ class MainActivity : AppCompatActivity() {
         // main screen itself, Back keeps its normal behavior (exit).
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (isOnMainScreen && selectMode) {
+                if (isOnMainScreen && trackerDrawerOpen) {
+                    trackerDrawerClose?.invoke()
+                } else if (isOnMainScreen && selectMode) {
                     // Back closes selection first, like the X in the bar.
                     selectMode = false
                     selectedTorrents.clear()
@@ -1669,7 +1688,7 @@ class MainActivity : AppCompatActivity() {
             // to separate it from whatever comes next in the layout.
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                360
+                800
             ).apply {
                 setMargins(0, 0, 0, 16)
             }
@@ -1818,6 +1837,7 @@ class MainActivity : AppCompatActivity() {
                         "Downloading" -> "download"
                         "Seeding" -> "upload"
                         "Paused" -> "pause"
+                        "Stalled" -> "stalled"
                         "Completed" -> "check"
                         else -> "list"
                     },
@@ -1840,6 +1860,7 @@ class MainActivity : AppCompatActivity() {
         filterRowOne.addView(makeFilterButton("Seeding"))
 
         filterRowTwo.addView(makeFilterButton("Paused"))
+        filterRowTwo.addView(makeFilterButton("Stalled"))
         filterRowTwo.addView(makeFilterButton("Completed"))
 
         val sortButton = Button(this).apply {
@@ -2134,6 +2155,18 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
+            // Hamburger button: opens the Tracker Host panel (a swipe in
+            // from the left edge does the same).
+            addView(TextView(this@MainActivity).apply {
+                text = "\u2630"
+                textSize = 26f
+                setTextColor(if (trackerFilter != null) Color.parseColor("#4FD1C5") else Color.WHITE)
+                gravity = android.view.Gravity.CENTER
+                setPadding(8, 8, 36, 8)
+                setOnClickListener { trackerDrawerOpenNow() }
+                hamburgerView = this
+            })
+
             addView(
                 nameColumn,
                 LinearLayout.LayoutParams(
@@ -2214,7 +2247,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        setContentView(container)
+        val mainRoot = android.widget.FrameLayout(this).apply {
+            tag = "has_bar"
+            addView(
+                container,
+                android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        buildTrackerDrawer(mainRoot)
+
+        setContentView(mainRoot)
         isOnMainScreen = true
         mainScrollView = outerScroll
         updateSelectionBar()
@@ -6440,11 +6485,20 @@ class MainActivity : AppCompatActivity() {
 
         toggleButton.setOnClickListener {
             if (WebUiServer.isRunning()) {
-                WebUiServer.stop()
+                // Stopping the server happens off the UI thread, so the
+                // screen never freezes while the socket closes.
                 prefs.edit().putBoolean("enabled", false).apply()
-                Toast.makeText(this, "Web UI turned off", Toast.LENGTH_SHORT).show()
-                refreshStatus()
-                refreshToggleButton()
+                toggleButton.isEnabled = false
+                toggleButton.text = "Turning off..."
+                Thread {
+                    WebUiServer.stop()
+                    runOnUiThread {
+                        toggleButton.isEnabled = true
+                        Toast.makeText(this, "Web UI turned off", Toast.LENGTH_SHORT).show()
+                        refreshStatus()
+                        refreshToggleButton()
+                    }
+                }.start()
                 return@setOnClickListener
             }
 
@@ -6471,17 +6525,25 @@ class MainActivity : AppCompatActivity() {
                 .putBoolean("https", useHttps)
                 .apply()
 
-            val error = WebUiServer.start(this, port, useHttps)
-
-            if (error != null) {
-                Toast.makeText(this, "Could not start: $error", Toast.LENGTH_LONG).show()
-            } else {
-                prefs.edit().putBoolean("enabled", true).apply()
-                Toast.makeText(this, "Web UI turned on", Toast.LENGTH_SHORT).show()
-            }
-
-            refreshStatus()
-            refreshToggleButton()
+            // Starting (TLS setup, and on the very first HTTPS start the
+            // RSA key generation) can take a few seconds, so it runs off
+            // the UI thread while the button shows what is happening.
+            toggleButton.isEnabled = false
+            toggleButton.text = "Turning on..."
+            Thread {
+                val error = WebUiServer.start(applicationContext, port, useHttps)
+                runOnUiThread {
+                    toggleButton.isEnabled = true
+                    if (error != null) {
+                        Toast.makeText(this, "Could not start: $error", Toast.LENGTH_LONG).show()
+                    } else {
+                        prefs.edit().putBoolean("enabled", true).apply()
+                        Toast.makeText(this, "Web UI turned on", Toast.LENGTH_SHORT).show()
+                    }
+                    refreshStatus()
+                    refreshToggleButton()
+                }
+            }.start()
         }
 
         refreshStatus()
@@ -6870,8 +6932,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatGiB(bytes: Long): String {
-        val gib = bytes.toDouble() / 1024.0 / 1024.0 / 1024.0
-        return String.format("%.2f GiB", gib)
+        val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB")
+        var value = bytes.toDouble()
+        var unit = 0
+        while (value >= 1024.0 && unit < units.size - 1) {
+            value /= 1024.0
+            unit++
+        }
+        return if (unit == 0) "${bytes} B" else String.format(java.util.Locale.US, "%.2f %s", value, units[unit])
     }
 
 
@@ -7925,8 +7993,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         // General tab progress bar: one thin bar made of the torrent's
-        // pieces (blue = have, green = downloading now, dark = missing).
+        // pieces (blue = have, deep green = downloading now, dark = missing; qBittorrent colours).
         val pieceBar = PieceBarView(this)
+        val availBar = AvailabilityBarView(this)
+        val availLabel = TextView(this).apply {
+            text = "Availability"
+            setTextColor(Color.rgb(157, 183, 232))
+            textSize = 13f
+            setPadding(0, (12 * resources.displayMetrics.density).toInt(), 0, 0)
+        }
         val pieceBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = android.view.View.GONE
@@ -7940,12 +8015,38 @@ class MainActivity : AppCompatActivity() {
                 pieceBar,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
-                    (24 * resources.displayMetrics.density).toInt()
+                    (32 * resources.displayMetrics.density).toInt()
                 ).apply { topMargin = 6 }
+            )
+            addView(
+                barLegend(
+                    Color.rgb(46, 168, 255) to "Have",
+                    Color.rgb(0, 255, 106) to "Downloading",
+                    Color.rgb(36, 43, 51) to "Missing"
+                )
+            )
+            // Availability bar (qBittorrent's grey-to-blue gradient): how
+            // many connected peers have each piece.
+            addView(availLabel)
+            addView(
+                availBar,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (32 * resources.displayMetrics.density).toInt()
+                ).apply { topMargin = 6 }
+            )
+            addView(
+                barLegend(
+                    Color.rgb(0xFF, 0x00, 0x30) to "No peers",
+                    Color.rgb(0xD5, 0x00, 0xFF) to "Some peers",
+                    Color.rgb(0x00, 0xE1, 0xFF) to "Most peers"
+                )
             )
         }
         currentDetailsPieceBox = pieceBox
         currentDetailsPieceBar = pieceBar
+        currentDetailsAvailBar = availBar
+        currentDetailsAvailLabel = availLabel
 
         currentDetailsTorrentIndex = torrentIndex
         currentDetailsContentText = contentText
@@ -8980,6 +9081,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Colour key under a bar: each entry is a coloured square plus a label.
+    private fun barLegend(vararg items: Pair<Int, String>): TextView {
+        val sb = android.text.SpannableStringBuilder()
+        for ((i, item) in items.withIndex()) {
+            if (i > 0) sb.append("      ")
+            val start = sb.length
+            sb.append("\u25A0")
+            sb.setSpan(
+                SwatchSpan(item.first, resources.displayMetrics.density),
+                start, sb.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            sb.append(" ").append(item.second)
+        }
+        return TextView(this).apply {
+            text = sb
+            setTextColor(Color.rgb(190, 196, 206))
+            textSize = 12f
+            setPadding(0, (4 * resources.displayMetrics.density).toInt(), 0, (6 * resources.displayMetrics.density).toInt())
+        }
+    }
+
     private fun showGeneralDetails(
         torrentIndex: Int,
         contentText: TextView
@@ -8993,6 +9116,21 @@ class MainActivity : AppCompatActivity() {
             if (box != null && bar != null) {
                 if (st.startsWith("OK|")) {
                     bar.setStates(st.substring(st.indexOf('\n') + 1))
+                    box.visibility = android.view.View.VISIBLE
+                    try {
+                        currentDetailsAvailBar?.setAvailability(
+                            TorrentNative.getTorrentPieceAvailability(torrentIndex)
+                        )
+                        // The separate copies figure (e.g. 31.027) next to the label.
+                        val copies = TorrentNative.getTorrentAvailability(torrentIndex)
+                        currentDetailsAvailLabel?.text = "Availability: " + copies
+                    } catch (_: Throwable) {
+                    }
+                } else if (st.startsWith("Metadata")) {
+                    // Magnet with no peers yet: show empty bars.
+                    bar.setStates("")
+                    currentDetailsAvailBar?.setAvailability("")
+                    currentDetailsAvailLabel?.text = "Availability: 0"
                     box.visibility = android.view.View.VISIBLE
                 } else {
                     box.visibility = android.view.View.GONE
@@ -9128,6 +9266,9 @@ class MainActivity : AppCompatActivity() {
         text.append("Created with: ").append(creator).append("\n")
         text.append("Created on: ").append(createdDate).append("\n\n")
         text.append("Status: ").append(state).append("\n")
+        if (state.startsWith("Missing files")) {
+            text.append("Files were deleted or moved. Try Force Recheck, or remove the torrent and add it again.\n")
+        }
         text.append("Progress: ").append(progress).append("\n")
         text.append("Download: ").append(download).append("\n")
         text.append("Upload: ").append(upload).append("\n")
@@ -9138,7 +9279,7 @@ class MainActivity : AppCompatActivity() {
         text.append("Completed: ").append(completedDate).append("\n")
 
         val timeLines = try {
-            TorrentNative.getTorrentTimeLines(torrentIndex)
+            TorrentNative.localiseLastSeen(TorrentNative.getTorrentTimeLines(torrentIndex))
         } catch (_: Throwable) {
             ""
         }
@@ -10631,15 +10772,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         val allLines = status.lines().filter { it.isNotBlank() }
+        maybeRefreshTrackerInfo(allLines.size)
         val filteredLines = sortTorrentLines(
             allLines.withIndex().filter { item ->
-                torrentMatchesFilter(item.value)
+                torrentMatchesFilter(item.value, item.index + 1)
             }
         )
 
         if (filteredLines.isEmpty()) {
             listLayout.addView(TextView(this).apply {
-                text = "No torrents in $activeFilter"
+                text = if (trackerFilter != null) {
+                    "No torrents in $activeFilter for this tracker"
+                } else {
+                    "No torrents in $activeFilter"
+                }
                 setTextColor(Color.WHITE)
                 textSize = 16f
                 setPadding(0, 24, 0, 0)
@@ -10666,7 +10812,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val label = TextView(this).apply {
-                text = line
+                text = colourStatus(line)
                 setTextColor(Color.WHITE)
                 textSize = 15f
             }
@@ -10794,7 +10940,374 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun torrentMatchesFilter(line: String): Boolean {
+    // Red round "!" shown in front of a torrent whose files are missing.
+    private fun dangerIconDrawable(sizeDp: Int = 18): android.graphics.drawable.Drawable {
+        val px = (sizeDp * resources.displayMetrics.density).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        paint.color = Color.parseColor("#E53935")
+        canvas.drawCircle(px / 2f, px / 2f, px / 2f, paint)
+        paint.color = Color.WHITE
+        paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
+        paint.textAlign = android.graphics.Paint.Align.CENTER
+        paint.textSize = px * 0.78f
+        val baseline = px / 2f - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText("!", px / 2f, baseline, paint)
+        val d = android.graphics.drawable.BitmapDrawable(resources, bmp)
+        d.setBounds(0, 0, px, px)
+        return d
+    }
+
+    // Torrent list line: "Stalled" in amber; "Missing files" in red with a
+    // red "!" icon in front and an amber hint underneath.
+    private fun colourStatus(line: String): CharSequence {
+        val missingKey = " \u2022 Missing files"
+        val stalledKey = " \u2022 Stalled"
+        val missing = line.contains(missingKey)
+        val stalledAt = line.indexOf(stalledKey)
+        if (!missing && stalledAt < 0) return line
+
+        val hint = "Files were deleted or moved. Try Force Recheck."
+        val prefix = if (missing) "\uFFFC  " else ""
+        val suffix = if (missing) "\n" + hint else ""
+        val out = android.text.SpannableStringBuilder(prefix + line + suffix)
+        val plain = out.toString()
+
+        if (missing) {
+            out.setSpan(
+                CenteredImageSpan(dangerIconDrawable()), 0, 1,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            val at = plain.indexOf(missingKey) + 3
+            out.setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor("#FF5252")),
+                at, at + "Missing files".length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            val hintStart = plain.length - hint.length
+            out.setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor("#FFC107")),
+                hintStart, plain.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        } else {
+            val at = stalledAt + prefix.length + 3
+            out.setSpan(
+                android.text.style.ForegroundColorSpan(Color.parseColor("#FFC107")),
+                at, at + "Stalled".length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+        return out
+    }
+
+    // ---------------- Tracker Host panel ----------------
+
+    private fun trackerHostOf(url: String): String {
+        val m = Regex("^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/@]*@)?(\\[[^\\]]+\\]|[^/:?#]+)").find(url.trim())
+        return m?.groupValues?.get(1)?.lowercase() ?: ""
+    }
+
+    // Reads the per-tracker status text the Trackers tab already shows.
+    private fun parseTrackerInfo(text: String): TrackerInfo? {
+        if (!text.startsWith("Tracker Status")) return null
+        val hosts = LinkedHashSet<String>()
+        var error = false
+        var warning = false
+        for (block in text.split("URL: ").drop(1)) {
+            val first = block.lineSequence().firstOrNull() ?: continue
+            val host = trackerHostOf(first)
+            if (host.isNotEmpty()) hosts.add(host)
+            val status = block.lineSequence()
+                .firstOrNull { it.startsWith("Status: ") }
+                ?.removePrefix("Status: ")?.trim() ?: ""
+            if (status == "Error / Failed") error = true
+            if (status == "Failing") warning = true
+        }
+        return TrackerInfo(hosts, error, warning)
+    }
+
+    // Refreshes the per-torrent tracker table in the background: when the
+    // number of torrents changes, and otherwise every 20 seconds.
+    private fun maybeRefreshTrackerInfo(count: Int) {
+        if (count <= 0) return
+        val now = System.currentTimeMillis()
+        val interval = if (trackerDrawerOpen) 1000L else 20000L
+        if (count == trackerInfoCount && now - trackerInfoStamp < interval) return
+        if (!trackerRefreshing.compareAndSet(false, true)) return
+        trackerInfoCount = count
+
+        Thread {
+            try {
+                val fresh = HashMap<Int, TrackerInfo>()
+                for (i in 1..count) {
+                    try {
+                        parseTrackerInfo(TorrentNative.getTorrentTrackerStatus(i))?.let { fresh[i] = it }
+                    } catch (_: Throwable) {
+                    }
+                }
+                for (k in trackerInfo.keys.toList()) {
+                    if (k > count) trackerInfo.remove(k)
+                }
+                trackerInfo.putAll(fresh)
+                trackerInfoStamp = System.currentTimeMillis()
+                runOnUiThread {
+                    if (isOnMainScreen) {
+                        val key = trackerFilter
+                        val gone = key != null &&
+                            key != TRACKERLESS_KEY && key != TRACKER_ERROR_KEY &&
+                            key != TRACKER_WARNING_KEY &&
+                            trackerInfo.isNotEmpty() &&
+                            trackerInfo.values.none { key in it.hosts }
+                        if (gone) {
+                            // The remembered tracker has no torrents any more.
+                            trackerFilter = null
+                            torrentListViewPrefs().edit().remove("tracker_filter").apply()
+                            hamburgerView?.setTextColor(Color.WHITE)
+                        }
+                        trackerDrawerRebuild?.invoke()
+                        if (trackerFilter != null || gone) updateTorrentList()
+                    }
+                }
+            } catch (_: Throwable) {
+            } finally {
+                trackerRefreshing.set(false)
+            }
+        }.start()
+    }
+
+    private fun trackerMatches(torrentIndex: Int): Boolean {
+        val key = trackerFilter ?: return true
+        val info = trackerInfo[torrentIndex] ?: return false
+        return when (key) {
+            TRACKERLESS_KEY -> info.hosts.isEmpty()
+            TRACKER_ERROR_KEY -> info.error
+            TRACKER_WARNING_KEY -> info.warning
+            else -> key in info.hosts
+        }
+    }
+
+    private fun pinDrawable(color: Int, sizeDp: Int = 18): android.graphics.drawable.Drawable {
+        val px = (sizeDp * resources.displayMetrics.density).toInt()
+        val bmp = android.graphics.Bitmap.createBitmap(px, px, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        paint.color = color
+        val cx = px / 2f
+        val cy = px * 0.38f
+        val r = px * 0.32f
+        val path = android.graphics.Path()
+        path.addCircle(cx, cy, r, android.graphics.Path.Direction.CW)
+        path.moveTo(cx - r * 0.82f, cy + r * 0.55f)
+        path.lineTo(cx, px * 0.96f)
+        path.lineTo(cx + r * 0.82f, cy + r * 0.55f)
+        path.close()
+        canvas.drawPath(path, paint)
+        paint.color = Color.parseColor("#0D1016")
+        canvas.drawCircle(cx, cy, r * 0.38f, paint)
+        val d = android.graphics.drawable.BitmapDrawable(resources, bmp)
+        d.setBounds(0, 0, px, px)
+        return d
+    }
+
+    private fun trackerDrawerOpenNow() {
+        trackerDrawerOpenFn?.invoke()
+    }
+    private var trackerDrawerOpenFn: (() -> Unit)? = null
+
+    private fun buildTrackerDrawer(root: android.widget.FrameLayout) {
+        val density = resources.displayMetrics.density
+        val screenW = resources.displayMetrics.widthPixels
+        val panelW = minOf((300 * density).toInt(), (screenW * 0.82f).toInt())
+        trackerDrawerOpen = false
+
+        val scrim = android.view.View(this).apply {
+            setBackgroundColor(Color.parseColor("#99000000"))
+            visibility = android.view.View.GONE
+            alpha = 0f
+            setOnClickListener { trackerDrawerClose?.invoke() }
+        }
+        root.addView(
+            scrim,
+            android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, (28 * density).toInt(), 0, (24 * density).toInt())
+        }
+        val panel = android.widget.ScrollView(this).apply {
+            setBackgroundColor(
+                androidx.core.graphics.ColorUtils.blendARGB(bgColor(), Color.BLACK, 0.45f)
+            )
+            elevation = 24f
+            visibility = android.view.View.GONE
+            translationX = -panelW.toFloat()
+            addView(list)
+        }
+        root.addView(
+            panel,
+            android.widget.FrameLayout.LayoutParams(
+                panelW,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        fun close() {
+            if (!trackerDrawerOpen) return
+            trackerDrawerOpen = false
+            scrim.animate().alpha(0f).setDuration(160).withEndAction {
+                scrim.visibility = android.view.View.GONE
+            }.start()
+            panel.animate().translationX(-panelW.toFloat()).setDuration(180).withEndAction {
+                panel.visibility = android.view.View.GONE
+            }.start()
+        }
+
+        var lastSig = ""
+
+        fun rebuild() {
+            val infos = trackerInfo.values.toList()
+            val total = maxOf(trackerInfo.size, trackerInfoCount)
+            val counts = java.util.TreeMap<String, Int>()
+            for (info in infos) for (h in info.hosts) counts[h] = (counts[h] ?: 0) + 1
+
+            // Nothing changed since the last redraw: leave the list alone
+            // (this runs every second while the panel is open).
+            val sig = "$total|${infos.count { it.hosts.isEmpty() }}|${infos.count { it.error }}|" +
+                "${infos.count { it.warning }}|$trackerFilter|" +
+                counts.entries.joinToString(",") { it.key + "=" + it.value }
+            if (sig == lastSig) return
+            lastSig = sig
+
+            list.removeAllViews()
+
+            list.addView(TextView(this).apply {
+                text = "TRACKER HOST"
+                textSize = 13f
+                setTextColor(Color.parseColor("#4FD1C5"))
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setPadding((18 * density).toInt(), 0, 0, (10 * density).toInt())
+            })
+
+            fun row(label: String, count: Int, key: String?, pinColor: Int) {
+                val selected = trackerFilter == key
+                list.addView(TextView(this).apply {
+                    text = "$label ($count)"
+                    textSize = 15f
+                    setTextColor(Color.WHITE)
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    compoundDrawablePadding = (12 * density).toInt()
+                    setCompoundDrawablesRelative(pinDrawable(pinColor), null, null, null)
+                    setPadding((18 * density).toInt(), (12 * density).toInt(), (12 * density).toInt(), (12 * density).toInt())
+                    setBackgroundColor(if (selected) Color.parseColor("#1F4A52") else Color.TRANSPARENT)
+                    setOnClickListener {
+                        trackerFilter = key
+                        torrentListViewPrefs().edit().putString("tracker_filter", key).apply()
+                        selectedTorrents.clear()
+                        selectMode = false
+                        // Same jump as the Downloading / Paused buttons: land
+                        // on the torrent list (or its "No torrents" message).
+                        scrollToFilterNext = true
+                        showMainScreen()
+                    }
+                })
+            }
+
+            row("All", total, null, Color.parseColor("#CFD8DC"))
+            row("Trackerless", infos.count { it.hosts.isEmpty() }, TRACKERLESS_KEY, Color.parseColor("#78909C"))
+            row("Tracker error", infos.count { it.error }, TRACKER_ERROR_KEY, Color.parseColor("#EF5350"))
+            row("Warning", infos.count { it.warning }, TRACKER_WARNING_KEY, Color.parseColor("#FFA726"))
+            for ((host, n) in counts) {
+                row(host, n, host, Color.parseColor("#42A5F5"))
+            }
+
+            if (infos.isEmpty()) {
+                list.addView(TextView(this).apply {
+                    text = "Loading trackers\u2026"
+                    textSize = 13f
+                    setTextColor(Color.parseColor("#7B8494"))
+                    setPadding((18 * density).toInt(), (12 * density).toInt(), 0, 0)
+                })
+            }
+        }
+
+        fun open() {
+            if (trackerDrawerOpen) return
+            trackerDrawerOpen = true
+            lastSig = ""
+            trackerInfoStamp = 0L
+            rebuild()
+            scrim.visibility = android.view.View.VISIBLE
+            panel.visibility = android.view.View.VISIBLE
+            scrim.animate().alpha(1f).setDuration(160).start()
+            panel.animate().translationX(0f).setDuration(180).start()
+            maybeRefreshTrackerInfo(trackerInfoCount)
+        }
+
+        // Swipe left to close the panel.
+        var downX = 0f
+        panel.setOnTouchListener { _, ev ->
+            when (ev.action) {
+                android.view.MotionEvent.ACTION_DOWN -> downX = ev.rawX
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    if (downX - ev.rawX > 60 * density) close()
+                }
+            }
+            false
+        }
+
+        // Narrow strip at the left edge, below the title bar: swiping right
+        // from it opens the panel.
+        val edge = android.view.View(this).apply {
+            var startX = 0f
+            var fired = false
+            setOnTouchListener { _, ev ->
+                when (ev.action) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        startX = ev.rawX
+                        fired = false
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        if (!fired && ev.rawX - startX > 28 * density) {
+                            fired = true
+                            open()
+                        }
+                    }
+                }
+                true
+            }
+        }
+        root.addView(
+            edge,
+            android.widget.FrameLayout.LayoutParams((20 * density).toInt(), android.widget.FrameLayout.LayoutParams.MATCH_PARENT).apply {
+                topMargin = (76 * density).toInt()
+            }
+        )
+        root.post {
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val top = (76 * density).toInt()
+                root.systemGestureExclusionRects = listOf(
+                    android.graphics.Rect(0, top, (24 * density).toInt(), top + (200 * density).toInt())
+                )
+            }
+        }
+
+        trackerDrawerClose = { close() }
+        trackerDrawerRebuild = { if (trackerDrawerOpen) rebuild() }
+        trackerDrawerOpenFn = { open() }
+    }
+
+    private fun torrentMatchesFilter(line: String, torrentIndex: Int = -1): Boolean {
+        if (!trackerMatches(torrentIndex)) return false
+
         val lower = line.lowercase()
         val query = searchQuery.trim().lowercase()
 
@@ -10807,7 +11320,8 @@ class MainActivity : AppCompatActivity() {
         return when (activeFilter) {
             "Downloading" -> lower.contains("downloading")
             "Seeding" -> lower.contains("seeding")
-            "Paused" -> lower.contains("paused")
+            "Paused" -> lower.contains("paused") || lower.contains("missing files")
+            "Stalled" -> lower.contains("stalled")
             "Completed" -> percent >= 100 || lower.contains("seeding")
             else -> true
         }
@@ -10835,7 +11349,7 @@ class MainActivity : AppCompatActivity() {
         val allLines = status.lines().filter { it.isNotBlank() }
 
         return allLines.withIndex()
-            .filter { item -> torrentMatchesFilter(item.value) }
+            .filter { item -> torrentMatchesFilter(item.value, item.index + 1) }
             .map { it.index + 1 }
             .toSet()
     }
@@ -11529,6 +12043,18 @@ class MainActivity : AppCompatActivity() {
             if (lineEnd < 0) lineEnd = plain.length
 
             val line = plain.substring(lineStart, lineEnd)
+
+            if (line.startsWith("Status: Missing files")) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(Color.parseColor("#FF5252")),
+                    lineStart, lineEnd, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            } else if (line.startsWith("Files were deleted or moved.")) {
+                out.setSpan(
+                    android.text.style.ForegroundColorSpan(Color.parseColor("#FFC107")),
+                    lineStart, lineEnd, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                )
+            }
 
             if (labels.any { line.startsWith(it) }) {
                 out.setSpan(
@@ -12880,20 +13406,21 @@ class PieceBarView(context: android.content.Context) : android.view.View(context
 
     private var states: String = ""
 
+    // High-contrast colours: have = bright blue, downloading = neon green,
+    // missing = grey, white outline. Lit cells are widened by one pixel on
+    // each side so single pieces stay visible.
     private val trackPaint = android.graphics.Paint().apply {
-        color = Color.rgb(6, 26, 61)
+        color = Color.rgb(36, 43, 51)
     }
     private val borderPaint = android.graphics.Paint().apply {
-        color = Color.rgb(27, 63, 134)
+        color = Color.rgb(236, 239, 241)
         style = android.graphics.Paint.Style.STROKE
         strokeWidth = 2f
     }
-    private val havePaint = android.graphics.Paint().apply {
-        color = Color.rgb(47, 127, 214)
-    }
-    private val downloadingPaint = android.graphics.Paint().apply {
-        color = Color.rgb(61, 220, 74)
-    }
+    private val cellPaint = android.graphics.Paint()
+
+    private val haveRgb = intArrayOf(46, 168, 255)
+    private val dlRgb = intArrayOf(0, 255, 106)
 
     fun setStates(newStates: String) {
         if (newStates != states) {
@@ -12913,6 +13440,8 @@ class PieceBarView(context: android.content.Context) : android.view.View(context
         val n = states.length
 
         if (n > 0 && w > 0) {
+            val cols = IntArray(w)
+
             for (x in 0 until w) {
                 val from = (x.toLong() * n / w).toInt()
                 var to = ((x + 1).toLong() * n / w).toInt()
@@ -12920,26 +13449,122 @@ class PieceBarView(context: android.content.Context) : android.view.View(context
                 if (to > n) to = n
 
                 var have = 0
-                var downloading = false
+                var downloading = 0
 
                 for (i in from until to) {
                     when (states[i]) {
                         '2' -> have++
-                        '1' -> downloading = true
+                        '1' -> downloading++
                     }
                 }
 
-                val count = to - from
+                if (have == 0 && downloading == 0) continue
 
-                if (downloading) {
-                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, downloadingPaint)
-                } else if (have == count) {
-                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, havePaint)
-                } else if (have > 0) {
-                    havePaint.alpha = 60 + (195 * have / count)
-                    canvas.drawRect(x.toFloat(), 0f, x + 1f, h, havePaint)
-                    havePaint.alpha = 255
+                val count = (to - from).toFloat()
+                val a = have / count
+                val b = downloading / count
+                cols[x] = Color.rgb(
+                    maxOf(haveRgb[0] * a, dlRgb[0] * b).toInt().coerceIn(0, 255),
+                    maxOf(haveRgb[1] * a, dlRgb[1] * b).toInt().coerceIn(0, 255),
+                    maxOf(haveRgb[2] * a, dlRgb[2] * b).toInt().coerceIn(0, 255)
+                )
+            }
+
+            // Draw lit cells, plus one pixel either side where it is still empty.
+            for (x in 0 until w) {
+                if (cols[x] == 0) continue
+                cellPaint.color = cols[x]
+                canvas.drawRect(x.toFloat(), 0f, x + 1f, h, cellPaint)
+                if (x > 0 && cols[x - 1] == 0) {
+                    canvas.drawRect(x - 1f, 0f, x.toFloat(), h, cellPaint)
                 }
+                if (x < w - 1 && cols[x + 1] == 0) {
+                    canvas.drawRect(x + 1f, 0f, x + 2f, h, cellPaint)
+                }
+            }
+        }
+
+        canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
+    }
+}
+
+// Availability bar for the General tab. Each pixel's average peer count is
+// scaled between the torrent's lowest and highest count and painted on a
+// red (nobody has it) -> purple -> bright blue (well seeded) scale.
+// A piece nobody has is solid red. No peer has anything at all: bar stays red.
+class AvailabilityBarView(context: android.content.Context) : android.view.View(context) {
+
+    private var data: String = ""
+
+    private val trackPaint = android.graphics.Paint().apply { color = Color.BLACK }
+    private val borderPaint = android.graphics.Paint().apply {
+        color = Color.rgb(236, 239, 241)
+        style = android.graphics.Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+    private val cellPaint = android.graphics.Paint()
+
+    private val low = intArrayOf(0xFF, 0x00, 0x30)
+    private val mid = intArrayOf(0xD5, 0x00, 0xFF)
+    private val high = intArrayOf(0x00, 0xE1, 0xFF)
+
+    fun setAvailability(newData: String) {
+        if (newData != data) {
+            data = newData
+            invalidate()
+        }
+    }
+
+    private fun valueOf(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'z' -> c - 'a' + 10
+        else -> 0
+    }
+
+    private fun scale(t: Float): Int {
+        val (a, b, f) = if (t < 0.5f) Triple(low, mid, t / 0.5f) else Triple(mid, high, (t - 0.5f) / 0.5f)
+        return Color.rgb(
+            (a[0] + (b[0] - a[0]) * f).toInt().coerceIn(0, 255),
+            (a[1] + (b[1] - a[1]) * f).toInt().coerceIn(0, 255),
+            (a[2] + (b[2] - a[2]) * f).toInt().coerceIn(0, 255)
+        )
+    }
+
+    override fun onDraw(canvas: android.graphics.Canvas) {
+        super.onDraw(canvas)
+
+        val w = width
+        val h = height.toFloat()
+        canvas.drawRect(0f, 0f, w.toFloat(), h, trackPaint)
+
+        val n = data.length
+        if (n == 0) cellPaint.color = scale(0f)
+        if (n == 0) canvas.drawRect(0f, 0f, w.toFloat(), h, cellPaint)
+        var max = 0
+        var minPositive = Int.MAX_VALUE
+        for (ch in data) {
+            val v = valueOf(ch)
+            if (v > max) max = v
+            if (v in 1 until minPositive) minPositive = v
+        }
+
+        if (n > 0 && w > 0) {
+            val floor = if (max > 0) minPositive * 0.6f else 0f
+            for (x in 0 until w) {
+                val from = (x.toLong() * n / w).toInt()
+                var to = ((x + 1).toLong() * n / w).toInt()
+                if (to <= from) to = from + 1
+                if (to > n) to = n
+
+                var sum = 0
+                for (i in from until to) sum += valueOf(data[i])
+                val avg = sum.toFloat() / (to - from)
+
+                val t = if (max <= 0 || avg <= 0f) 0f
+                else ((avg - floor) / (max - floor)).coerceIn(0f, 1f)
+
+                cellPaint.color = scale(t)
+                canvas.drawRect(x.toFloat(), 0f, x + 1f, h, cellPaint)
             }
         }
 
@@ -12968,5 +13593,77 @@ private class CenteredImageSpan(d: android.graphics.drawable.Drawable) :
         canvas.translate(x, transY.toFloat())
         b.draw(canvas)
         canvas.restore()
+    }
+}
+
+// Tracker hosts of one torrent, plus whether any of its trackers is failing.
+internal class TrackerInfo(
+    val hosts: Set<String>,
+    val error: Boolean,
+    val warning: Boolean
+)
+
+// Legend swatch: a small filled square inside a separate dashed outline,
+// so dark colours (like the grey for missing pieces) stay visible.
+class SwatchSpan(private val fill: Int, private val density: Float) : android.text.style.ReplacementSpan() {
+
+    // Outer dashed box: 18dp, dash 3.5dp + gap 2.5dp = 6dp, so every side
+    // (72dp round) holds exactly 3 full dash+gap pairs and all four sides match.
+    private val outer = 18f * density
+    private val inner = 9f * density
+    private val stroke = 1.5f * density
+
+    override fun getSize(
+        paint: android.graphics.Paint,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        fm: android.graphics.Paint.FontMetricsInt?
+    ): Int {
+        // Make the line tall enough for the whole box, so the bottom (and top)
+        // dashes are not clipped by the text view.
+        if (fm != null) {
+            val need = (outer + stroke * 2f + 2f * density).toInt()
+            val have = fm.descent - fm.ascent
+            if (need > have) {
+                val extra = need - have
+                val up = extra / 2
+                val down = extra - up
+                fm.ascent -= up
+                fm.top = minOf(fm.top, fm.ascent)
+                fm.descent += down
+                fm.bottom = maxOf(fm.bottom, fm.descent)
+            }
+        }
+        return (outer + 6f * density).toInt()
+    }
+
+    override fun draw(
+        canvas: android.graphics.Canvas,
+        text: CharSequence?,
+        start: Int,
+        end: Int,
+        x: Float,
+        top: Int,
+        y: Int,
+        bottom: Int,
+        paint: android.graphics.Paint
+    ) {
+        val cy = (top + bottom) / 2f
+        val half = stroke / 2f
+        val ol = x + 2f * density + half
+        val ot = cy - outer / 2f + half
+        val side = outer - stroke
+        val il = ol + (side - inner) / 2f
+        val it = cy - inner / 2f
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        p.style = android.graphics.Paint.Style.FILL
+        p.color = fill
+        canvas.drawRect(il, it, il + inner, it + inner, p)
+        p.style = android.graphics.Paint.Style.STROKE
+        p.strokeWidth = stroke
+        p.color = Color.rgb(236, 239, 241)
+        p.pathEffect = android.graphics.DashPathEffect(floatArrayOf(3.5f * density, 2.5f * density), 0f)
+        canvas.drawRect(ol, ot, ol + side, ot + side, p)
     }
 }

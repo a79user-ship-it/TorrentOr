@@ -130,14 +130,14 @@ class TorrentNotifier(private val ctx: Context) {
 
     private fun categoryOf(state: String): String {
         return when {
-            state.startsWith("Paused (error") -> "error"
+            state.startsWith("Paused (error") || state.startsWith("Missing files") -> "error"
             // Waiting for a free download slot (libtorrent's own queue); the
             // user never paused it, so it must not count as paused/resumed.
             state.startsWith("Paused (queued") -> "queued"
             state.startsWith("Paused") -> "paused"
             state.startsWith("Checking") -> "checking"
             state.startsWith("Seeding") -> "seeding"
-            state.startsWith("Downloading") -> "downloading"
+            state.startsWith("Downloading") || state.startsWith("Stalled") -> "downloading"
             else -> "other"
         }
     }

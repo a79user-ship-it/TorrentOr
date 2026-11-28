@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdio>
 #include <ctime>
+#include <cerrno>
 #include <android/log.h>
 #include <fstream>
 #include <iterator>
@@ -916,7 +917,7 @@ static std::string formatDuration(long seconds) {
 // shared by the Statistics tab and the General tab so both always agree.
 // Both values come from libtorrent and are restored from resume data, so
 // they carry over app restarts.
-static std::string buildTimeLines(const lt::torrent_status& st) {
+static std::string buildTimeLines(const lt::torrent_status& st, bool withLastSeen = false) {
     std::string out;
 
     long long added = static_cast<long long>(st.added_time);
@@ -952,6 +953,13 @@ static std::string buildTimeLines(const lt::torrent_status& st) {
     if (added > 0 && completed > added) {
         out += "\nTime to complete: ";
         out += formatDuration(static_cast<long>(completed - added));
+    }
+
+    // Raw epoch seconds (0 = never); the Kotlin side turns it into the
+    // device's local date/time, because native localtime is unreliable here.
+    if (withLastSeen) {
+        out += "\nLast Seen Complete: @";
+        out += std::to_string(static_cast<long long>(st.last_seen_complete));
     }
 
     return out;
@@ -1780,7 +1788,18 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
                 if (ch == '\n' || ch == '\r') ch = ' ';
             }
 
-            state = "Paused (error: " + errText + ")";
+            // Content deleted or moved: libtorrent reports "file not found".
+            // Same idea as qBittorrent's "Missing Files".
+            std::string errLower = errText;
+            std::transform(errLower.begin(), errLower.end(), errLower.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            bool missingFiles =
+                    st.errc.value() == ENOENT ||
+                    errLower.find("no such file") != std::string::npos;
+
+            state = missingFiles
+                    ? std::string("Missing files")
+                    : "Paused (error: " + errText + ")";
         } else if (st.flags & lt::torrent_flags::paused) {
             if (st.flags & lt::torrent_flags::auto_managed) {
                 state = "Paused (queued)";
@@ -1811,10 +1830,19 @@ Java_com_example_torrentor_TorrentNative_getDetailedStatus(
             // (libtorrent does this on its own - there's nothing to turn
             // on). num_uploads is how many peers are currently unchoked,
             // i.e. actively receiving data from us right now.
+            // Same rule as qBittorrent's "Stalled": the torrent is set to
+            // download but no payload is arriving right now (libtorrent's
+            // own ~5 second average rate is 0). A magnet link still looking
+            // for its metadata counts too, so a dead one shows Stalled.
+            const char* label =
+                    ((st.state == lt::torrent_status::downloading ||
+                      st.state == lt::torrent_status::downloading_metadata) &&
+                     st.download_payload_rate == 0)
+                    ? "Stalled" : "Downloading";
             state = (st.num_uploads > 0)
-                    ? "Downloading (uploading to " + std::to_string(st.num_uploads) +
+                    ? std::string(label) + " (uploading to " + std::to_string(st.num_uploads) +
                       (st.num_uploads == 1 ? " peer)" : " peers)")
-                    : "Downloading";
+                    : std::string(label);
         }
 
         std::string name =
@@ -2897,6 +2925,9 @@ Java_com_example_torrentor_TorrentNative_getTorrentPeers(
 
         output += "IP: ";
         output += ipAddress;
+
+        output += "\nPort: ";
+        output += std::to_string(peer.ip.port());
 
         output += "\nClient: ";
         output += client;
@@ -3983,6 +4014,54 @@ Java_com_example_torrentor_TorrentNative_getTorrentPieceStates(
     }
 }
 
+// Per-piece availability for the General tab's Availability bar: one
+// character per piece (shown capped at 20000), '0'-'9','a'-'z' = how many
+// connected peers have that piece (capped at 35).
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_example_torrentor_TorrentNative_getTorrentPieceAvailability(
+        JNIEnv* env,
+        jobject,
+        jint index) {
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+
+    int i = index - 1;
+
+    if (i < 0 || i >= static_cast<int>(g_handles.size())) {
+        return env->NewStringUTF("");
+    }
+
+    auto handle = g_handles[i];
+
+    if (!handle.is_valid()) {
+        return env->NewStringUTF("");
+    }
+
+    try {
+        auto info = handle.torrent_file();
+        if (!info) return env->NewStringUTF("");
+
+        std::vector<int> avail;
+        handle.piece_availability(avail);
+
+        size_t shown = avail.size() > 20000 ? 20000 : avail.size();
+        std::string out(shown, '0');
+        static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+        for (size_t p = 0; p < shown; ++p) {
+            int v = avail[p];
+            if (v < 0) v = 0;
+            if (v > 35) v = 35;
+            out[p] = digits[v];
+        }
+
+        return env->NewStringUTF(out.c_str());
+    } catch (...) {
+        return env->NewStringUTF("");
+    }
+}
+
 extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_example_torrentor_TorrentNative_getTorrentPieces(
@@ -4382,7 +4461,7 @@ Java_com_example_torrentor_TorrentNative_getTorrentTimeLines(
 
     try {
         lt::torrent_status st = handle.status();
-        std::string lines = buildTimeLines(st);
+        std::string lines = buildTimeLines(st, true);
         return env->NewStringUTF(lines.c_str());
     } catch (...) {
         return env->NewStringUTF("");

@@ -2,6 +2,21 @@ package com.example.torrentor
 
 object TorrentNative {
 
+    // The native time lines carry "Last Seen Complete: @<epoch seconds>";
+    // show it as the device's local date and time ("Never" when 0).
+    fun localiseLastSeen(text: String): String {
+        return Regex("Last Seen Complete: @(\\d+)").replace(text) { m ->
+            val secs = m.groupValues[1].toLongOrNull() ?: 0L
+            val shown = if (secs <= 0L) {
+                "Never"
+            } else {
+                java.text.SimpleDateFormat("dd/MM/yyyy, HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date(secs * 1000L))
+            }
+            "Last Seen Complete: $shown"
+        }
+    }
+
     // A bare 40-char (v1) or 64-char (v2) hex hash, or a 32-char base32 v1
     // hash, becomes a magnet link; anything else already starting with
     // "magnet:" is returned as is.
@@ -98,6 +113,7 @@ object TorrentNative {
     external fun getTorrentEncoding(index: Int): String
     external fun getTorrentSource(index: Int): String
     external fun getTorrentAvailability(index: Int): String
+    external fun getTorrentPieceAvailability(index: Int): String
     external fun getTorrentSwarmHealth(index: Int): String
     external fun hasTorrentHash(hash: String): Boolean
     external fun getTorrentFileHash(path: String): String

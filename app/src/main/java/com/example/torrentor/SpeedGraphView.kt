@@ -91,8 +91,10 @@ class SpeedGraphView @JvmOverloads constructor(
 
         // qBittorrent-style dashed grid: 4 horizontal lines and 7 vertical
         // "columns", all in the same light grey dashes.
+        // The first horizontal line runs through the middle of the speed
+        // digits, so each "0" sits exactly on a grid crossing.
         for (i in 0..3) {
-            val y = h * (0.06f + 0.235f * i)
+            val y = h * (READOUT_Y + 0.26f * i)
             canvas.drawLine(0f, y, w, y, gridPaint)
         }
         // The first two vertical lines pass through the download and upload
@@ -122,6 +124,8 @@ class SpeedGraphView @JvmOverloads constructor(
         drawSeries(canvas, uploadValues, maxValue, w, h, uploadLinePaint, uploadFillPaint)
         drawSeries(canvas, downloadValues, maxValue, w, h, downloadLinePaint, downloadFillPaint)
     }
+
+    private val READOUT_Y = 0.12f
 
     private val readoutPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = 14f * resources.displayMetrics.scaledDensity
@@ -176,7 +180,10 @@ class SpeedGraphView @JvmOverloads constructor(
 
     private fun drawReadout(canvas: Canvas, w: Float, h: Float) {
         val fm = readoutPaint.fontMetrics
-        val baseline = h * 0.18f - (fm.ascent + fm.descent) / 2f
+        val zero = android.graphics.Rect()
+        readoutPaint.getTextBounds("0", 0, 1, zero)
+        // Put the vertical middle of a digit on the first grid line.
+        val baseline = h * READOUT_Y - zero.exactCenterY()
         val gap = gapPx
         val (downCenter, upCenter) = readoutCenters(w)
 
