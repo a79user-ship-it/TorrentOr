@@ -36,14 +36,29 @@ object UpdateChecker {
 
         if (!manual) {
             val last = prefs.getLong("last_check", 0L)
-            if (System.currentTimeMillis() - last < CHECK_GAP_MS) return
+            if (System.currentTimeMillis() - last < CHECK_GAP_MS) {
+                // No pop-up due yet, but quietly warm the answer so a later
+                // tap on "Check for updates" appears instantly.
+                if (cachedResult(prefs) == null) {
+                    Thread { saveCache(prefs, fetchLatest()) }.start()
+                }
+                return
+            }
         }
 
         val app = activity.applicationContext
         val installed = installedVersion(app)
 
+        // Reuse a recent answer (from the startup check or an earlier tap) so
+        // the pop-up appears instantly; otherwise show a short "Checking..."
+        // message right away while GitHub is being asked.
+        val cached = cachedResult(prefs)
+        if (manual && cached == null) {
+            Toast.makeText(activity, "Checking for updates\u2026", Toast.LENGTH_SHORT).show()
+        }
+
         Thread {
-            val r = fetchLatest()
+            val r = cached ?: fetchLatest().also { saveCache(prefs, it) }
 
             activity.runOnUiThread {
                 if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
@@ -67,11 +82,7 @@ object UpdateChecker {
 
                 if (!newer) {
                     if (manual) {
-                        Toast.makeText(
-                            activity,
-                            "You're up to date with version (v$installed).",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        showUpToDateDialog(activity, installed)
                     }
                     return@runOnUiThread
                 }
@@ -152,169 +163,298 @@ object UpdateChecker {
         }
     }
 
+    // ---- Modern pop-up styling shared by both dialogs ----
+
+    private val AMBER = android.graphics.Color.rgb(255, 193, 7)
+    private val GREEN = android.graphics.Color.parseColor("#8BC34A") // lime green, same as the speed graph
+    private val MUTED = android.graphics.Color.parseColor("#7B8494")
+
+    private fun px(activity: Activity, v: Int): Int =
+        (v * activity.resources.displayMetrics.density).toInt()
+
+    private fun card(activity: Activity): android.widget.LinearLayout {
+        return android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#11151C"))
+                cornerRadius = px(activity, 26).toFloat()
+                setStroke(px(activity, 2), GREEN)
+            }
+            setPadding(px(activity, 22), px(activity, 24), px(activity, 22), px(activity, 16))
+        }
+    }
+
+    private fun gradientTitle(activity: Activity): android.widget.TextView {
+        return android.widget.TextView(activity).apply {
+            text = "TorrentOr"
+            textSize = 27f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+            setTextColor(android.graphics.Color.parseColor("#4FD1C5"))
+            post {
+                val w = paint.measureText(text.toString())
+                paint.shader = android.graphics.LinearGradient(
+                    0f, 0f, w, 0f,
+                    android.graphics.Color.parseColor("#4FD1C5"),
+                    android.graphics.Color.parseColor("#B794F6"),
+                    android.graphics.Shader.TileMode.CLAMP
+                )
+                invalidate()
+            }
+        }
+    }
+
+    // "TorrentOr" gradient title with the app's planet logo on its right.
+    private fun titleRow(activity: Activity): android.widget.LinearLayout {
+        return android.widget.LinearLayout(activity).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            addView(gradientTitle(activity).apply { textSize = 30f })
+            addView(
+                android.widget.ImageView(activity).apply {
+                    setImageResource(R.drawable.notif_planet)
+                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                },
+                android.widget.LinearLayout.LayoutParams(px(activity, 48), px(activity, 48)).apply {
+                    leftMargin = px(activity, 12)
+                }
+            )
+        }
+    }
+
+    private fun iconCircle(activity: Activity, content: android.view.View): android.widget.FrameLayout {
+        val size = px(activity, 64)
+        return android.widget.FrameLayout(activity).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(android.graphics.Color.parseColor("#16222B"))
+                setStroke(px(activity, 1), android.graphics.Color.parseColor("#264A52"))
+            }
+            addView(
+                content,
+                android.widget.FrameLayout.LayoutParams(
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+            layoutParams = android.widget.LinearLayout.LayoutParams(size, size).apply {
+                bottomMargin = px(activity, 10)
+            }
+        }
+    }
+
+    private fun pillButton(activity: Activity, label: String, onClick: () -> Unit): android.widget.TextView {
+        val radius = px(activity, 26).toFloat()
+        val fill = android.graphics.drawable.GradientDrawable(
+            android.graphics.drawable.GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(
+                android.graphics.Color.parseColor("#A06CF0"),
+                android.graphics.Color.parseColor("#7C4DDB")
+            )
+        ).apply { cornerRadius = radius }
+        val mask = android.graphics.drawable.GradientDrawable().apply {
+            setColor(android.graphics.Color.WHITE)
+            cornerRadius = radius
+        }
+        return android.widget.TextView(activity).apply {
+            text = label
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 16f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+            letterSpacing = 0.05f
+            background = android.graphics.drawable.RippleDrawable(
+                android.content.res.ColorStateList.valueOf(android.graphics.Color.argb(70, 255, 255, 255)),
+                fill, mask
+            )
+            isClickable = true
+            setOnClickListener { onClick() }
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT, px(activity, 50)
+            )
+        }
+    }
+
+    private fun showCard(activity: Activity, dialog: android.app.Dialog, card: android.view.View) {
+        dialog.setContentView(card)
+        dialog.window?.apply {
+            setBackgroundDrawable(
+                android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
+            )
+            setDimAmount(0.6f)
+            setLayout(
+                (activity.resources.displayMetrics.widthPixels * 0.92f).toInt(),
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT
+            )
+        }
+        dialog.show()
+    }
+
+    // Manual "Check for updates" with nothing newer: a small modern card
+    // closed with OK.
+    private fun showUpToDateDialog(activity: Activity, installed: String) {
+        val dialog = android.app.Dialog(activity)
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+
+        val panel = card(activity)
+        panel.addView(iconCircle(activity, android.widget.ImageView(activity).apply {
+            setImageResource(R.drawable.ic_autorefresh)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setPadding(px(activity, 14), px(activity, 14), px(activity, 14), px(activity, 14))
+        }))
+        panel.addView(titleRow(activity))
+        panel.addView(android.widget.TextView(activity).apply {
+            text = "You're up to date with version (v$installed)."
+            setTextColor(AMBER)
+            textSize = 16f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, px(activity, 10), 0, px(activity, 20))
+        })
+        panel.addView(pillButton(activity, "OK") { dialog.dismiss() })
+        showCard(activity, dialog, panel)
+    }
+
     private fun showDialog(
         activity: Activity,
         prefs: android.content.SharedPreferences,
         r: Result,
         installed: String
     ) {
-        val d = activity.resources.displayMetrics.density
-        fun dp(v: Int) = (v * d).toInt()
-
+        val version = r.tag.removePrefix("v").removePrefix("V")
         val dialog = android.app.Dialog(activity)
         dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
 
-        val grey = android.graphics.Color.rgb(150, 150, 150)
-        val blue = android.graphics.Color.rgb(47, 111, 224)
-        val version = r.tag.removePrefix("v").removePrefix("V")
+        val panel = card(activity)
 
-        val panel = android.widget.LinearLayout(activity).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setBackgroundColor(android.graphics.Color.rgb(22, 22, 22))
-            setPadding(dp(24), dp(26), dp(24), dp(14))
-        }
+        panel.addView(iconCircle(activity, android.widget.ImageView(activity).apply {
+            setImageResource(R.drawable.ic_autorefresh)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            setPadding(px(activity, 14), px(activity, 14), px(activity, 14), px(activity, 14))
+        }))
+        panel.addView(titleRow(activity))
 
         panel.addView(android.widget.TextView(activity).apply {
-            text = "TorrentOr"
-            setTextColor(grey)
-            textSize = 26f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            text = "Dear user, this app has a new version v" + version +
+                " please update it now for the best experience. Thanks for understanding."
+            setTextColor(AMBER)
+            textSize = 16f
             gravity = android.view.Gravity.CENTER
+            setPadding(0, px(activity, 10), 0, px(activity, 14))
         })
 
-        panel.addView(
-            android.widget.TextView(activity).apply {
-                text = "Dear user, this app has a new version v" + version +
-                        " please update it now for the best experience. " +
-                        "Thanks for understanding."
-                setTextColor(grey)
-                textSize = 20f
-                gravity = android.view.Gravity.CENTER
-                setLineSpacing(0f, 1.15f)
-            },
-            android.widget.LinearLayout.LayoutParams(
+        panel.addView(android.widget.TextView(activity).apply {
+            text = "WHAT'S NEW"
+            setTextColor(GREEN)
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            letterSpacing = 0.1f
+            setPadding(px(activity, 4), 0, 0, px(activity, 6))
+            layoutParams = android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(26) }
-        )
+            )
+        })
 
-        // "What's new": the release notes as plain text, scrollable and
-        // capped in height so the buttons always stay on screen.
         val notesText = plainNotes(r.notes).ifEmpty { "No release notes." }
-        run {
-            panel.addView(
-                android.widget.TextView(activity).apply {
-                    text = "WHAT'S NEW"
-                    setTextColor(android.graphics.Color.rgb(76, 217, 100)) // green
-                    textSize = 14f
-                    typeface = android.graphics.Typeface.DEFAULT_BOLD
-                    gravity = android.view.Gravity.START
-                },
-                android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(24) }
-            )
-
-            val scroll = object : android.widget.ScrollView(activity) {
-                override fun onMeasure(w: Int, h: Int) {
-                    val cap = android.view.View.MeasureSpec.makeMeasureSpec(
-                        dp(160), android.view.View.MeasureSpec.AT_MOST
-                    )
-                    super.onMeasure(w, cap)
-                }
-            }.apply {
-                isVerticalScrollBarEnabled = true
-                addView(
-                    android.widget.TextView(activity).apply {
-                        text = notesText
-                        setTextColor(android.graphics.Color.rgb(255, 193, 7)) // amber
-                        textSize = 16f
-                        setLineSpacing(0f, 1.1f)
-                    }
-                )
-            }
-            panel.addView(
-                scroll,
-                android.widget.LinearLayout.LayoutParams(
-                    android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-                    android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { topMargin = dp(6) }
-            )
+        val scroll = android.widget.ScrollView(activity).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = android.view.View.OVER_SCROLL_NEVER
+            addView(android.widget.TextView(activity).apply {
+                text = notesText
+                setTextColor(AMBER)
+                textSize = 14f
+                setLineSpacing(0f, 1.15f)
+            })
         }
-
-        // DOWNLOAD NOW, right-aligned and blue, as the main action.
-        panel.addView(
-            android.widget.TextView(activity).apply {
-                text = "DOWNLOAD NOW"
-                setTextColor(blue)
-                textSize = 20f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                gravity = android.view.Gravity.END
-                setPadding(dp(8), dp(12), dp(8), dp(12))
-                setOnClickListener {
-                    dialog.dismiss()
-                    try {
-                        activity.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(r.url))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    } catch (_: Throwable) {
-                        Toast.makeText(activity, "Couldn't open the download page.", Toast.LENGTH_LONG).show()
-                    }
+        val notesBox = android.widget.FrameLayout(activity).apply {
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#0D1016"))
+                cornerRadius = px(activity, 16).toFloat()
+                setStroke(px(activity, 1), android.graphics.Color.parseColor("#1D232D"))
+            }
+            setPadding(px(activity, 14), px(activity, 12), px(activity, 14), px(activity, 12))
+            addView(scroll)
+        }
+        // Cap the notes height so the buttons always stay on screen.
+        val cap = px(activity, 160)
+        scroll.viewTreeObserver.addOnGlobalLayoutListener(object :
+            android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                if (scroll.height > cap) {
+                    scroll.layoutParams = scroll.layoutParams.apply { height = cap }
                 }
-            },
+            }
+        })
+        panel.addView(
+            notesBox,
             android.widget.LinearLayout.LayoutParams(
                 android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
                 android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(30) }
+            )
         )
 
-        // Smaller grey options under it: Skip this version (left), Later (right).
+        val scrollHint = android.widget.TextView(activity).apply {
+            text = "SCROLL TO BOTTOM TO SEE FULL RELEASE NOTES"
+            setTextColor(AMBER)
+            textSize = 10f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, px(activity, 8), 0, 0)
+            visibility = android.view.View.GONE
+        }
+        panel.addView(scrollHint)
+        fun updateScrollHint() {
+            val child = scroll.getChildAt(0) ?: return
+            val canScroll = child.height > scroll.height
+            val atBottom = scroll.scrollY + scroll.height >= child.height - px(activity, 4)
+            scrollHint.visibility =
+                if (canScroll && !atBottom) android.view.View.VISIBLE else android.view.View.GONE
+        }
+        scroll.viewTreeObserver.addOnGlobalLayoutListener { updateScrollHint() }
+        scroll.setOnScrollChangeListener { _, _, _, _, _ -> updateScrollHint() }
+
+        panel.addView(
+            pillButton(activity, "DOWNLOAD NOW") {
+                dialog.dismiss()
+                try {
+                    activity.startActivity(
+                        Intent(Intent.ACTION_VIEW, Uri.parse(r.url))
+                    )
+                } catch (_: Throwable) {
+                    Toast.makeText(activity, "Couldn't open the download page.", Toast.LENGTH_SHORT).show()
+                }
+            }.also {
+                (it.layoutParams as android.widget.LinearLayout.LayoutParams).topMargin = px(activity, 16)
+            }
+        )
+
         val row = android.widget.LinearLayout(activity).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(0, px(activity, 6), 0, 0)
         }
-        row.addView(
-            android.widget.TextView(activity).apply {
-                text = "SKIP THIS VERSION"
-                setTextColor(grey)
-                textSize = 14f
-                setPadding(dp(8), dp(10), dp(8), dp(10))
-                setOnClickListener {
-                    prefs.edit().putString("skipped_version", r.tag).apply()
-                    dialog.dismiss()
-                }
-            },
-            android.widget.LinearLayout.LayoutParams(
+        fun smallLink(label: String, onClick: () -> Unit) = android.widget.TextView(activity).apply {
+            text = label
+            setTextColor(MUTED)
+            textSize = 12f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            letterSpacing = 0.05f
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, px(activity, 10), 0, px(activity, 10))
+            isClickable = true
+            setOnClickListener { onClick() }
+            layoutParams = android.widget.LinearLayout.LayoutParams(
                 0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
             )
-        )
-        row.addView(
-            android.widget.TextView(activity).apply {
-                text = "LATER"
-                setTextColor(grey)
-                textSize = 14f
-                gravity = android.view.Gravity.END
-                setPadding(dp(8), dp(10), dp(8), dp(10))
-                setOnClickListener { dialog.dismiss() }
-            },
-            android.widget.LinearLayout.LayoutParams(
-                0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-            )
-        )
+        }
+        row.addView(smallLink("SKIP THIS VERSION") {
+            prefs.edit().putString("skipped_version", r.tag).apply()
+            dialog.dismiss()
+        })
+        row.addView(smallLink("LATER") { dialog.dismiss() })
         panel.addView(row)
 
-        dialog.setContentView(panel)
-        dialog.window?.apply {
-            setBackgroundDrawable(
-                android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT)
-            )
-            setLayout(
-                (activity.resources.displayMetrics.widthPixels * 0.95f).toInt(),
-                android.view.WindowManager.LayoutParams.WRAP_CONTENT
-            )
-        }
-        dialog.show()
+        showCard(activity, dialog, panel)
     }
 
     // Release notes are Markdown; show them as clean plain lines.
@@ -334,13 +474,36 @@ object UpdateChecker {
             .trim()
     }
 
+    private const val CACHE_MS = 30L * 60L * 1000L
+
+    private fun cachedResult(prefs: android.content.SharedPreferences): Result? {
+        val t = prefs.getLong("cache_time", 0L)
+        val tag = prefs.getString("cache_tag", "") ?: ""
+        if (tag.isEmpty() || System.currentTimeMillis() - t !in 0 until CACHE_MS) return null
+        return Result(
+            true, false, tag,
+            prefs.getString("cache_url", "") ?: "",
+            prefs.getString("cache_notes", "") ?: ""
+        )
+    }
+
+    private fun saveCache(prefs: android.content.SharedPreferences, r: Result) {
+        if (!r.ok) return
+        prefs.edit()
+            .putLong("cache_time", System.currentTimeMillis())
+            .putString("cache_tag", r.tag)
+            .putString("cache_url", r.url)
+            .putString("cache_notes", r.notes)
+            .apply()
+    }
+
     private fun fetchLatest(): Result {
         val fail = Result(false, false, "", "", "")
         return try {
             val conn = URL("https://api.github.com/repos/$REPO/releases/latest")
                 .openConnection() as HttpURLConnection
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
+            conn.connectTimeout = 6000
+            conn.readTimeout = 6000
             conn.setRequestProperty("Accept", "application/vnd.github+json")
             conn.setRequestProperty("User-Agent", "TorrentOr")
 
